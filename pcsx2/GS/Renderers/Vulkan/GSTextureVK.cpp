@@ -11,6 +11,12 @@
 #include "common/Console.h"
 #include "common/BitUtils.h"
 
+#ifdef ORBIS_VULKAN
+// vk-285-14: GPU-hang forensics ring (GSDeviceVK.cpp).
+void OrbisVkTraceClear(const GSTexture* tex, u32 value);
+void OrbisVkTraceTransfer(u8 kind, const GSTexture* tex, const GSVector4i& r);
+#endif
+
 VkFramebuffer GSTextureVK::CreateNullFramebuffer(u32 w, u32 h)
 {
 	const VkRenderPass rp = GSDeviceVK::GetInstance()->GetRenderPass(
@@ -313,6 +319,10 @@ VkBuffer GSTextureVK::AllocateUploadStagingBuffer(const void* data, u32 pitch, u
 void GSTextureVK::UpdateFromBuffer(VkCommandBuffer cmdbuf, int level, u32 x, u32 y, u32 width, u32 height,
 	u32 buffer_height, u32 row_length, VkBuffer buffer, u32 buffer_offset)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceTransfer(7, this, GSVector4i(static_cast<int>(x), static_cast<int>(y), static_cast<int>(x + width),
+		static_cast<int>(y + height)));
+#endif
 	const Layout old_layout = m_layout;
 	if (old_layout == Layout::Undefined)
 		TransitionToLayout(cmdbuf, Layout::TransferDst);
@@ -549,6 +559,9 @@ void GSTextureVK::CommitClear()
 
 void GSTextureVK::CommitClear(VkCommandBuffer cmdbuf)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceClear(this, m_clear_value.color); // the union's raw bits for depth too
+#endif
 	TransitionToLayout(cmdbuf, Layout::ClearDst);
 
 	if (IsDepthStencil())
@@ -896,6 +909,9 @@ void GSDownloadTextureVK::CopyFromTexture(
 	g_perfmon.Put(GSPerfMon::Readbacks, 1);
 	GSDeviceVK::GetInstance()->EndRenderPass();
 	vkTex->CommitClear();
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceTransfer(6, vkTex, src);
+#endif
 
 	const VkCommandBuffer cmdbuf = GSDeviceVK::GetInstance()->GetCurrentCommandBuffer();
 	GL_INS("GSDownloadTextureVK::CopyFromTexture: {%d,%d} %ux%u", src.left, src.top, src.width(), src.height());

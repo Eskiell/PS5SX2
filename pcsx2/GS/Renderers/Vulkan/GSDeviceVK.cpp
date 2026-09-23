@@ -28,6 +28,9 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
+#ifdef ORBIS_VULKAN
+#include <unistd.h> // vk-285-14: fsync, _exit (GPU-hang forensics)
+#endif
 
 // Tweakables
 enum : u32
@@ -1181,6 +1184,158 @@ void GSDeviceVK::ScanForCommandBufferCompletion()
 	}
 }
 
+#ifdef ORBIS_VULKAN
+// vk-285-14 (HW renderer bring-up): GPU-hang forensics. The PS5 driver's queue submit waits
+// for the GPU, so a hang surfaces as VK_ERROR_DEVICE_LOST in the vkQueueSubmit of the command
+// buffer that hung. The last draws, copies, clears, stretch draws, uploads and readbacks are
+// kept in a ring; on a lost device they are written to /data/PCSX2/vkhang.txt and the app
+// closes at once, instead of reopening the device and giving the hung GPU more work (vk-285-13
+// did that, and the console restarted). The driver writes its own dump of the hung step
+// (PS5VK_HANG_DUMP, main-boot).
+namespace
+{
+	struct OrbisVkTraceEntry
+	{
+		u64 seq;
+		u32 submit;
+		u8 kind; // 1 draw, 2 copy, 3 clear, 4 stretch, 5 multi-stretch, 6 readback, 7 upload
+		u8 topology, vs, depth, colormask, date, sampler, flags;
+		u32 blend;
+		u64 ps_lo, ps_hi;
+		u32 nverts, nindices;
+		const void* a;
+		const void* b;
+		const void* c;
+		const void* d;
+		u16 aw, ah, bw, bh, cw, ch;
+		u8 af, bf, cf, df;
+		s32 r[4];
+		u64 extra;
+	};
+	constexpr u32 ORBIS_VK_TRACE_N = 8192; // a frame of R&C draws more than 2,000 times
+	OrbisVkTraceEntry s_orbis_trace[ORBIS_VK_TRACE_N];
+	u64 s_orbis_trace_seq = 0;
+	u32 s_orbis_submit = 0;
+
+	OrbisVkTraceEntry& OrbisVkTraceNew(u8 kind)
+	{
+		OrbisVkTraceEntry& e = s_orbis_trace[s_orbis_trace_seq % ORBIS_VK_TRACE_N];
+		e = {};
+		e.seq = s_orbis_trace_seq++;
+		e.submit = s_orbis_submit;
+		e.kind = kind;
+		return e;
+	}
+
+	void OrbisVkTraceTex(const GSTexture* t, const void*& p, u16& w, u16& h, u8& f)
+	{
+		p = t;
+		if (t)
+		{
+			w = static_cast<u16>(t->GetWidth());
+			h = static_cast<u16>(t->GetHeight());
+			f = static_cast<u8>(t->GetFormat());
+		}
+	}
+
+	void OrbisVkTraceDraw(const GSHWDrawConfig& config)
+	{
+		OrbisVkTraceEntry& e = OrbisVkTraceNew(1);
+		e.topology = static_cast<u8>(config.topology);
+		e.vs = config.vs.key;
+		e.depth = config.depth.key;
+		e.colormask = config.colormask.key;
+		e.date = static_cast<u8>(config.destination_alpha);
+		e.sampler = config.sampler.key;
+		e.flags = (config.require_one_barrier ? 1 : 0) | (config.require_full_barrier ? 2 : 0) |
+				  (config.alpha_second_pass.enable ? 4 : 0) | (config.blend_multi_pass.enable ? 8 : 0) |
+				  (config.line_expand ? 16 : 0) | (static_cast<u8>(config.tex_hazard) << 5);
+		e.blend = config.blend.key;
+		e.ps_lo = config.ps.key_lo;
+		e.ps_hi = config.ps.key_hi;
+		e.nverts = config.nverts;
+		e.nindices = config.nindices;
+		OrbisVkTraceTex(config.rt, e.a, e.aw, e.ah, e.af);
+		OrbisVkTraceTex(config.ds, e.b, e.bw, e.bh, e.bf);
+		OrbisVkTraceTex(config.tex, e.c, e.cw, e.ch, e.cf);
+		u16 pw = 0, ph = 0;
+		OrbisVkTraceTex(config.pal, e.d, pw, ph, e.df);
+		e.r[0] = config.drawarea.x;
+		e.r[1] = config.drawarea.y;
+		e.r[2] = config.drawarea.z;
+		e.r[3] = config.drawarea.w;
+		e.extra = (static_cast<u64>(static_cast<u32>(config.scissor.x)) & 0xffff) |
+				  ((static_cast<u64>(static_cast<u32>(config.scissor.y)) & 0xffff) << 16) |
+				  ((static_cast<u64>(static_cast<u32>(config.scissor.z)) & 0xffff) << 32) |
+				  ((static_cast<u64>(static_cast<u32>(config.scissor.w)) & 0xffff) << 48);
+	}
+
+	void OrbisVkTraceOp(u8 kind, const GSTexture* dst, const GSTexture* src, const GSVector4i& r, u64 extra)
+	{
+		OrbisVkTraceEntry& e = OrbisVkTraceNew(kind);
+		OrbisVkTraceTex(dst, e.a, e.aw, e.ah, e.af);
+		OrbisVkTraceTex(src, e.b, e.bw, e.bh, e.bf);
+		e.r[0] = r.x;
+		e.r[1] = r.y;
+		e.r[2] = r.z;
+		e.r[3] = r.w;
+		e.extra = extra;
+	}
+
+	[[noreturn]] void OrbisVkHangExit(const char* where)
+	{
+		const u32 hung = s_orbis_submit;
+		if (FILE* f = fopen("/data/PCSX2/vkhang.txt", "w"))
+		{
+			fprintf(f, "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.\n", where, hung);
+			fprintf(f, "kinds: 1 draw, 2 copy, 3 clear, 4 stretch, 5 multi-stretch, 6 readback, 7 upload; tex = ptr WxH f<GSTexture::Format>\n");
+			fprintf(f, "draw: topo(0 pt,1 line,2 tri) vs depth colormask date(0 off,1 stencil,2 stencilone,3 primid,4 full) sampler flags(1 one-barrier,2 full-barrier,4 alpha2,8 blend-mp,16 line-expand,32+ hazard) blend ps nv/ni rt ds tex pal drawarea scissor\n");
+			const u64 first = s_orbis_trace_seq > ORBIS_VK_TRACE_N ? s_orbis_trace_seq - ORBIS_VK_TRACE_N : 0;
+			for (u64 q = first; q < s_orbis_trace_seq; q++)
+			{
+				const OrbisVkTraceEntry& e = s_orbis_trace[q % ORBIS_VK_TRACE_N];
+				if (e.submit + 2 < hung)
+					continue;
+				if (e.kind == 1)
+					fprintf(f,
+						"%llu s%u draw topo=%u vs=%02x depth=%02x cm=%x date=%u samp=%02x fl=%02x blend=%08x ps=%016llx.%016llx "
+						"nv=%u ni=%u rt=%p %ux%u f%u ds=%p %ux%u f%u tex=%p %ux%u f%u pal=%p f%u area=%d,%d,%d,%d sc=%llx\n",
+						static_cast<unsigned long long>(e.seq), e.submit, e.topology, e.vs, e.depth, e.colormask, e.date,
+						e.sampler, e.flags, e.blend, static_cast<unsigned long long>(e.ps_hi),
+						static_cast<unsigned long long>(e.ps_lo), e.nverts, e.nindices, e.a, e.aw, e.ah, e.af, e.b, e.bw,
+						e.bh, e.bf, e.c, e.cw, e.ch, e.cf, e.d, e.df, e.r[0], e.r[1], e.r[2], e.r[3],
+						static_cast<unsigned long long>(e.extra));
+				else
+					fprintf(f, "%llu s%u %s dst=%p %ux%u f%u src=%p %ux%u f%u rect=%d,%d,%d,%d x=%llx\n",
+						static_cast<unsigned long long>(e.seq), e.submit,
+						e.kind == 2 ? "copy" : e.kind == 3 ? "clear" : e.kind == 4 ? "stretch" : e.kind == 5 ? "mstretch" :
+						e.kind == 6 ? "readback" : "upload",
+						e.a, e.aw, e.ah, e.af, e.b, e.bw, e.bh, e.bf, e.r[0], e.r[1], e.r[2], e.r[3],
+						static_cast<unsigned long long>(e.extra));
+			}
+			fflush(f);
+			fsync(fileno(f));
+			fclose(f);
+		}
+		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote /data/PCSX2/vkhang.txt; closing the app\n",
+			where, hung);
+		fflush(stdout);
+		fflush(stderr);
+		_exit(3);
+	}
+} // namespace
+
+void OrbisVkTraceClear(const GSTexture* tex, u32 value)
+{
+	OrbisVkTraceOp(3, tex, nullptr, GSVector4i::zero(), value);
+}
+
+void OrbisVkTraceTransfer(u8 kind, const GSTexture* tex, const GSVector4i& r)
+{
+	OrbisVkTraceOp(kind, tex, nullptr, r, 0);
+}
+#endif
+
 void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
 {
 	// Wait for this command buffer to be completed.
@@ -1188,6 +1343,10 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
 	if (res != VK_SUCCESS)
 	{
 		LOG_VULKAN_ERROR(res, "vkWaitForFences failed: ");
+#ifdef ORBIS_VULKAN
+		if (res == VK_ERROR_DEVICE_LOST)
+			OrbisVkHangExit("vkWaitForFences");
+#endif
 		m_last_submit_failed = true;
 		return;
 	}
@@ -1211,19 +1370,52 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
 	m_completed_fence_counter = now_completed_counter;
 }
 
+#ifdef ORBIS_VULKAN
+// vk-285-13 (HW renderer bring-up): the PS5 driver refuses what it cannot encode yet, and
+// vkEndCommandBuffer then fails with the reason on stderr and in the emulog. Instead of
+// stopping at the first refusal, the frame's commands are dropped: the pool is reset and
+// both buffers are re-recorded empty, so the fence and the swap chain's semaphores still
+// signal. One run then lists every refusal the game reaches.
+static void OrbisDropRefusedCommands(VkDevice device, VkCommandPool pool, VkCommandBuffer* buffers, bool init_used)
+{
+	static unsigned s_dropped = 0;
+	if ((s_dropped++ % 60) == 0)
+	{
+		printf("[vkhw] the driver refused a command buffer: frame %u dropped (%u so far; reasons in stderr.log/emulog)\n",
+			s_dropped, s_dropped);
+		fflush(stdout);
+	}
+	vkResetCommandPool(device, pool, 0);
+	const VkCommandBufferBeginInfo begin_info = {
+		VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
+	for (u32 i = init_used ? 0u : 1u; i < 2; i++)
+	{
+		vkBeginCommandBuffer(buffers[i], &begin_info);
+		vkEndCommandBuffer(buffers[i]);
+	}
+}
+#endif
+
 void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 {
 	FrameResources& resources = m_frame_resources[m_current_frame];
 
 	// End the current command buffer.
 	VkResult res;
+#ifdef ORBIS_VULKAN
+	bool orbis_refused = false;
+#endif
 	if (resources.init_buffer_used)
 	{
 		res = vkEndCommandBuffer(resources.command_buffers[0]);
 		if (res != VK_SUCCESS)
 		{
 			LOG_VULKAN_ERROR(res, "vkEndCommandBuffer failed: ");
+#ifdef ORBIS_VULKAN
+			orbis_refused = true;
+#else
 			pxFailRel("Failed to end command buffer");
+#endif
 		}
 	}
 
@@ -1245,8 +1437,22 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 	if (res != VK_SUCCESS)
 	{
 		LOG_VULKAN_ERROR(res, "vkEndCommandBuffer failed: ");
+#ifdef ORBIS_VULKAN
+		orbis_refused = true;
+#else
 		pxFailRel("Failed to end command buffer");
+#endif
 	}
+#ifdef ORBIS_VULKAN
+	if (orbis_refused)
+	{
+		OrbisDropRefusedCommands(m_device, resources.command_pool, resources.command_buffers.data(),
+			resources.init_buffer_used);
+		resources.timestamp_written = false;
+		if (resources.pipeline_statistics_query != QueryState::None)
+			resources.pipeline_statistics_query = QueryState::None;
+	}
+#endif
 
 	// This command buffer now has commands, so can't be re-used without waiting.
 	resources.needs_fence_wait = true;
@@ -1325,9 +1531,16 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 	if (res != VK_SUCCESS)
 	{
 		LOG_VULKAN_ERROR(res, "vkQueueSubmit failed: ");
+#ifdef ORBIS_VULKAN
+		if (res == VK_ERROR_DEVICE_LOST)
+			OrbisVkHangExit("vkQueueSubmit");
+#endif
 		m_last_submit_failed = true;
 		return;
 	}
+#ifdef ORBIS_VULKAN
+	s_orbis_submit++;
+#endif
 
 	if (spin_cycles != 0)
 		SubmitSpinCommand(m_current_frame, spin_cycles);
@@ -1541,6 +1754,33 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(VkDebugUtilsMessageSeverit
 	VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
 	void* pUserData)
 {
+#ifdef ORBIS_VULKAN
+	// vk-285-13 (HW renderer bring-up): a refused frame is dropped and the next one usually
+	// hits the same refusal, so each distinct message is logged three times, then every 500th.
+	{
+		static std::mutex s_lock;
+		static std::array<std::pair<u64, u32>, 128> s_seen{};
+		const char* msg = pCallbackData->pMessage ? pCallbackData->pMessage : "";
+		u64 h = 1469598103934665603ull;
+		for (const char* c = msg; *c; c++)
+			h = (h ^ static_cast<u8>(*c)) * 1099511628211ull;
+		std::lock_guard<std::mutex> guard(s_lock);
+		u32 count = 0;
+		for (auto& e : s_seen)
+		{
+			if (e.first == h || e.first == 0)
+			{
+				e.first = h;
+				count = ++e.second;
+				break;
+			}
+		}
+		if (count > 3 && (count % 500) != 0)
+			return VK_FALSE;
+		if (count > 3)
+			Console.Error("VK: debug report repeated %u times:", count);
+	}
+#endif
 	if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 	{
 		Console.Error("VK: debug report: (%s) %s",
@@ -2806,6 +3046,13 @@ bool GSDeviceVK::CheckFeatures()
 
 	// Use D32F depth instead of D32S8 when we have framebuffer fetch.
 	m_features.stencil_buffer &= !m_features.framebuffer_fetch;
+#ifdef ORBIS_VULKAN
+	// vk-285-13 (HW renderer bring-up): D32F depth. The PS5 driver copies and clears a
+	// D32_SFLOAT image's depth (and samples it), while its D32_SFLOAT_S8_UINT entry has no
+	// transfer yet, and PCSX2 creates every texture with TRANSFER_SRC|DST. Without a
+	// stencil buffer, DATE uses the texture-barrier path.
+	m_features.stencil_buffer = false;
+#endif
 
 	// whether we can do point/line expand depends on the range of the device
 	const float f_upscale = static_cast<float>(GSConfig.UpscaleMultiplier);
@@ -2975,6 +3222,9 @@ std::unique_ptr<GSDownloadTexture> GSDeviceVK::CreateDownloadTexture(u32 width, 
 
 void GSDeviceVK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceOp(2, dTex, sTex, r, (static_cast<u64>(destY) << 32) | destX);
+#endif
 	// Empty rect, abort copy.
 	if (r.rempty())
 	{
@@ -3133,6 +3383,10 @@ void GSDeviceVK::DrawMultiStretchRects(
 void GSDeviceVK::DoMultiStretchRects(
 	const MultiStretchRect* rects, u32 num_rects, GSTextureVK* dTex, ShaderConvertSelector shader)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceOp(5, dTex, num_rects ? rects[0].src : nullptr, GSVector4i(num_rects, 0, 0, 0),
+		static_cast<u64>(static_cast<int>(shader.Shader())));
+#endif
 	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 	
 	// Set up vertices first.
@@ -3250,6 +3504,9 @@ void GSDeviceVK::BeginRenderPassForStretchRect(
 void GSDeviceVK::DoStretchRect(GSTextureVK* sTex, const GSVector4& sRect, GSTextureVK* dTex, const GSVector4& dRect,
 	VkPipeline pipeline, Filter filter, bool allow_discard)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceOp(4, dTex, sTex, GSVector4i(dRect), reinterpret_cast<u64>(pipeline));
+#endif
 	if (sTex->GetLayout() != GSTextureVK::Layout::ShaderReadOnly)
 	{
 		// can't transition in a render pass
@@ -6045,6 +6302,9 @@ GSTextureVK* GSDeviceVK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 
 void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 {
+#ifdef ORBIS_VULKAN
+	OrbisVkTraceDraw(config);
+#endif
 	const GSVector2i rtsize(config.rt ? config.rt->GetSize() : config.ds->GetSize());
 	GSTextureVK* draw_rt = config.ps.HasColorROV() ? nullptr : static_cast<GSTextureVK*>(config.rt);
 	GSTextureVK* draw_ds = config.ps.HasDepthROV() ? nullptr : static_cast<GSTextureVK*>(config.ds);
