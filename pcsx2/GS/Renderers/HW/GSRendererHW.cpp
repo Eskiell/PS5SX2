@@ -167,7 +167,19 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 	TEX0.TBW = curFramebuffer.FBW;
 	TEX0.PSM = curFramebuffer.PSM;
 
-	if (GSTextureCache::Target* rt = g_texture_cache->LookupDisplayTarget(TEX0, framebufferSize, GetTextureScaleFactor(), false))
+	GSTextureCache::Target* rt = g_texture_cache->LookupDisplayTarget(TEX0, framebufferSize, GetTextureScaleFactor(), false);
+	{
+		static unsigned long long orbis_go = 0;
+		unsigned long long n = orbis_go++;
+		if (n < 4 || (n % 200) == 0)
+		{
+			printf("[gsout] #%llu i=%d block=%05x fbw=%u psm=%u size=%dx%d rt=%p tex=%p\n", n, i,
+				(unsigned)TEX0.TBP0, (unsigned)TEX0.TBW, (unsigned)TEX0.PSM,
+				framebufferSize.x, framebufferSize.y, (void*)rt, rt ? (void*)rt->m_texture : nullptr);
+			fflush(stdout);
+		}
+	}
+	if (rt)
 	{
 		const u32 bp_adj = (TEX0.TBP0 < rt->m_TEX0.TBP0 && rt->UnwrappedEndBlock() > GS_MAX_BLOCKS) ? (TEX0.TBP0 + GS_MAX_BLOCKS) : TEX0.TBP0;
 		rt->Update();
@@ -2756,8 +2768,109 @@ void GSRendererHW::RoundSpriteOffset()
 	}
 }
 
+// Orbis profiling: per-draw CPU time of the whole HW draw vs the GL submission part.
+const GSDrawingContext* g_orbis_ctx; unsigned g_orbis_tme, g_orbis_prim, g_orbis_verts;
+unsigned long long g_orbis_mark[5], g_orbis_draw_t0, g_orbis_m2[6], g_orbis_d[5], g_orbis_gap[6], g_orbis_gap_n, g_orbis_early_n, g_orbis_early_ticks;
+unsigned long long g_orbis_t0, g_orbis_sec[5], g_orbis_read_ticks, g_orbis_read_n, g_orbis_draw_max, g_orbis_draw_slow;
+unsigned long long g_orbis_hwdraw_ticks, g_orbis_hwdraw_n, g_orbis_renderhw_ticks, g_orbis_renderhw_n;
+struct OrbisHwDrawTimer
+{
+	const unsigned long long t0 = (g_orbis_draw_t0 = __builtin_ia32_rdtsc(), g_orbis_mark[0] = g_orbis_mark[1] = g_orbis_mark[2] = g_orbis_mark[3] = g_orbis_mark[4] = 0, g_orbis_m2[0] = g_orbis_m2[1] = g_orbis_m2[2] = g_orbis_m2[3] = g_orbis_m2[4] = g_orbis_m2[5] = 0, g_orbis_d[0] = g_orbis_d[1] = g_orbis_d[2] = g_orbis_d[3] = g_orbis_d[4] = 0, g_orbis_draw_t0);
+	~OrbisHwDrawTimer()
+	{
+		{
+			const unsigned long long end = __builtin_ia32_rdtsc();
+			if (g_orbis_mark[3] && g_orbis_mark[0] && g_orbis_mark[1] && g_orbis_mark[4])
+			{
+				g_orbis_gap[0] += g_orbis_mark[3] - g_orbis_d[3] - t0;               // prefix -> texminmax
+				g_orbis_gap[1] += g_orbis_mark[0] - g_orbis_d[0] - g_orbis_mark[3];  // texminmax -> lookup src
+				g_orbis_gap[2] += g_orbis_mark[1] - g_orbis_d[1] - g_orbis_mark[0];  // src -> rt (incl. ds a)
+				g_orbis_gap[3] += g_orbis_mark[4] - g_orbis_d[4] - g_orbis_mark[1];  // rt -> DrawPrims (incl. ds b)
+				g_orbis_gap[4] += end - g_orbis_mark[4];                             // after DrawPrims
+				++g_orbis_gap_n;
+			}
+			else
+			{
+				++g_orbis_early_n;
+				g_orbis_early_ticks += end - t0;
+				static unsigned printed;
+				if (end - t0 > 1596000ull && printed < 24)
+				{
+					++printed;
+					auto rel = [&](unsigned long long m) { return m ? (m - t0) / 1596.0 : -1.0; };
+					const GSDrawingContext* dc = g_orbis_ctx;
+					std::printf("[earlydraw] us=%.0f badframe=%.0f old_rt=%.0f/%.0f sprite=%.0f m_r=%.0f texminmax=%.0f src=%.0f ds=%.0f rt=%.0f prims=%.0f | tme=%u prim=%u verts=%u fbp=%05x fbw=%u psm=%u zbp=%05x fbmsk=%08x\n",
+						(end - t0) / 1596.0, rel(g_orbis_m2[0]), rel(g_orbis_m2[1]), rel(g_orbis_m2[2]), rel(g_orbis_m2[3]), rel(g_orbis_m2[4]),
+						rel(g_orbis_mark[3]), rel(g_orbis_mark[0]), rel(g_orbis_mark[2]), rel(g_orbis_mark[1]), rel(g_orbis_mark[4]),
+						g_orbis_tme, g_orbis_prim, g_orbis_verts,
+						dc ? (unsigned)dc->FRAME.Block() : 0u, dc ? (unsigned)dc->FRAME.FBW : 0u, dc ? (unsigned)dc->FRAME.PSM : 0u,
+						dc ? (unsigned)dc->ZBUF.Block() : 0u, dc ? (unsigned)dc->FRAME.FBMSK : 0u);
+					std::fflush(stdout);
+				}
+			}
+			if (end - t0 > 159600000ull)
+			{
+				auto rel = [&](unsigned long long m) { return m ? (m - t0) / 1596000.0 : -1.0; };
+				std::printf("[slowdraw] total_ms=%.1f texminmax_end=%.1f src_end=%.1f ds_end=%.1f rt_end=%.1f drawprims_end=%.1f (-1 = not reached)\n",
+					(end - t0) / 1596000.0, rel(g_orbis_mark[3]), rel(g_orbis_mark[0]), rel(g_orbis_mark[2]), rel(g_orbis_mark[1]), rel(g_orbis_mark[4]));
+				std::printf("[slowdraw2] badframe_chk=%.1f before_old_rt=%.1f after_old_rt=%.1f sprite_tex=%.1f m_r=%.1f\n",
+					rel(g_orbis_m2[0]), rel(g_orbis_m2[1]), rel(g_orbis_m2[2]), rel(g_orbis_m2[3]), rel(g_orbis_m2[4]));
+				std::fflush(stdout);
+			}
+		}
+		const unsigned long long orbis_dt = __builtin_ia32_rdtsc() - t0;
+		g_orbis_hwdraw_ticks += orbis_dt;
+		if (orbis_dt > g_orbis_draw_max) g_orbis_draw_max = orbis_dt;
+		if (orbis_dt > 1596000ull) ++g_orbis_draw_slow;
+		if ((++g_orbis_hwdraw_n % 20000) == 0)
+		{
+			std::printf("[hwprof] draws=%llu hwdraw_us=%.1f renderhw_us=%.1f (renderhw calls=%llu) pcsx2_only_us=%.1f\n",
+				g_orbis_hwdraw_n, g_orbis_hwdraw_ticks / 1596.0 / 20000.0,
+				g_orbis_renderhw_n ? g_orbis_renderhw_ticks / 1596.0 / (double)g_orbis_renderhw_n : 0.0, g_orbis_renderhw_n,
+				(g_orbis_hwdraw_ticks - g_orbis_renderhw_ticks) / 1596.0 / 20000.0);
+			std::fflush(stdout);
+			std::printf("[drawsec] us/draw: lookup_src=%.1f lookup_rt=%.1f lookup_ds=%.1f texminmax=%.1f drawprims=%.1f\n",
+				g_orbis_sec[0] / 1596.0 / 20000.0, g_orbis_sec[1] / 1596.0 / 20000.0, g_orbis_sec[2] / 1596.0 / 20000.0,
+				g_orbis_sec[3] / 1596.0 / 20000.0, g_orbis_sec[4] / 1596.0 / 20000.0);
+			std::printf("[readprof] reads=%llu read_us/draw=%.1f read_avg_us=%.1f | draw_max_ms=%.2f draws_over_1ms=%llu\n",
+				g_orbis_read_n, g_orbis_read_ticks / 1596.0 / 20000.0,
+				g_orbis_read_n ? g_orbis_read_ticks / 1596.0 / (double)g_orbis_read_n : 0.0,
+				g_orbis_draw_max / 1596000.0, g_orbis_draw_slow);
+			g_orbis_read_ticks = g_orbis_read_n = g_orbis_draw_max = g_orbis_draw_slow = 0;
+			{
+				const double gn = g_orbis_gap_n ? (double)g_orbis_gap_n : 1.0;
+				std::printf("[drawgap] full=%llu us: prefix=%.1f pre_src=%.1f src_to_rt=%.1f rt_to_prims=%.1f tail=%.1f | early=%llu early_avg_us=%.1f\n",
+					g_orbis_gap_n, g_orbis_gap[0] / 1596.0 / gn, g_orbis_gap[1] / 1596.0 / gn, g_orbis_gap[2] / 1596.0 / gn,
+					g_orbis_gap[3] / 1596.0 / gn, g_orbis_gap[4] / 1596.0 / gn, g_orbis_early_n,
+					g_orbis_early_n ? g_orbis_early_ticks / 1596.0 / (double)g_orbis_early_n : 0.0);
+				for (auto& v : g_orbis_gap) v = 0;
+				g_orbis_gap_n = g_orbis_early_n = g_orbis_early_ticks = 0;
+			}
+			for (auto& v : g_orbis_sec) v = 0;
+			g_orbis_hwdraw_ticks = g_orbis_renderhw_ticks = g_orbis_renderhw_n = 0;
+		}
+	}
+};
+
 void GSRendererHW::Draw()
 {
+	OrbisHwDrawTimer orbis_hwdraw_timer;
+	g_orbis_ctx = m_context; g_orbis_tme = PRIM->TME; g_orbis_prim = (unsigned)m_vt.m_primclass; g_orbis_verts = (unsigned)m_index->tail;
+	// Orbis: bring-up draw counter + target info.
+	{
+		static unsigned long long orbis_draws = 0;
+		unsigned long long n = orbis_draws++;
+		if (n < 3)
+		{
+			const GSDrawingContext* dc = m_context;
+			printf("[gshw] Draw #%llu fbp=%05x fbw=%u psm=%u zbp=%05x zpsm=%u prim=%u verts=%u tex0=%05x tw=%u th=%u tpsm=%u\n",
+				n, (unsigned)dc->FRAME.Block(), (unsigned)dc->FRAME.FBW, (unsigned)dc->FRAME.PSM,
+				(unsigned)dc->ZBUF.Block(), (unsigned)dc->ZBUF.PSM,
+				(unsigned)m_vt.m_primclass, (unsigned)m_index->tail,
+				(unsigned)dc->TEX0.TBP0, (unsigned)dc->TEX0.TW, (unsigned)dc->TEX0.TH, (unsigned)dc->TEX0.PSM);
+			fflush(stdout);
+		}
+	}
 	static u32 num_skipped_channel_shuffle_draws = 0;
 	GSVertexBuff& vtx_buff = *m_vertex;
 	GSIndexBuff& idx_buff = *m_index;
@@ -2770,6 +2883,7 @@ void GSRendererHW::Draw()
 	m_cached_ctx.FRAME = context->FRAME;
 	m_cached_ctx.ZBUF = context->ZBUF;
 
+g_orbis_m2[0] = __builtin_ia32_rdtsc();
 	if (IsBadFrame())
 	{
 		GL_INS("HW: Warning skipping a draw call (%lld)", s_n);
@@ -3022,8 +3136,10 @@ void GSRendererHW::Draw()
 		FRAME.TBW = m_conf.colclip_frame.FBW;
 		FRAME.PSM = m_conf.colclip_frame.PSM;
 
+		g_orbis_m2[1] = __builtin_ia32_rdtsc();
 		GSTextureCache::Target* old_rt = g_texture_cache->LookupDrawTarget(FRAME, GSVector2i(1, 1), GetTextureScaleFactor(), GSTextureCache::RenderTarget, true,
 			fm, false, true, true, GSVector4i(0, 0, 1, 1), true, false, false);
+		g_orbis_m2[2] = __builtin_ia32_rdtsc();
 
 		if (old_rt)
 		{
@@ -3043,6 +3159,7 @@ void GSRendererHW::Draw()
 			DevCon.Warning("HW: Error resolving colclip texture for pre-draw resolve");
 	}
 
+	g_orbis_m2[3] = __builtin_ia32_rdtsc();
 	const bool draw_sprite_tex = PRIM->TME && (m_vt.m_primclass == GS_SPRITE_CLASS);
 
 	// GS doesn't fill the right or bottom edges of sprites/triangles, and for a pixel to be shaded, the vertex
@@ -3060,6 +3177,7 @@ void GSRendererHW::Draw()
 	//                                |       0.5,2.25 |        1-1 |    1 |
 	//                                |        0.5,2.5 |        1-2 |    2 |
 	//                                --------------------------------------
+	g_orbis_m2[4] = __builtin_ia32_rdtsc();
 	m_r = GSVector4i((m_vt.m_min.p.upld(m_vt.m_max.p) + GSVector4::cxpr(0.4f)).round<Round_NearestInt>());
 	m_r = m_r.blend8(m_r + GSVector4i::cxpr(0, 0, 1, 1), (m_r.xyxy() == m_r.zwzw()));
 	m_r_no_scissor = m_r;
@@ -3427,7 +3545,7 @@ void GSRendererHW::Draw()
 			TEX0 = m_cached_ctx.TEX0;
 		}
 
-		tmm = GetTextureMinMax(TEX0, MIP_CLAMP, m_vt.IsLinear(), false);
+		{ g_orbis_t0 = __builtin_ia32_rdtsc(); tmm = GetTextureMinMax(TEX0, MIP_CLAMP, m_vt.IsLinear(), false); g_orbis_sec[3] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[3] = __builtin_ia32_rdtsc(); g_orbis_d[3] = g_orbis_mark[3] - g_orbis_t0; }
 
 		// Snowblind games set TW/TH to 1024, and use UVs for smaller textures inside that.
 		// Such textures usually contain junk in local memory, so try to make them smaller based on UVs.
@@ -3549,9 +3667,9 @@ void GSRendererHW::Draw()
 		}
 		else
 		{
-			src = tex_psm.depth ? g_texture_cache->LookupDepthSource(true, TEX0, m_cached_ctx.TEXA, MIP_CLAMP, tmm.coverage, possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha)
+			{ g_orbis_t0 = __builtin_ia32_rdtsc(); src = tex_psm.depth ? g_texture_cache->LookupDepthSource(true, TEX0, m_cached_ctx.TEXA, MIP_CLAMP, tmm.coverage, possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha)
 			                    : g_texture_cache->LookupSource(true, TEX0, m_cached_ctx.TEXA, MIP_CLAMP, tmm.coverage, (GSConfig.HWMipmap || GSConfig.TriFilter == TriFiltering::Forced) ? &hash_lod_range : nullptr,
-			                         possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha);
+			                         possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha); g_orbis_sec[0] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[0] = __builtin_ia32_rdtsc(); g_orbis_d[0] = g_orbis_mark[0] - g_orbis_t0; }
 
 			if (!src) [[unlikely]]
 			{
@@ -3720,9 +3838,9 @@ void GSRendererHW::Draw()
 		ZBUF_TEX0.TBW = m_cached_ctx.FRAME.FBW;
 		ZBUF_TEX0.PSM = m_cached_ctx.ZBUF.PSM;
 
-		ds = g_texture_cache->LookupDrawTarget(ZBUF_TEX0, t_size, target_scale, GSTextureCache::DepthStencil,
+		{ g_orbis_t0 = __builtin_ia32_rdtsc(); ds = g_texture_cache->LookupDrawTarget(ZBUF_TEX0, t_size, target_scale, GSTextureCache::DepthStencil,
 			m_cached_ctx.DepthWrite(), 0, force_preload, preserve_depth, preserve_depth, unclamped_draw_rect, IsPossibleChannelShuffle(), is_possible_mem_clear && ZBUF_TEX0.TBP0 != m_cached_ctx.FRAME.Block(), !no_rt,
-			src, nullptr, -1);
+			src, nullptr, -1); g_orbis_sec[2] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[2] = __builtin_ia32_rdtsc(); g_orbis_d[2] = g_orbis_mark[2] - g_orbis_t0; }
 
 		ZBUF_TEX0.TBW = m_channel_shuffle ? src->m_from_target_TEX0.TBW : m_cached_ctx.FRAME.FBW;
 
@@ -3982,9 +4100,9 @@ void GSRendererHW::Draw()
 		// Of course if this size is different (in width) or this is a shuffle happening, this will be bypassed.
 		const bool preserve_downscale_draw = (GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off && ((std::abs(scale_draw) == 1 && !scaled_copy) || (scale_draw == 0 && src && src->m_from_target && src->m_from_target->m_downscaled))) || is_possible_mem_clear == ClearType::ClearWithDraw;
 
-		rt = g_texture_cache->LookupDrawTarget(FRAME_TEX0, t_size, ((src && src->m_scale != 1) && (GSConfig.UserHacks_NativeScaling == GSNativeScaling::Normal || GSConfig.UserHacks_NativeScaling == GSNativeScaling::NormalUpscaled) && !possible_shuffle) ? GetTextureScaleFactor() : target_scale, GSTextureCache::RenderTarget, true,
+		{ g_orbis_t0 = __builtin_ia32_rdtsc(); rt = g_texture_cache->LookupDrawTarget(FRAME_TEX0, t_size, ((src && src->m_scale != 1) && (GSConfig.UserHacks_NativeScaling == GSNativeScaling::Normal || GSConfig.UserHacks_NativeScaling == GSNativeScaling::NormalUpscaled) && !possible_shuffle) ? GetTextureScaleFactor() : target_scale, GSTextureCache::RenderTarget, true,
 			fm, force_preload, preserve_rt_rgb, preserve_rt_alpha, lookup_rect, possible_shuffle, is_possible_mem_clear && FRAME_TEX0.TBP0 != m_cached_ctx.ZBUF.Block(),
-			GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off && preserve_downscale_draw && is_possible_mem_clear != ClearType::NormalClear, src, ds, (no_ds || !ds) ? -1 : (m_cached_ctx.ZBUF.Block() - ds->m_TEX0.TBP0));
+			GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off && preserve_downscale_draw && is_possible_mem_clear != ClearType::NormalClear, src, ds, (no_ds || !ds) ? -1 : (m_cached_ctx.ZBUF.Block() - ds->m_TEX0.TBP0)); g_orbis_sec[1] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[1] = __builtin_ia32_rdtsc(); g_orbis_d[1] = g_orbis_mark[1] - g_orbis_t0; }
 
 		// Draw skipped because it was a clear and there was no target.
 		if (!rt)
@@ -4365,9 +4483,9 @@ void GSRendererHW::Draw()
 		ZBUF_TEX0.TBW = m_cached_ctx.FRAME.FBW;
 		ZBUF_TEX0.PSM = m_cached_ctx.ZBUF.PSM;
 
-		ds = g_texture_cache->LookupDrawTarget(ZBUF_TEX0, t_size, target_scale, GSTextureCache::DepthStencil,
+		{ g_orbis_t0 = __builtin_ia32_rdtsc(); ds = g_texture_cache->LookupDrawTarget(ZBUF_TEX0, t_size, target_scale, GSTextureCache::DepthStencil,
 			m_cached_ctx.DepthWrite(), 0, force_preload, preserve_depth, preserve_depth, unclamped_draw_rect, IsPossibleChannelShuffle(), is_possible_mem_clear && ZBUF_TEX0.TBP0 != m_cached_ctx.FRAME.Block(), false,
-			src, nullptr, -1);
+			src, nullptr, -1); g_orbis_sec[2] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[2] = __builtin_ia32_rdtsc(); g_orbis_d[2] = g_orbis_mark[2] - g_orbis_t0; }
 
 		ZBUF_TEX0.TBW = m_channel_shuffle ? src->m_from_target_TEX0.TBW : m_cached_ctx.FRAME.FBW;
 
@@ -5141,7 +5259,7 @@ void GSRendererHW::Draw()
 	const GSVector4i real_rect = m_r;
 
 	if (!skip_draw)
-		DrawPrims(rt, ds, src, tmm);
+		{ g_orbis_t0 = __builtin_ia32_rdtsc(); DrawPrims(rt, ds, src, tmm); g_orbis_sec[4] += __builtin_ia32_rdtsc() - g_orbis_t0; g_orbis_mark[4] = __builtin_ia32_rdtsc(); g_orbis_d[4] = g_orbis_mark[4] - g_orbis_t0; }
 
 
 	// Temporary source *must* be invalidated before normal, because otherwise it'll be double freed.

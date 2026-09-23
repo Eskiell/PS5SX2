@@ -1,3 +1,4 @@
+#include <unistd.h>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -338,6 +339,20 @@ _vifT int nVifUnpack(const u8* data)
 	const bool isFill = (vifRegs.cycle.cl < wl);
 	s32        size   = ret << 2;
 
+	{
+		// Orbis: guard the partial-transfer staging buffer against overflow.
+		const unsigned end_off = v.bSize + (unsigned)size;
+		if (end_off > sizeof(v.buffer))
+		{
+			vif.pass = 0;
+			vif.tag.size = 0;
+			vif.cmd = 0;
+			vifRegs.num = 0;
+			v.bSize = 0;
+			return 0;
+		}
+	}
+
 	if (ret == vif.tag.size) // Full Transfer
 	{
 		if (v.bSize) // Last transfer was partial
@@ -480,18 +495,25 @@ __ri void _nVifUnpackLoop(const u8* data)
 	pxAssume(vif.cl == 0);
 	//pxAssume (vifRegs.cycle.wl > 0);
 
+	{
+		if (vifRegs.num == 0)
+			return;
+	}
+
 	do
 	{
 		u8* dest = getVUptr(idx, vif.tag.addr);
 
-		if (doMode)
+		static const bool s_ps5_cvif = (access("/data/PCSX2/cvif", 0) == 0);
+		if (doMode || s_ps5_cvif)
 		{
 			//if (1) {
 			ft(dest, data);
 		}
 		else
 		{
-			//DevCon.WriteLn("SSE Unpack!");
+			// Orbis: SSE unpackers (nVifUpk) now work: the emitter's far
+			// address paths use movabs for the >4GB direct-mapped memory.
 			uint cl3 = std::min(vif.cl, 3);
 			fnbase[cl3](dest, data);
 		}

@@ -121,6 +121,7 @@ void MTGS::StartThread()
 		return;
 
 	pxAssertRel(!s_open_flag.load(), "GS thread should not be opened when starting");
+	s_thread.SetStackSize(16 * 1024 * 1024);
 	s_sem_event.Reset();
 	s_shutdown_flag.store(false, std::memory_order_release);
 	s_thread.Start(&MTGS::ThreadEntryPoint);
@@ -144,6 +145,8 @@ void MTGS::ShutdownThread()
 void MTGS::ThreadEntryPoint()
 {
 	Threading::SetNameOfCurrentThread("GS");
+	printf("[mtgs] thread tid=%llu\n", (unsigned long long)pthread_self());
+	fflush(stdout);
 
 	// GS can hit SMC write traps when executing InitAndReadFIFO
 	// As racey as it sounds, it should be safe, since InitAndReadFIFO is requested and immediately waited for,
@@ -169,9 +172,11 @@ void MTGS::ThreadEntryPoint()
 		}
 
 		// try initializing.. this could fail
+		Console.WriteLn("[dbg] mtgs: GSopen begin renderer=%d", (int)EmuConfig.GS.Renderer);
 		std::memcpy(RingBuffer.Regs, PS2MEM_GS, sizeof(PS2MEM_GS));
 		const bool opened = GSopen(EmuConfig.GS, EmuConfig.GS.Renderer, RingBuffer.Regs,
 			VMManager::GetEffectiveVSyncMode(), VMManager::ShouldAllowPresentThrottle());
+		Console.WriteLn("[dbg] mtgs: GSopen end opened=%d", (int)opened);
 		s_open_flag.store(opened, std::memory_order_release);
 
 		// notify emu thread that we finished opening (or failed)
@@ -236,6 +241,7 @@ struct RingCmdPacket_Vsync
 	u32 pad[3];
 };
 
+unsigned long long g_orbis_ee_vsyncq_ticks; // eerec-281: EE blocked because the GS is VsyncQueueSize frames behind
 void MTGS::PostVsyncStart(bool registers_written)
 {
 	// Optimization note: Typically regset1 isn't needed.  The regs in that area are typically
@@ -277,7 +283,11 @@ void MTGS::PostVsyncStart(bool registers_written)
 	s_VsyncSignalListener.store(true, std::memory_order_release);
 	//Console.WriteLn( Color_Blue, "(EEcore Sleep) Vsync\t\tringpos=0x%06x, writepos=0x%06x", m_ReadPos.load(), m_WritePos.load() );
 
-	s_sem_Vsync.Wait();
+	{
+		const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
+		s_sem_Vsync.Wait();
+		g_orbis_ee_vsyncq_ticks += __builtin_ia32_rdtsc() - t0;
+	}
 }
 
 void MTGS::InitAndReadFIFO(u8* mem, u32 qwc)
@@ -311,6 +321,7 @@ union PacketTagType
 	};
 };
 
+unsigned long long g_orbis_gs_idle_ticks, g_orbis_ee_waitgs_ticks, g_orbis_ee_stall_ticks, g_orbis_ee_waitgs_n, g_orbis_ee_stall_n;
 void MTGS::MainLoop()
 {
 	// Threading info: run in MTGS thread
@@ -335,7 +346,11 @@ void MTGS::MainLoop()
 		else
 		{
 			mtvu_lock.unlock();
-			s_sem_event.WaitForWork();
+			{
+				const unsigned long long t0 = __builtin_ia32_rdtsc();
+				s_sem_event.WaitForWork();
+				g_orbis_gs_idle_ticks += __builtin_ia32_rdtsc() - t0;
+			}
 			mtvu_lock.lock();
 		}
 
@@ -645,8 +660,11 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	}
 	else
 	{
+		const unsigned long long t0 = __builtin_ia32_rdtsc();
 		if (!s_sem_event.WaitForEmpty())
 			pxFailRel("MTGS Thread Died");
+		g_orbis_ee_waitgs_ticks += __builtin_ia32_rdtsc() - t0;
+		++g_orbis_ee_waitgs_n;
 	}
 
 	pxAssert(!(weakWait && syncRegs) && "No synchronization for this!");
@@ -728,6 +746,7 @@ void MTGS::GenericStall(uint size)
 
 	if (freeroom <= size)
 	{
+		struct OrbisStallTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisStallTimer() { g_orbis_ee_stall_ticks += __builtin_ia32_rdtsc() - t0; ++g_orbis_ee_stall_n; } } orbis_stall_timer;
 		// writepos will overlap readpos if we commit the data, so we need to wait until
 		// readpos is out past the end of the future write pos, or until it wraps around
 		// (in which case writepos will be >= readpos).

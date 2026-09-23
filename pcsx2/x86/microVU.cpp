@@ -31,6 +31,9 @@ void mVUinit(microVU& mVU, uint vuIndex)
 // Resets Rec Data
 void mVUreset(microVU& mVU, bool resetReserve)
 {
+	printf("[dbg] mvureset: idx=%u cache=%p cacheEnd=%p textPtr=%p x86start=%p\n",
+		mVU.index, (void*)mVU.cache, (void*)mVU.prog.x86end, (void*)mVU.textPtr(), (void*)xGetAlignedCallTarget());
+	fflush(stdout);
 	if (THREAD_VU1)
 	{
 		DevCon.Warning("mVU Reset");

@@ -9,9 +9,9 @@
 #include "common/Console.h"
 
 #include <fstream>
+#include <unistd.h>
 
-// Comment to disable all dynamic code generation.
-#define ENABLE_JIT_RASTERIZER
+// Orbis bring-up: use the C rasterizer until the native code cache is stable.
 
 #if MULTI_ISA_COMPILE_ONCE
 // Lack of a better home
@@ -125,7 +125,9 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
 {
 	const GSScanlineGlobalData& global = data.global;
 
-#ifdef ENABLE_JIT_RASTERIZER
+	static const bool s_ps5_swjit = (access("/data/PCSX2/swjit", 0) == 0);
+	if (s_ps5_swjit)
+	{
 	data.draw_scanline = m_ds_map[global.sel];
 	if (!data.draw_scanline) [[unlikely]]
 		return false;
@@ -166,12 +168,11 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
 	sel.notest = global.sel.notest;
 
 	return (data.setup_prim = m_sp_map[sel]) != nullptr;
-#else
+	}
 	data.setup_prim = &GSDrawScanline::CSetupPrim;
 	data.draw_scanline = &GSDrawScanline::CDrawScanline;
 	data.draw_edge = global.sel.aa1 ? &GSDrawScanline::CDrawEdge : nullptr;
 	return true;
-#endif
 }
 
 void GSDrawScanline::UpdateDrawStats(u64 frame, u64 ticks, int actual, int total, int prims)

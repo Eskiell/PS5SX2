@@ -15,6 +15,11 @@
 
 #define ENABLE_DRAW_STATS 0
 
+unsigned long long g_orbis_gs_swsync_ticks; // eerec-281: GS thread waiting for the SW workers
+unsigned long long g_orbis_sw_busy_ticks[16]; // eerec-281: SW worker i drawing
+void OrbisCpuSample(int slot); // eerec-285 (GSRenderer.cpp)
+void OrbisCpuForget(int slot); // eerec-285
+
 MULTI_ISA_UNSHARED_IMPL;
 
 int GSRasterizerData::s_counter = 0;
@@ -1537,6 +1542,8 @@ void GSRasterizerList::OnWorkerStartup(int i, u64 affinity)
 
 void GSRasterizerList::OnWorkerShutdown(int i)
 {
+	if (i < 5)
+		::OrbisCpuForget(3 + i); // eerec-285
 }
 
 void GSRasterizerList::Queue(const GSRingHeap::SharedPtr<GSRasterizerData>& data)
@@ -1565,12 +1572,14 @@ void GSRasterizerList::Sync()
 {
 	if (!IsSynced())
 	{
+		const unsigned long long orbis_t0 = __builtin_ia32_rdtsc(); // eerec-281
 		for (size_t i = 0; i < m_workers.size(); i++)
 		{
 			m_workers[i]->Wait();
 		}
 
 		g_perfmon.Put(GSPerfMon::SyncPoint, 1);
+		::g_orbis_gs_swsync_ticks += __builtin_ia32_rdtsc() - orbis_t0; // eerec-281
 	}
 }
 
@@ -1622,7 +1631,13 @@ std::unique_ptr<IRasterizer> GSRasterizerList::Create(int threads)
 		auto& r = *rl->m_r[i];
 		rl->m_workers.push_back(std::unique_ptr<GSWorker>(new GSWorker(
 			[i, affinity]() { GSRasterizerList::OnWorkerStartup(i, affinity); },
-			[&r](GSRingHeap::SharedPtr<GSRasterizerData>& item) { r.Draw(*item.get()); },
+			[&r, i](GSRingHeap::SharedPtr<GSRasterizerData>& item) {
+				const unsigned long long orbis_t0 = __builtin_ia32_rdtsc(); // eerec-281
+				r.Draw(*item.get());
+				::g_orbis_sw_busy_ticks[i & 15] += __builtin_ia32_rdtsc() - orbis_t0;
+				if (i < 5)
+					::OrbisCpuSample(3 + i); // eerec-285
+			},
 			[i]() { GSRasterizerList::OnWorkerShutdown(i); })));
 	}
 

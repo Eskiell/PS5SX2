@@ -65,6 +65,7 @@
 #include <mutex>
 #include <sstream>
 #include <common/RedtapeWilCom.h>
+extern "C" void orbis_stage(const char* stage) __attribute__((weak));
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
@@ -124,7 +125,8 @@ namespace VMManager
 		std::unique_ptr<SaveStateScreenshotData> screenshot, std::string filename,
 		s32 slot_for_message, std::function<void(const std::string&)> error_callback);
 
-	static void LoadSettings();
+	static void 
+	LoadSettings();
 	static void LoadCoreSettings(SettingsInterface& si);
 	static void ApplyCoreSettings();
 	static void LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock);
@@ -380,6 +382,7 @@ const std::string& VMManager::GetCurrentELF()
 
 bool VMManager::Internal::CPUThreadInitialize()
 {
+	printf("[dbg] cpuinit: begin\n"); fflush(stdout);
 	Threading::SetNameOfCurrentThread("CPU Thread");
 	PerformanceMetrics::SetCPUThread(Threading::ThreadHandle::GetForCallingThread());
 
@@ -407,15 +410,22 @@ bool VMManager::Internal::CPUThreadInitialize()
 
 	LogCPUCapabilities();
 
+	printf("[dbg] cpuinit: SysMemory::Allocate begin\n"); fflush(stdout);
 	if (!SysMemory::Allocate())
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate VM memory.");
 		return false;
 	}
+	printf("[dbg] cpuinit: SysMemory::Allocate done\n"); fflush(stdout);
 
+	printf("[dbg] cpuinit: InitializeCPUProviders begin\n"); fflush(stdout);
 	InitializeCPUProviders();
+	printf("[dbg] cpuinit: InitializeCPUProviders done\n"); fflush(stdout);
 
+	
+	printf("[dbg] cpuinit: USBinit begin\n"); fflush(stdout);
 	USBinit();
+	printf("[dbg] cpuinit: USBinit done\n"); fflush(stdout);
 
 	// We want settings loaded so we choose the correct renderer for big picture mode.
 	// This also sorts out input sources.
@@ -1522,15 +1532,33 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 	s_use_vsync_for_timing = false;
 
 	s_cpu_implementation_changed = false;
+	Console.WriteLn("[dbg] stage: UpdateCPUImplementations");
+	if (orbis_stage) orbis_stage("UpdateCPUImplementations");
 	UpdateCPUImplementations();
+	Console.WriteLn("[dbg] stage: mmap_ResetBlockTracking");
+	if (orbis_stage) orbis_stage("mmap_ResetBlockTracking");
 	mmap_ResetBlockTracking();
+	Console.WriteLn("[dbg] stage: memSetExtraMemMode");
+	if (orbis_stage) orbis_stage("memSetExtraMemMode");
 	memSetExtraMemMode(EmuConfig.Cpu.ExtraMemory);
+	Console.WriteLn("[dbg] stage: ClearCPUExecutionCaches");
+	if (orbis_stage) orbis_stage("ClearCPUExecutionCaches");
 	Internal::ClearCPUExecutionCaches();
+	Console.WriteLn("[dbg] stage: FPControlRegister");
+	if (orbis_stage) orbis_stage("FPControlRegister");
 	FPControlRegister::SetCurrent(EmuConfig.Cpu.FPUFPCR);
+	Console.WriteLn("[dbg] stage: memBindConditionalHandlers");
+	if (orbis_stage) orbis_stage("memBindConditionalHandlers");
 	memBindConditionalHandlers();
+	Console.WriteLn("[dbg] stage: SysMemory::Reset");
+	if (orbis_stage) orbis_stage("SysMemory::Reset");
 	SysMemory::Reset();
+	Console.WriteLn("[dbg] stage: cpuReset");
+	if (orbis_stage) orbis_stage("cpuReset");
 	cpuReset();
 
+	Console.WriteLn("[dbg] stage: Opening GS");
+	if (orbis_stage) orbis_stage("Opening GS");
 	Console.WriteLn("Opening GS...");
 	s_gs_open_on_initialize = MTGS::IsOpen();
 	if (!s_gs_open_on_initialize && !MTGS::WaitForOpen())
@@ -1545,6 +1573,8 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 			MTGS::WaitForClose();
 	};
 
+	Console.WriteLn("[dbg] stage: Opening SPU2");
+	if (orbis_stage) orbis_stage("Opening SPU2");
 	Console.WriteLn("Opening SPU2...");
 	if (!SPU2::Open())
 	{
@@ -1554,6 +1584,8 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 	ScopedGuard close_spu2(&SPU2::Close);
 
 
+	Console.WriteLn("[dbg] stage: Initializing Pad");
+	if (orbis_stage) orbis_stage("Initializing Pad");
 	Console.WriteLn("Initializing Pad...");
 	if (!Pad::Initialize())
 	{
@@ -2272,8 +2304,10 @@ void VMManager::ResetFrameLimiter()
 	s_limiter_frame_start = GetCPUTicks();
 }
 
+unsigned long long g_orbis_ee_throttle_ticks; // eerec-281
 void VMManager::Internal::Throttle()
 {
+	struct OrbisThrottleTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisThrottleTimer() { g_orbis_ee_throttle_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_throttle_timer; // eerec-281
 	if (s_target_speed == 0.0f || s_use_vsync_for_timing)
 		return;
 
@@ -2667,10 +2701,14 @@ void VMManager::InitializeCPUProviders()
 {
 #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	recCpu.Reserve();
+	printf("[dbg] icp: recCpu.Reserve done\n"); fflush(stdout);
 	psxRec.Reserve();
+	printf("[dbg] icp: psxRec.Reserve done\n"); fflush(stdout);
 
 	CpuMicroVU0.Reserve();
+	printf("[dbg] icp: CpuMicroVU0 done\n"); fflush(stdout);
 	CpuMicroVU1.Reserve();
+	printf("[dbg] icp: CpuMicroVU1 done\n"); fflush(stdout);
 #else
 	// Despite not having any VU recompilers on ARM64, therefore no MTVU,
 	// we still need the thread alive. Otherwise the read and write positions
@@ -2705,6 +2743,9 @@ void VMManager::ShutdownCPUProviders()
 
 void VMManager::UpdateCPUImplementations()
 {
+	printf("[dbg] vm uci: enter EEREC=%d IOPREC=%d dump=%d\n",
+		(int)CHECK_EEREC, (int)CHECK_IOPREC, (int)GSDumpReplayer::IsReplayingDump());
+	fflush(stdout);
 	if (GSDumpReplayer::IsReplayingDump())
 	{
 		Cpu = &GSDumpReplayerCpu;
@@ -2717,6 +2758,8 @@ void VMManager::UpdateCPUImplementations()
 #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+	printf("[dbg] vm uci: Cpu=%p psxCpu=%p\n", (void*)Cpu, (void*)psxCpu);
+	fflush(stdout);
 
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
@@ -2731,17 +2774,23 @@ void VMManager::UpdateCPUImplementations()
 
 void VMManager::Internal::ClearCPUExecutionCaches()
 {
+	printf("[dbg] clear: Cpu->Reset\n"); fflush(stdout);
 	Cpu->Reset();
+	printf("[dbg] clear: Cpu->Reset done\n"); fflush(stdout);
 	psxCpu->Reset();
+	printf("[dbg] clear: psxCpu->Reset done\n"); fflush(stdout);
 
 #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// mVU's VU0 needs to be properly initialized for macro mode even if it's not used for micro mode!
 	if (CHECK_EEREC && !EmuConfig.Cpu.Recompiler.EnableVU0)
 		CpuMicroVU0.Reset();
+	printf("[dbg] clear: CpuMicroVU0 done\n"); fflush(stdout);
 #endif
 
 	CpuVU0->Reset();
+	printf("[dbg] clear: CpuVU0 done\n"); fflush(stdout);
 	CpuVU1->Reset();
+	printf("[dbg] clear: CpuVU1 done\n"); fflush(stdout);
 
 	if constexpr (newVifDynaRec)
 	{
@@ -2762,6 +2811,10 @@ void VMManager::Execute()
 	}
 
 	// Execute until we're asked to stop.
+	printf("[dbg] vm execute: Cpu=%p\n", (void*)Cpu);
+	if (Cpu)
+		printf("[dbg] vm execute: Cpu->Execute=%p\n", (void*)Cpu->Execute);
+	fflush(stdout);
 	Cpu->Execute();
 }
 

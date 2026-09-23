@@ -1291,7 +1291,9 @@ mVUop(mVU_ISWR)
 			auto writeBackAt = [&](int offset) {
 				if (register_offset == -1)
 				{
-					xLEA(gprT2q, ptr[(void*)((sptr)base + offset)]);
+					// Orbis: base lives above 4GB; xLEA absolute would
+					// truncate it to disp32. movabs is always correct.
+					xMOV64(gprT2q, (sptr)base + offset);
 					register_offset = offset;
 				}
 				xMOV(ptr32[gprT2q + is + (offset - register_offset)], regT);
@@ -1303,10 +1305,13 @@ mVUop(mVU_ISWR)
 		}
 		else if (is.IsEmpty())
 		{
-			if (_X) xMOV(ptr32[(void*)((uptr)base)], regT);
-			if (_Y) xMOV(ptr32[(void*)((uptr)base + 4)], regT);
-			if (_Z) xMOV(ptr32[(void*)((uptr)base + 8)], regT);
-			if (_W) xMOV(ptr32[(void*)((uptr)base + 12)], regT);
+			// Orbis: base lives above 4GB; absolute memrefs would truncate
+			// it to disp32. movabs per lane into gprT2q (rcx: free here,
+			// SIB-safe base-only) and store via [rcx].
+			if (_X) { xMOV64(gprT2q, (sptr)base);     xMOV(ptr32[gprT2q], regT); }
+			if (_Y) { xMOV64(gprT2q, (sptr)base + 4); xMOV(ptr32[gprT2q], regT); }
+			if (_Z) { xMOV64(gprT2q, (sptr)base + 8); xMOV(ptr32[gprT2q], regT); }
+			if (_W) { xMOV64(gprT2q, (sptr)base + 12); xMOV(ptr32[gprT2q], regT); }
 		}
 		else
 		{
@@ -1384,7 +1389,10 @@ mVUop(mVU_LQD)
 			const xmm& Ft = mVU.regAlloc->allocReg(-1, _Ft_, _X_Y_Z_W);
 			if (is.IsEmpty())
 			{
-				mVUloadReg(Ft, xAddressVoid(ptr), _X_Y_Z_W);
+				// Orbis: ptr lives above 4GB; absolute would truncate.
+				// movabs to rcx (gprT2q free here, SIB-safe) and use [rcx].
+				xMOV64(gprT2q, (sptr)ptr);
+				mVUloadReg(Ft, xAddressVoid(gprT2q), _X_Y_Z_W);
 			}
 			else
 			{
@@ -1417,7 +1425,12 @@ mVUop(mVU_LQI)
 		{
 			const xmm& Ft = mVU.regAlloc->allocReg(-1, _Ft_, _X_Y_Z_W);
 			if (is.IsEmpty())
-				mVUloadReg(Ft, xAddressVoid(ptr), _X_Y_Z_W);
+			{
+				// Orbis: ptr lives above 4GB; absolute would truncate.
+				// movabs to rcx (gprT2q free here, SIB-safe) and use [rcx].
+				xMOV64(gprT2q, (sptr)ptr);
+				mVUloadReg(Ft, xAddressVoid(gprT2q), _X_Y_Z_W);
+			}
 			else
 				mVUloadReg(Ft, xComplexAddress(gprT2q, ptr, is), _X_Y_Z_W);
 			mVU.regAlloc->clearNeeded(Ft);
@@ -1486,7 +1499,12 @@ mVUop(mVU_SQD)
 		}
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, _XYZW_PS ? -1 : 0, _X_Y_Z_W);
 		if (it.IsEmpty())
-			mVUsaveReg(Fs, xAddressVoid(ptr), _X_Y_Z_W, 1);
+		{
+			// Orbis: ptr lives above 4GB; absolute would truncate.
+			// movabs to rcx (gprT2q free here, SIB-safe) and use [rcx].
+			xMOV64(gprT2q, (sptr)ptr);
+			mVUsaveReg(Fs, xAddressVoid(gprT2q), _X_Y_Z_W, 1);
+		}
 		else
 			mVUsaveReg(Fs, xComplexAddress(gprT2q, ptr, it), _X_Y_Z_W, 1);
 		mVU.regAlloc->clearNeeded(Fs);
@@ -1513,7 +1531,12 @@ mVUop(mVU_SQI)
 		if (_It_)
 			mVUsaveReg(Fs, xComplexAddress(gprT2q, ptr, gprT1q), _X_Y_Z_W, 1);
 		else
-			mVUsaveReg(Fs, xAddressVoid(ptr), _X_Y_Z_W, 1);
+		{
+			// Orbis: ptr lives above 4GB; absolute would truncate.
+			// movabs to rcx (gprT2q free here, SIB-safe) and use [rcx].
+			xMOV64(gprT2q, (sptr)ptr);
+			mVUsaveReg(Fs, xAddressVoid(gprT2q), _X_Y_Z_W, 1);
+		}
 		mVU.regAlloc->clearNeeded(Fs);
 		mVU.profiler.EmitOp(opSQI);
 	}

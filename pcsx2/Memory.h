@@ -56,27 +56,27 @@ namespace HostMemoryMap
 
 	// EE recompiler code cache area (64mb)
 	static constexpr u32 EErecOffset = 0x00000000;
-	static constexpr u32 EErecSize = 0x4000000;
+	static constexpr u32 EErecSize = 0x1800000;
 
 	// IOP recompiler code cache area (32mb)
 	static constexpr u32 IOPrecOffset = EErecOffset + EErecSize;
-	static constexpr u32 IOPrecSize = 0x2000000;
+	static constexpr u32 IOPrecSize = 0x800000;
 
 	// newVif0 recompiler code cache area (8mb)
 	static constexpr u32 VIF0recOffset = IOPrecOffset + IOPrecSize;
-	static constexpr u32 VIF0recSize = 0x800000;
+	static constexpr u32 VIF0recSize = 0x200000;
 
 	// newVif1 recompiler code cache area (8mb)
 	static constexpr u32 VIF1recOffset = VIF0recOffset + VIF0recSize;
-	static constexpr u32 VIF1recSize = 0x800000;
+	static constexpr u32 VIF1recSize = 0x400000;
 
 	// microVU1 recompiler code cache area (64mb)
 	static constexpr u32 mVU0recOffset = VIF1recOffset + VIF1recSize;
-	static constexpr u32 mVU0recSize = 0x4000000;
+	static constexpr u32 mVU0recSize = 0x600000;
 
 	// microVU0 recompiler code cache area (64mb)
 	static constexpr u32 mVU1recOffset = mVU0recOffset + mVU0recSize;
-	static constexpr u32 mVU1recSize = 0x4000000;
+	static constexpr u32 mVU1recSize = 0x2800000;
 
 	// SSE-optimized VIF unpack functions (1mb)
 	static constexpr u32 VIFUnpackRecOffset = mVU1recOffset + mVU1recSize;
@@ -84,7 +84,7 @@ namespace HostMemoryMap
 
 	// Software Renderer JIT buffer (64mb)
 	static constexpr u32 SWrecOffset = VIFUnpackRecOffset + VIFUnpackRecSize;
-	static constexpr u32 SWrecSize = 0x04000000;
+	static constexpr u32 SWrecSize = 0x1400000;
 
 	// Overall size.
 	static constexpr u32 CodeSize = SWrecOffset + SWrecSize; // 305 mb

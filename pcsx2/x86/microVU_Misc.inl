@@ -345,6 +345,12 @@ __fi std::optional<xAddressVoid> mVUoptimizeConstantAddr(mV, u32 srcreg, s32 off
 	if (srcreg != 0)
 		return std::nullopt;
 
+	// Orbis: VU mem lives above 4GB, and the absolute memref returned below
+	// would be truncated to disp32 by the emitter. Decline the optimization
+	// so callers use the xComplexAddress (movabs) path instead.
+	if ((sptr)mVU.regs().Mem != (s32)(sptr)mVU.regs().Mem)
+		return std::nullopt;
+
 	const s32 addr = 0 + offset;
 	if (isVU1)
 	{

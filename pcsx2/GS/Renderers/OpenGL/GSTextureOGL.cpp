@@ -179,6 +179,44 @@ void* GSTextureOGL::GetNativeHandle() const
 	return reinterpret_cast<void*>(static_cast<uintptr_t>(m_texture_id));
 }
 
+extern int g_orbis_upload_mode; // eerec-279
+// eerec-276 upload check
+#include <unistd.h>
+#include <unordered_map>
+static std::unordered_map<const void*, const u8*> s_orbis_map_ptr;
+static void orbis_upload_check(GSTextureOGL* t, const char* path, int layer, int rx, int ry, int rw, int rh, const u8* src, int src_pitch)
+{
+	static const bool s_upchk_on = (access("/data/PCSX2/upchk", 0) == 0); // eerec-278: off unless flag
+	if (!s_upchk_on) return;
+	static int n = 0, logged = 0, bad = 0, zero_all = 0;
+	if (!src || n > 60000) return;
+	n++;
+	const int W = std::max(t->GetWidth() >> layer, 1), H = std::max(t->GetHeight() >> layer, 1);
+	const int bpp = 1 << t->GetIntShift();
+	while (glGetError() != GL_NO_ERROR) {}
+	std::vector<u8> buf((size_t)W * H * bpp, 0xcd);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+	glGetTextureImage(t->GetID(), layer, t->GetIntFormat(), t->GetIntType(), (GLsizei)buf.size(), buf.data());
+	int badpx = 0, zpx = 0; int fx = -1, fy = -1; u32 fg = 0, fe = 0;
+	for (int y = 0; y < rh; y++) for (int x = 0; x < rw; x++) {
+		const int X = rx + x, Y = ry + y; if (X >= W || Y >= H) continue;
+		const u8* g = &buf[((size_t)Y * W + X) * bpp]; const u8* e = src + (size_t)y * src_pitch + (size_t)x * bpp;
+		bool z = true; for (int b = 0; b < bpp; b++) z &= g[b] == 0; zpx += z;
+		if (memcmp(g, e, bpp)) { if (fx < 0) { fx = X; fy = Y; memcpy(&fg, g, std::min(bpp, 4)); memcpy(&fe, e, std::min(bpp, 4)); } badpx++; } }
+	if (badpx) { bad++; zero_all += (zpx == rw * rh); }
+	const GLenum rerr = glGetError();
+	static std::unordered_map<u64, int> s_combo;
+	const u64 key = ((u64)t->GetWidth() << 40) | ((u64)t->GetHeight() << 24) | ((u64)layer << 16) | ((u64)bpp << 8) | (u64)(path[0] + path[7]);
+	int& seen = s_combo[key];
+	if (rerr && logged < 400) { logged++; printf("[upchk] GLERR %x path=%s size=%dx%d lvl=%d\n", rerr, path, t->GetWidth(), t->GetHeight(), layer); }
+	if (badpx && seen++ < 3 && logged < 400) { logged++;
+		printf("[upchk] BAD path=%s tex=%u size=%dx%d lvl=%d/%d fmt=%x/%x bpp=%d rect=%d,%d %dx%d pitch=%d bad=%d/%d zero=%d first(%d,%d) got=%08x exp=%08x\n",
+			path, t->GetID(), t->GetWidth(), t->GetHeight(), layer, t->GetMipmapLevels(), t->GetIntFormat(), t->GetIntType(), bpp, rx, ry, rw, rh, src_pitch, badpx, rw * rh, zpx, fx, fy, fg, fe);
+		fflush(stdout); }
+	if ((n % 2000) == 0) { printf("[upchk] checks=%d bad=%d allzero=%d combos=%zu\n", n, bad, zero_all, s_combo.size()); fflush(stdout); }
+}
+
 bool GSTextureOGL::Update(const GSVector4i& r, const void* data, int pitch, int layer)
 {
 	pxAssert(!IsDepthStencil());
@@ -219,10 +257,19 @@ bool GSTextureOGL::Update(const GSVector4i& r, const void* data, int pitch, int 
 		glCompressedTextureSubImage2D(m_texture_id, layer, r.x, r.y, r.width(), r.height(), m_int_format, upload_size, data);
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 	}
-	else if (!sb || map_size > sb->GetChunkSize())
+	else if (!sb || map_size > sb->GetChunkSize() || g_orbis_upload_mode != 0) // eerec-279: live.ini upload=
 	{
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, pitch >> m_int_shift);
-		glTextureSubImage2D(m_texture_id, layer, r.x, r.y, r.width(), r.height(), m_int_format, m_int_type, data);
+		if (g_orbis_upload_mode == 2)
+		{
+			GLint prev = 0;
+			glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+			glBindTexture(GL_TEXTURE_2D, m_texture_id);
+			glTexSubImage2D(GL_TEXTURE_2D, layer, r.x, r.y, r.width(), r.height(), m_int_format, m_int_type, data);
+			glBindTexture(GL_TEXTURE_2D, prev);
+		}
+		else
+			glTextureSubImage2D(m_texture_id, layer, r.x, r.y, r.width(), r.height(), m_int_format, m_int_type, data);
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); // Restore default behavior
 	}
 	else
@@ -242,6 +289,8 @@ bool GSTextureOGL::Update(const GSVector4i& r, const void* data, int pitch, int 
 
 		sb->Unbind();
 	}
+
+	if (!IsCompressedFormat()) orbis_upload_check(this, (!sb || map_size > sb->GetChunkSize()) ? "update-direct" : "update-sb", layer, r.x, r.y, r.width(), r.height(), static_cast<const u8*>(data), pitch);
 
 	m_needs_mipmaps_generated = true;
 
@@ -275,6 +324,7 @@ bool GSTextureOGL::Map(GSMap& m, const GSVector4i* _r, int layer)
 
 		const auto map = sb->Map(TEXTURE_UPLOAD_ALIGNMENT, upload_size);
 		m.bits = static_cast<u8*>(map.pointer);
+		s_orbis_map_ptr[this] = m.bits;
 
 		// Save the area for the unmap
 		m_r_x = r.x;
@@ -311,6 +361,8 @@ void GSTextureOGL::Unmap()
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
 		sb->Unbind();
+
+		orbis_upload_check(this, "unmap", m_layer, m_r_x, m_r_y, m_r_w, m_r_h, s_orbis_map_ptr[this], (int)pitch);
 
 		m_needs_mipmaps_generated = true;
 
@@ -416,10 +468,27 @@ std::unique_ptr<GSDownloadTextureOGL> GSDownloadTextureOGL::Create(u32 width, u3
 	return ret;
 }
 
+struct ps5_copyprof_t { unsigned long long n = 0, ticks = 0, px = 0, last = 0; unsigned long long maxt = 0; int mw = 0, mh = 0; };
+extern ps5_copyprof_t ps5_readprof;
+void ps5_copyprof_report();
+struct ps5_copyprof_scope
+{
+	ps5_copyprof_t& p; unsigned long long t0; int w, h;
+	ps5_copyprof_scope(ps5_copyprof_t& p_, int w_, int h_) : p(p_), t0(__builtin_ia32_rdtsc()), w(w_), h(h_) {}
+	~ps5_copyprof_scope()
+	{
+		const unsigned long long dt = __builtin_ia32_rdtsc() - t0;
+		p.n++; p.ticks += dt; p.px += (unsigned long long)w * h;
+		if (dt > p.maxt) { p.maxt = dt; p.mw = w; p.mh = h; }
+		ps5_copyprof_report();
+	}
+};
+
 void GSDownloadTextureOGL::CopyFromTexture(
 	const GSVector4i& drc, GSTexture* stex, const GSVector4i& src, u32 src_level, bool use_transfer_pitch)
 {
 	GSTextureOGL* const glTex = static_cast<GSTextureOGL*>(stex);
+	ps5_copyprof_scope ps5_rps(ps5_readprof, src.width(), src.height());
 	GSDeviceOGL::GetInstance()->CommitClear(glTex, true);
 
 	pxAssert(glTex->GetFormat() == m_format);

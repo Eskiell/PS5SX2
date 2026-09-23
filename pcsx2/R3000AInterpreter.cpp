@@ -273,6 +273,7 @@ static void intReset() {
 
 static s32 intExecuteBlock( s32 eeCycles )
 {
+	// iopblock probe removed
 	psxRegs.iopBreak = 0;
 	psxRegs.iopCycleEE = eeCycles;
 	u64 lastIOPCycle = 0;
@@ -284,8 +285,14 @@ static s32 intExecuteBlock( s32 eeCycles )
 			psxBiosCall();
 
 		branch2 = 0;
+		unsigned long long iop_cnt = 0;
+		u32 iop_last_pc = ~0U;
 		while (!branch2)
+		{
 			execI();
+			// debug prints removed (file I/O throttle).
+			iop_cnt++;
+		}
 
 		
 		if ((psxHu32(HW_ICFG) & (1 << 3)))

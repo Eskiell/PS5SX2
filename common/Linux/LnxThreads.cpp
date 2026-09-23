@@ -9,9 +9,24 @@
 #include "common/Assertions.h"
 
 #include <memory>
+#include <sys/mman.h>
 
 #include <pthread.h>
 #include <unistd.h>
+
+static std::uintptr_t s_next_ps5_thread_stack = 0x740000000ULL;
+
+static bool ConfigurePs5ThreadStack(pthread_attr_t& attrs, u32 requested_size)
+{
+	const std::size_t size = (static_cast<std::size_t>(requested_size) + 0x3fff) & ~std::size_t(0x3fff);
+	void* hint = reinterpret_cast<void*>(s_next_ps5_thread_stack);
+	s_next_ps5_thread_stack += (size + 0x1fffff) & ~std::size_t(0x1fffff);
+	void* stack = mmap(hint, size, PROT_READ | PROT_WRITE, MAP_FIXED, -1, 0);
+	if (stack == MAP_FAILED)
+		return false;
+	return pthread_attr_setstack(&attrs, stack, size) == 0;
+}
+
 #if defined(__linux__)
 #include <sys/prctl.h>
 #include <sys/types.h>
@@ -22,6 +37,7 @@
 #include <sys/syscall.h>
 #define gettid() syscall(SYS_gettid)
 #endif
+
 #else
 #include <pthread_np.h>
 #endif
@@ -247,9 +263,9 @@ bool Threading::Thread::Start(EntryPoint func)
 	{
 		has_attributes = true;
 		pthread_attr_init(&attrs);
+		if (!ConfigurePs5ThreadStack(attrs, m_stack_size))
+			pthread_attr_setstacksize(&attrs, m_stack_size);
 	}
-	if (m_stack_size != 0)
-		pthread_attr_setstacksize(&attrs, m_stack_size);
 
 	pthread_t handle;
 	const int res = pthread_create(&handle, has_attributes ? &attrs : nullptr, ThreadProc, params.get());
@@ -287,9 +303,9 @@ bool Threading::Thread::Start(EntryPoint func)
 	{
 		has_attributes = true;
 		pthread_attr_init(&attrs);
+		if (!ConfigurePs5ThreadStack(attrs, m_stack_size))
+			pthread_attr_setstacksize(&attrs, m_stack_size);
 	}
-	if (m_stack_size != 0)
-		pthread_attr_setstacksize(&attrs, m_stack_size);
 
 	pthread_t handle;
 	const int res = pthread_create(&handle, has_attributes ? &attrs : nullptr, ThreadProc, func_clone.get());

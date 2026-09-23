@@ -1,3 +1,4 @@
+#include <mutex>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -55,6 +56,7 @@ namespace Pad
 
 	static std::array<std::array<MacroButton, NUM_MACRO_BUTTONS_PER_CONTROLLER>, NUM_CONTROLLER_PORTS> s_macro_buttons;
 	static std::array<std::unique_ptr<PadBase>, NUM_CONTROLLER_PORTS> s_controllers;
+	static std::mutex s_orbis_pad_mutex; // Orbis: pad input thread vs controller (re)creation
 
 	bool mtapPort0LastState;
 	bool mtapPort1LastState;
@@ -504,6 +506,7 @@ std::string Pad::GetConfigSection(u32 pad_index)
 // Create a new pad instance, update the smart pointer for this pad slot, and return a dumb pointer to the new pad.
 PadBase* Pad::CreatePad(u8 unifiedSlot, ControllerType controllerType, size_t ejectTicks)
 {
+	std::lock_guard<std::mutex> lock(s_orbis_pad_mutex);
 	switch (controllerType)
 	{
 		case ControllerType::DualShock2:
@@ -551,7 +554,9 @@ void Pad::SetControllerState(u32 controller, u32 bind, float value)
 	if (controller >= NUM_CONTROLLER_PORTS)
 		return;
 
-	s_controllers[controller]->Set(bind, value);
+	std::lock_guard<std::mutex> lock(s_orbis_pad_mutex);
+	if (s_controllers[controller])
+		s_controllers[controller]->Set(bind, value);
 }
 
 void Pad::ResetControllerInputs(u32 controller)

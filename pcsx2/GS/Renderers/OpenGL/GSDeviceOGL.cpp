@@ -18,9 +18,25 @@
 #include "imgui.h"
 #include "IconsFontAwesome.h"
 
+// Orbis: unbuffered stage trace (survives crash-handler death).
+extern "C" void ps5gl_stage(const char* msg);
+extern "C" void ps5gl_draw_count(unsigned long long* out);
+#include "GS/GS.h"
+#include "GS/GSState.h"
+#include "GS/Renderers/Common/GSRenderer.h"
+
+extern "C" void orbis_present_frame(const unsigned char* pixels, int width, int height, int pitch);
+
+#include <cstring>
+#include <vector>
+
 #include <cinttypes>
+#include <unistd.h>
+bool g_ps5_nopbo = (access("/data/PCSX2/nopbo", 0) == 0);
+#include <chrono>
 #include <fstream>
 #include <sstream>
+
 
 static constexpr u32 g_vs_pc_index        = 4;
 static constexpr u32 g_vs_ib_index        = 3;
@@ -241,6 +257,236 @@ void GSDeviceOGL::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 	SetSwapInterval();
 }
 
+// eerec-270 GL self-test
+#include <unistd.h>
+static GLuint orbis_gt_prog(const char* vs, const char* fs)
+{
+	auto sh = [](GLenum t, const char* src) {
+		GLuint s = glCreateShader(t); glShaderSource(s, 1, &src, nullptr); glCompileShader(s);
+		GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+		if (!ok) { char b[512] = {}; glGetShaderInfoLog(s, 511, nullptr, b); printf("[gltest] shader compile failed: %s\n", b); }
+		return s; };
+	GLuint p = glCreateProgram(); GLuint a = sh(GL_VERTEX_SHADER, vs), b = sh(GL_FRAGMENT_SHADER, fs);
+	glAttachShader(p, a); glAttachShader(p, b); glBindAttribLocation(p, 0, "p"); glLinkProgram(p);
+	GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok); if (!ok) printf("[gltest] link failed\n");
+	glDeleteShader(a); glDeleteShader(b); return p;
+}
+static GLuint orbis_gt_rt(int w, int h, GLuint* tex)
+{
+	glGenTextures(1, tex); glBindTexture(GL_TEXTURE_2D, *tex); glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, w, h);
+	GLuint fbo; glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+	GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER); if (st != GL_FRAMEBUFFER_COMPLETE) printf("[gltest] fbo %dx%d incomplete %x\n", w, h, st);
+	glViewport(0, 0, w, h); return fbo;
+}
+static void orbis_gt_check(const char* name, int w, int h, const std::vector<u32>& exp)
+{
+	std::vector<u32> got((size_t)w * h, 0xdeadbeefu);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1); glFinish();
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, got.data());
+	size_t bad = 0, zero = 0, rows_bad = 0; int shown = 0; char first[256] = {};
+	for (int y = 0; y < h; y++) { bool rb = false; for (int x = 0; x < w; x++) {
+		const u32 g = got[(size_t)y * w + x], e = exp[(size_t)y * w + x];
+		if (g == 0) zero++;
+		if (g != e) { bad++; rb = true; if (shown < 3) { int n = strlen(first); snprintf(first + n, sizeof(first) - n, " (%d,%d got %08x exp %08x)", x, y, g, e); shown++; } } }
+		rows_bad += rb; }
+	printf("[gltest] %s %dx%d bad=%zu/%d zero=%zu badrows=%zu%s\n", name, w, h, bad, w * h, zero, rows_bad, first);
+	fflush(stdout);
+}
+static void orbis_gl_selftest()
+{
+	if (access("/data/PCSX2/nogltest", 0) == 0) return;
+	printf("[gltest] start\n"); fflush(stdout);
+	if (!glTexStorage2D || !glGenVertexArrays || !glReadPixels || !glCreateShader) { printf("[gltest] missing GL entry points\n"); fflush(stdout); return; }
+	const char* vs = "#version 330 core\nlayout(location=0) in vec2 p; out vec2 uv; void main(){ uv = p*0.5+0.5; gl_Position = vec4(p,0.0,1.0); }\n";
+	const char* fs = "#version 330 core\nin vec2 uv; uniform sampler2D t; uniform float lod; uniform int mode; out vec4 o;\n"
+		"void main(){ if (mode == 1) { ivec2 c = ivec2(gl_FragCoord.xy); o = vec4(float(c.x & 255)/255.0, float(c.y & 255)/255.0, float((c.x >> 8) + 2*(c.y >> 8) + 16)/255.0, 1.0); }\n"
+		" else if (mode == 2) o = textureLod(t, uv * 3.0 - 1.0, 0.0); else o = textureLod(t, uv, lod); }\n";
+	GLuint prog = orbis_gt_prog(vs, fs);
+	glUseProgram(prog);
+	const GLint u_mode = glGetUniformLocation(prog, "mode"), u_lod = glGetUniformLocation(prog, "lod"), u_t = glGetUniformLocation(prog, "t");
+	glUniform1i(u_t, 0);
+	const float quad[12] = {-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1};
+	GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao);
+	glGenBuffers(1, &vbo); glBindBuffer(GL_ARRAY_BUFFER, vbo); glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_CULL_FACE);
+	glColorMask(1, 1, 1, 1);
+	// 1) clear + readback
+	{ GLuint t; GLuint f = orbis_gt_rt(64, 64, &t); glClearColor(0.2f, 0.4f, 0.6f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+	  std::vector<u32> e(64 * 64, 0xff996633u); orbis_gt_check("clear", 64, 64, e);
+	  glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f); glDeleteTextures(1, &t); }
+	// 2) render pattern + readback
+	const int rts[][2] = {{64, 64}, {128, 128}, {256, 128}, {512, 448}, {640, 512}};
+	for (auto& r : rts) { GLuint t; GLuint f = orbis_gt_rt(r[0], r[1], &t); glUniform1i(u_mode, 1); glDrawArrays(GL_TRIANGLES, 0, 6);
+	  std::vector<u32> e((size_t)r[0] * r[1]);
+	  for (int y = 0; y < r[1]; y++) for (int x = 0; x < r[0]; x++) e[(size_t)y * r[0] + x] = 0xff000000u | ((u32)((x >> 8) + 2 * (y >> 8) + 16) << 16) | ((u32)(y & 255) << 8) | (u32)(x & 255);
+	  orbis_gt_check("render", r[0], r[1], e);
+	  glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f); glDeleteTextures(1, &t); }
+	// 3) sampled textures: per level, render level L 1:1 into an RT and compare
+	const int srcs[][2] = {{8, 8}, {16, 16}, {32, 32}, {64, 64}, {128, 128}, {256, 128}, {512, 128}};
+	for (auto& sz : srcs) for (int chain = 0; chain < 2; chain++) {
+		const int W = sz[0], H = sz[1];
+		int levels = 1; if (chain) { int m = std::max(W, H); while (m > 1) { m >>= 1; levels++; } }
+		GLuint src; glGenTextures(1, &src); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, src);
+		glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, W, H);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		auto texel = [](int x, int y, int l) -> u32 { return 0xff000000u | ((u32)((0x40 * l + 0x11) & 255) << 16) | ((u32)((y * 3 + l) & 255) << 8) | (u32)((x * 5 + 7 * l) & 255); };
+		for (int l = 0; l < levels; l++) { const int w = std::max(W >> l, 1), h = std::max(H >> l, 1);
+			std::vector<u32> d((size_t)w * h); for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) d[(size_t)y * w + x] = texel(x, y, l);
+			glTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, d.data()); }
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, chain ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+		for (int l = 0; l < levels && l < 4; l++) { const int w = std::max(W >> l, 1), h = std::max(H >> l, 1);
+			GLuint t; GLuint f = orbis_gt_rt(w, h, &t);
+			glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, src);
+			glUniform1i(u_mode, 0); glUniform1f(u_lod, (float)l); glDrawArrays(GL_TRIANGLES, 0, 6);
+			std::vector<u32> e((size_t)w * h); for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) e[(size_t)y * w + x] = texel(x, y, l);
+			char name[64]; snprintf(name, sizeof(name), "sample src=%dx%d levels=%d lod=%d", W, H, levels, l);
+			orbis_gt_check(name, w, h, e);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f); glDeleteTextures(1, &t); }
+		glBindTexture(GL_TEXTURE_2D, 0); glDeleteTextures(1, &src);
+	}
+	// ---- eerec-271 extra tests ----
+	auto pat = [](int x, int y) -> u32 { return 0xff000000u | ((u32)((x >> 8) + 2 * (y >> 8) + 16) << 16) | ((u32)(y & 255) << 8) | (u32)(x & 255); };
+	auto sample_into = [&](GLuint tex, int w, int h, const char* name, const std::vector<u32>& e, int mode) {
+		GLuint t; GLuint f = orbis_gt_rt(w, h, &t);
+		glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex);
+		glUniform1i(u_mode, mode); glUniform1f(u_lod, 0.0f); glDrawArrays(GL_TRIANGLES, 0, 6);
+		orbis_gt_check(name, w, h, e);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f); glDeleteTextures(1, &t); };
+	auto nearest = [](GLuint tex, bool repeat) { glBindTexture(GL_TEXTURE_2D, tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0); };
+	{
+		// source RT with the coordinate pattern
+		GLuint srt; GLuint sf = orbis_gt_rt(128, 128, &srt); glUniform1i(u_mode, 1); glDrawArrays(GL_TRIANGLES, 0, 6); glFinish();
+		std::vector<u32> e(128 * 128); for (int y = 0; y < 128; y++) for (int x = 0; x < 128; x++) e[y * 128 + x] = pat(x, y);
+		// A) glGetTexImage of a rendered RT
+		{ std::vector<u32> g(128 * 128, 0xdeadbeefu); glBindFramebuffer(GL_FRAMEBUFFER, 0); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, srt);
+		  glPixelStorei(GL_PACK_ALIGNMENT, 1); glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, g.data());
+		  size_t bad = 0, zero = 0; for (size_t i = 0; i < g.size(); i++) { bad += g[i] != e[i]; zero += g[i] == 0; }
+		  printf("[gltest] getteximage rt 128x128 bad=%zu zero=%zu first=%08x exp=%08x\n", bad, zero, g[0], e[0]); fflush(stdout); }
+		// A3) PCSX2 GSDownloadTextureOGL path: persistent coherent PBO + glReadPixels(PACK_BUFFER) + fence
+		if (glBufferStorage) {
+			GLuint pb; glGenBuffers(1, &pb); glBindBuffer(GL_PIXEL_PACK_BUFFER, pb);
+			const GLsizeiptr sz = 256 * 128 * 4;
+			glBufferStorage(GL_PIXEL_PACK_BUFFER, sz, nullptr, GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+			u8* mp = (u8*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, sz, GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT);
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+			if (!mp) printf("[gltest] pbo-readback map failed\n");
+			else {
+				memset(mp, 0xcd, sz);
+				GLuint rf; glGenFramebuffers(1, &rf); glBindFramebuffer(GL_READ_FRAMEBUFFER, rf);
+				glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, srt, 0);
+				glPixelStorei(GL_PACK_ALIGNMENT, 4); glPixelStorei(GL_PACK_ROW_LENGTH, 256);
+				glBindBuffer(GL_PIXEL_PACK_BUFFER, pb);
+				glReadPixels(0, 0, 128, 128, GL_RGBA, GL_UNSIGNED_BYTE, (void*)0);
+				glBindBuffer(GL_PIXEL_PACK_BUFFER, 0); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+				GLsync sy = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+				glClientWaitSync(sy, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED); glDeleteSync(sy);
+				size_t bad = 0, zero = 0, cd = 0; u32 f0 = 0;
+				for (int y = 0; y < 128; y++) for (int x = 0; x < 128; x++) { u32 v; memcpy(&v, mp + (y * 256 + x) * 4, 4); if (!y && !x) f0 = v; bad += v != e[y * 128 + x]; zero += v == 0; cd += v == 0xcdcdcdcdu; }
+				printf("[gltest] pbo-readback persistent 128x128 bad=%zu zero=%zu untouched=%zu first=%08x exp=%08x\n", bad, zero, cd, f0, e[0]); fflush(stdout);
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, sf); glDeleteFramebuffers(1, &rf);
+			}
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, pb); if (mp) glUnmapBuffer(GL_PIXEL_PACK_BUFFER); glBindBuffer(GL_PIXEL_PACK_BUFFER, 0); glDeleteBuffers(1, &pb);
+		} else printf("[gltest] no glBufferStorage\n");
+		// A2) sample the rendered RT directly
+		nearest(srt, false); sample_into(srt, 128, 128, "sample-rt 128x128", e, 0);
+		// B) glCopyImageSubData full + subrect into 1-level and mip textures
+		for (int chain = 0; chain < 2; chain++) {
+			GLuint dst; glGenTextures(1, &dst); glBindTexture(GL_TEXTURE_2D, dst); glTexStorage2D(GL_TEXTURE_2D, chain ? 8 : 1, GL_RGBA8, 128, 128);
+			std::vector<u32> z(128 * 128, 0xff0000ffu); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 128, 128, GL_RGBA, GL_UNSIGNED_BYTE, z.data());
+			if (glCopyImageSubData) glCopyImageSubData(srt, GL_TEXTURE_2D, 0, 32, 16, 0, dst, GL_TEXTURE_2D, 0, 8, 4, 0, 64, 48, 1);
+			else if (glCopyImageSubDataNV) glCopyImageSubDataNV(srt, GL_TEXTURE_2D, 0, 32, 16, 0, dst, GL_TEXTURE_2D, 0, 8, 4, 0, 64, 48, 1);
+			else printf("[gltest] no glCopyImageSubData\n");
+			std::vector<u32> ex(z); for (int y = 0; y < 48; y++) for (int x = 0; x < 64; x++) ex[(y + 4) * 128 + x + 8] = pat(x + 32, y + 16);
+			nearest(dst, false); sample_into(dst, 128, 128, chain ? "copyimage-sub mip-dst 128x128" : "copyimage-sub 1lvl-dst 128x128", ex, 0);
+			glDeleteTextures(1, &dst); }
+		glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &sf); glDeleteTextures(1, &srt);
+	}
+	// C) PBO upload with row length + offset (PCSX2 GSTextureOGL::Map/Update path)
+	for (int chain = 0; chain < 2; chain++) {
+		GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex); glTexStorage2D(GL_TEXTURE_2D, chain ? 8 : 1, GL_RGBA8, 128, 128);
+		std::vector<u32> z(128 * 128, 0xff00ff00u); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 128, 128, GL_RGBA, GL_UNSIGNED_BYTE, z.data());
+		const int RL = 64, RX = 16, RY = 40, RW = 40, RH = 30, OFF = 256;
+		std::vector<u8> buf(OFF + RL * RH * 4 + 64, 0);
+		for (int y = 0; y < RH; y++) for (int x = 0; x < RW; x++) { u32 v = pat(x + 100, y + 60); memcpy(&buf[OFF + (y * RL + x) * 4], &v, 4); }
+		GLuint pbo; glGenBuffers(1, &pbo); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo); glBufferData(GL_PIXEL_UNPACK_BUFFER, buf.size(), buf.data(), GL_STREAM_DRAW);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, RL);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, RX, RY, RW, RH, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)OFF);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0); glDeleteBuffers(1, &pbo);
+		std::vector<u32> ex(z); for (int y = 0; y < RH; y++) for (int x = 0; x < RW; x++) ex[(y + RY) * 128 + x + RX] = pat(x + 100, y + 60);
+		nearest(tex, false); sample_into(tex, 128, 128, chain ? "pbo-subrect mip 128x128" : "pbo-subrect 1lvl 128x128", ex, 0);
+		// C2) client-memory subrect with row length (non-PBO)
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, RL); glBindTexture(GL_TEXTURE_2D, tex);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, RX + 50, RY + 50, RW, RH, GL_RGBA, GL_UNSIGNED_BYTE, buf.data() + OFF);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		for (int y = 0; y < RH; y++) for (int x = 0; x < RW; x++) ex[(y + RY + 50) * 128 + x + RX + 50] = pat(x + 100, y + 60);
+		sample_into(tex, 128, 128, chain ? "cpu-subrect mip 128x128" : "cpu-subrect 1lvl 128x128", ex, 0);
+		glDeleteTextures(1, &tex); }
+	// D) REPEAT via sampler object, uv in [-1,2]
+	{ const int W = 16; GLuint tex; glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex); glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, W, W);
+	  std::vector<u32> d(W * W); for (int y = 0; y < W; y++) for (int x = 0; x < W; x++) d[y * W + x] = pat(x * 9, y * 5);
+	  glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, W, GL_RGBA, GL_UNSIGNED_BYTE, d.data());
+	  GLuint smp; glGenSamplers(1, &smp); glSamplerParameteri(smp, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glSamplerParameteri(smp, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	  glSamplerParameteri(smp, GL_TEXTURE_WRAP_S, GL_REPEAT); glSamplerParameteri(smp, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	  glSamplerParameterf(smp, GL_TEXTURE_MAX_LOD, 0.25f); glBindSampler(0, smp);
+	  const int O = W * 3; std::vector<u32> e(O * O); for (int y = 0; y < O; y++) for (int x = 0; x < O; x++) e[y * O + x] = d[(y % W) * W + (x % W)];
+	  sample_into(tex, O, O, "repeat-sampler 16x16 uv[-1,2]", e, 2);
+	  glBindSampler(0, 0); glDeleteSamplers(1, &smp); glDeleteTextures(1, &tex); }
+	// ---- eerec-275: NPOT, update-after-use, delete/reuse ----
+	auto mk = [&](int W, int H, int seed) -> std::vector<u32> { std::vector<u32> d((size_t)W * H);
+		for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) d[(size_t)y * W + x] = 0xff000000u | ((u32)((x * 7 + seed * 50) & 255) << 16) | ((u32)((y * 11 + seed) & 255) << 8) | (u32)(((x ^ y) + seed * 30) & 255);
+		return d; };
+	auto newtex = [&](int W, int H, const std::vector<u32>& d) -> GLuint { GLuint t; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+		glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, W, H); glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, d.data()); nearest(t, false); return t; };
+	{ const int sizes[][2] = {{7, 7}, {24, 40}, {177, 21}, {100, 3}, {300, 200}, {512, 448}, {33, 65}};
+	  for (auto& z : sizes) { auto d = mk(z[0], z[1], 1); GLuint t = newtex(z[0], z[1], d); char n[64]; snprintf(n, sizeof(n), "npot %dx%d", z[0], z[1]);
+		sample_into(t, z[0], z[1], n, d, 0); glDeleteTextures(1, &t); } }
+	{ // F) update-after-use without finish in between
+	  const int W = 64; auto a = mk(W, W, 2), b = mk(W, W, 3);
+	  GLuint t = newtex(W, W, a);
+	  GLuint r1; GLuint f1 = orbis_gt_rt(W, W, &r1); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); glUniform1i(u_mode, 0); glUniform1f(u_lod, 0.0f); glDrawArrays(GL_TRIANGLES, 0, 6);
+	  glBindTexture(GL_TEXTURE_2D, t); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, W, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+	  GLuint r2; GLuint f2 = orbis_gt_rt(W, W, &r2); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); glDrawArrays(GL_TRIANGLES, 0, 6);
+	  glBindFramebuffer(GL_FRAMEBUFFER, f1); orbis_gt_check("update-after-use first", W, W, a);
+	  glBindFramebuffer(GL_FRAMEBUFFER, f2); orbis_gt_check("update-after-use second", W, W, b);
+	  glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f1); glDeleteFramebuffers(1, &f2); glDeleteTextures(1, &r1); glDeleteTextures(1, &r2); glDeleteTextures(1, &t); }
+	{ // G) delete + recreate before GPU consumed
+	  const int W = 64; auto a = mk(W, W, 4), b = mk(W, W, 5);
+	  GLuint t1 = newtex(W, W, a);
+	  GLuint r1; GLuint f1 = orbis_gt_rt(W, W, &r1); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t1); glUniform1i(u_mode, 0); glDrawArrays(GL_TRIANGLES, 0, 6);
+	  glBindTexture(GL_TEXTURE_2D, 0); glDeleteTextures(1, &t1);
+	  GLuint t2 = newtex(W, W, b);
+	  GLuint r2; GLuint f2 = orbis_gt_rt(W, W, &r2); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t2); glDrawArrays(GL_TRIANGLES, 0, 6);
+	  glBindFramebuffer(GL_FRAMEBUFFER, f1); orbis_gt_check("delete-reuse first", W, W, a);
+	  glBindFramebuffer(GL_FRAMEBUFFER, f2); orbis_gt_check("delete-reuse second", W, W, b);
+	  glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f1); glDeleteFramebuffers(1, &f2); glDeleteTextures(1, &r1); glDeleteTextures(1, &r2); glDeleteTextures(1, &t2); }
+	{ // H) many draws into one RT, each from a fresh small texture (texture-cache churn), 16 tiles of 16x16
+	  const int W = 64; GLuint rt; GLuint f = orbis_gt_rt(W, W, &rt); std::vector<u32> e((size_t)W * W); std::vector<GLuint> texs;
+	  glEnable(GL_SCISSOR_TEST);
+	  for (int i = 0; i < 16; i++) { auto d = mk(W, W, 10 + i); GLuint t = newtex(W, W, d); texs.push_back(t);
+		const int x0 = (i & 3) * 16, y0 = (i >> 2) * 16; glBindFramebuffer(GL_FRAMEBUFFER, f); glViewport(0, 0, W, W); glScissor(x0, y0, 16, 16);
+		glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t); glUniform1i(u_mode, 0); glDrawArrays(GL_TRIANGLES, 0, 6);
+		for (int y = y0; y < y0 + 16; y++) for (int x = x0; x < x0 + 16; x++) e[(size_t)y * W + x] = d[(size_t)y * W + x];
+		if (i & 1) { glBindTexture(GL_TEXTURE_2D, 0); glDeleteTextures(1, &texs.back()); texs.back() = 0; } }
+	  glDisable(GL_SCISSOR_TEST); orbis_gt_check("churn 16 textures", W, W, e);
+	  for (GLuint t : texs) if (t) glDeleteTextures(1, &t);
+	  glBindFramebuffer(GL_FRAMEBUFFER, 0); glDeleteFramebuffers(1, &f); glDeleteTextures(1, &rt); }
+	glBindVertexArray(0); glDeleteVertexArrays(1, &vao); glBindBuffer(GL_ARRAY_BUFFER, 0); glDeleteBuffers(1, &vbo);
+	glUseProgram(0); glDeleteProgram(prog); glBindFramebuffer(GL_FRAMEBUFFER, 0); glPixelStorei(GL_PACK_ALIGNMENT, 4); glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	glFinish();
+	printf("[gltest] done\n"); fflush(stdout);
+}
+
 bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 {
 	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
@@ -266,6 +512,8 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	if (!CheckFeatures())
 		return false;
+
+	orbis_gl_selftest(); // eerec-270
 
 	// Store adapter name currently in use
 	m_name = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
@@ -308,12 +556,14 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	// WARNING it must be done after the control setup (at least on MESA)
 	GL_PUSH("GSDeviceOGL::Create");
+	ps5gl_stage("stage: Create begin");
 
 	// ****************************************************************
 	// Various object
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Various");
+		ps5gl_stage("stage: Various begin");
 
 		glGenFramebuffers(1, &m_fbo);
 		glGenFramebuffers(1, &m_fbo_read);
@@ -332,6 +582,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Vertex Buffer");
+		ps5gl_stage("stage: VertexBuffer begin");
 
 		glGenVertexArrays(1, &m_vao);
 		IASetVAO(m_vao);
@@ -363,11 +614,15 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GSVertexPT1), (const GLvoid*)(0));
 		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(GSVertexPT1), (const GLvoid*)(16));
-		glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GSVertex), (const GLvoid*)(8));
+		// Orbis: RGBA fetched as one uint (R8G8B8A8_USCALED unsupported), unpacked in tfx_vgs.glsl.
+		glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(GSVertex), (const GLvoid*)(8));
 		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(GSVertex), (const GLvoid*)(12));
-		glVertexAttribIPointer(4, 2, GL_UNSIGNED_SHORT, sizeof(GSVertex), (const GLvoid*)(16));
+		// Orbis: the PS5 GL driver only fetches 32-bit vertex attributes, so the
+		// packed u16 pairs (XYZ.XY at 16, UV at 24) are fetched as one uint each
+		// and unpacked in tfx_vgs.glsl (orbis_unpack_u16x2).
+		glVertexAttribIPointer(4, 1, GL_UNSIGNED_INT, sizeof(GSVertex), (const GLvoid*)(16));
 		glVertexAttribIPointer(5, 1, GL_UNSIGNED_INT, sizeof(GSVertex), (const GLvoid*)(20));
-		glVertexAttribIPointer(6, 2, GL_UNSIGNED_SHORT, sizeof(GSVertex), (const GLvoid*)(24));
+		glVertexAttribIPointer(6, 1, GL_UNSIGNED_INT, sizeof(GSVertex), (const GLvoid*)(24));
 		glVertexAttribPointer(7, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GSVertex), (const GLvoid*)(28));
 
 		if (m_features.vs_expand)
@@ -401,6 +656,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Sampler");
+		ps5gl_stage("stage: Sampler begin");
 
 		for (u32 key = 0; key < std::size(m_ps_ss); key++)
 		{
@@ -421,6 +677,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Convert");
+		ps5gl_stage("stage: Convert begin");
 
 		m_convert.vs = GetShaderSource("vs_main", GL_VERTEX_SHADER, *convert_glsl);
 
@@ -495,6 +752,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Present");
+		ps5gl_stage("stage: Present begin");
 
 		// these all share the same vertex shader
 		const std::optional<std::string> shader = ReadShaderSource("shaders/opengl/present.glsl");
@@ -524,6 +782,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 			m_present[i].RegisterUniform("u_source_resolution");
 			m_present[i].RegisterUniform("u_rcp_source_resolution");
 			m_present[i].RegisterUniform("u_time");
+			m_present[i].RegisterUniform("u_orbis_param"); // eerec-278
 		}
 	}
 
@@ -532,6 +791,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Merge");
+		ps5gl_stage("stage: Merge begin");
 
 		const std::optional<std::string> shader = ReadShaderSource("shaders/opengl/merge.glsl");
 		if (!shader.has_value())
@@ -555,6 +815,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Interlace");
+		ps5gl_stage("stage: Interlace begin");
 
 		const std::optional<std::string> shader = ReadShaderSource("shaders/opengl/interlace.glsl");
 		if (!shader.has_value())
@@ -587,6 +848,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Rasterization");
+		ps5gl_stage("stage: Rasterization begin");
 
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 		glDisable(GL_CULL_FACE);
@@ -604,6 +866,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	{
 		GL_PUSH("GSDeviceOGL::Date");
+		ps5gl_stage("stage: Date begin");
 
 		m_date.dss = new GSDepthStencilOGL();
 		m_date.dss->EnableStencil();
@@ -693,6 +956,7 @@ void GSDeviceOGL::Destroy()
 bool GSDeviceOGL::CreateTextureFX()
 {
 	GL_PUSH("GSDeviceOGL::CreateTextureFX");
+		ps5gl_stage("stage: CreateTextureFX begin");
 
 	std::optional<std::string> vertex_shader = ReadShaderSource("shaders/opengl/tfx_vgs.glsl");
 	std::optional<std::string> fragment_shader = ReadShaderSource("shaders/opengl/tfx_fs.glsl");
@@ -821,7 +1085,16 @@ bool GSDeviceOGL::CheckFeatures()
 		}
 	}
 
-	if (!GLAD_GL_ARB_direct_state_access)
+	// Orbis: ps5-opengl advertises GL_ARB_direct_state_access but exports none
+	// of the DSA entry points (glCreateSamplers/glCreateTextures/glBindTextureUnit/
+	// glTextureStorage2D/... are all absent), so the GLAD pointers stay NULL and
+	// the first DSA call jumps to address 0. Force the emulation path whenever
+	// the entry points are missing, not just when the extension is unadvertised.
+	const bool have_dsa_entry_points = glad_glCreateSamplers && glad_glCreateTextures &&
+		glad_glBindTextureUnit && glad_glTextureStorage2D && glad_glTextureSubImage2D &&
+		glad_glTextureParameteri && glad_glGenerateTextureMipmap && glad_glCopyTextureSubImage2D &&
+		glad_glCompressedTextureSubImage2D && glad_glGetTextureImage;
+	if (!GLAD_GL_ARB_direct_state_access || !have_dsa_entry_points)
 	{
 		Console.Warning("GL_ARB_direct_state_access is not supported, this will reduce performance.");
 		Emulate_DSA::Init();
@@ -1112,6 +1385,80 @@ GSDevice::PresentResult GSDeviceOGL::BeginPresent(bool frame_skip)
 	return PresentResult::OK;
 }
 
+static void ps5_gl_frame_dump(int w, int h)
+{
+	static const bool enabled = (access("/data/PCSX2/gldump", 0) == 0);
+	static unsigned presents = 0, files = 0;
+	if (!enabled || w <= 0 || h <= 0 || files >= 80 || (++presents % 250) != 0)
+		return;
+	static bool tested = false;
+	if (!tested)
+	{
+		tested = true;
+		GLint prev_fbo = 0, prev_tex = 0;
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+		GLuint tex = 0, fbo = 0;
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+		const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		GLboolean cm[4]; glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		glDisable(GL_SCISSOR_TEST);
+		glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		u8 t[64 * 64 * 4] = {};
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, t);
+		u8 g[64 * 64 * 4] = {};
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, g);
+		std::printf("[gldump] fbo-test status=%x readpixels=%02x%02x%02x%02x getteximage=%02x%02x%02x%02x err=%x\n", st,
+			t[0], t[1], t[2], t[3], g[0], g[1], g[2], g[3], glGetError());
+		glColorMask(cm[0], cm[1], cm[2], cm[3]);
+		glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+		glDeleteFramebuffers(1, &fbo);
+		glBindTexture(GL_TEXTURE_2D, prev_tex);
+		glDeleteTextures(1, &tex);
+		std::fflush(stdout);
+	}
+	std::vector<u8> px(static_cast<size_t>(w) * h * 4);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+	const int ow = w / 2, oh = h / 2, row = (ow * 3 + 3) & ~3;
+	std::vector<u8> bmp(54 + static_cast<size_t>(row) * oh, 0);
+	u8* hd = bmp.data();
+	const u32 fsz = static_cast<u32>(bmp.size()), off = 54, dib = 40, img = static_cast<u32>(row) * oh;
+	hd[0] = 'B'; hd[1] = 'M'; std::memcpy(hd + 2, &fsz, 4); std::memcpy(hd + 10, &off, 4); std::memcpy(hd + 14, &dib, 4);
+	std::memcpy(hd + 18, &ow, 4); std::memcpy(hd + 22, &oh, 4); hd[26] = 1; hd[28] = 24; std::memcpy(hd + 34, &img, 4);
+	u64 a0 = 0, nonblack = 0;
+	for (int y = 0; y < oh; y++)
+	{
+		u8* dst = hd + 54 + static_cast<size_t>(y) * row;
+		const u8* src = px.data() + static_cast<size_t>(y * 2) * w * 4;
+		for (int x = 0; x < ow; x++)
+		{
+			const u8* p = src + x * 8;
+			dst[x * 3 + 0] = p[2]; dst[x * 3 + 1] = p[1]; dst[x * 3 + 2] = p[0];
+			a0 += (p[3] == 0);
+			nonblack += ((p[0] | p[1] | p[2]) != 0);
+		}
+	}
+	char name[64];
+	std::snprintf(name, sizeof(name), "/data/PCSX2/gl_%03u.bmp", files++);
+	if (FILE* f = std::fopen(name, "wb")) { std::fwrite(bmp.data(), 1, bmp.size(), f); std::fclose(f); }
+	std::printf("[gldump] %s present=%u %dx%d alpha0=%llu nonblack=%llu\n", name, presents, w, h,
+		(unsigned long long)a0, (unsigned long long)nonblack);
+	std::fflush(stdout);
+}
+
 void GSDeviceOGL::EndPresent()
 {
 	RenderImGui();
@@ -1119,6 +1466,7 @@ void GSDeviceOGL::EndPresent()
 	if (m_gpu_timing_enabled)
 		PopTimestampQuery();
 
+	ps5_gl_frame_dump(static_cast<int>(m_window_info.surface_width), static_cast<int>(m_window_info.surface_height));
 	m_gl_context->SwapBuffers();
 
 	if (m_gpu_timing_enabled)
@@ -1307,6 +1655,10 @@ void GSDeviceOGL::DrawPrimitive()
 	glDrawArrays(m_draw_topology, m_vertex.start, m_vertex.count);
 }
 
+// Orbis: per-frame draw accounting for bring-up.
+static unsigned long long s_orbis_draws = 0;
+extern "C" void ps5gl_draw_count(unsigned long long* out) { *out = s_orbis_draws; }
+
 void GSDeviceOGL::DrawIndexedPrimitive()
 {
 	DrawIndexedPrimitive(0, m_index.count);
@@ -1315,6 +1667,7 @@ void GSDeviceOGL::DrawIndexedPrimitive()
 void GSDeviceOGL::DrawIndexedPrimitive(int offset, int count)
 {
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+	s_orbis_draws++;
 	glDrawElementsBaseVertex(m_draw_topology, count, GL_UNSIGNED_SHORT,
 		reinterpret_cast<void*>((static_cast<u32>(m_index.start) + static_cast<u32>(offset)) * sizeof(u16)),
 		static_cast<GLint>(m_vertex.start));
@@ -1753,8 +2106,38 @@ void GSDeviceOGL::BlitRect(GSTexture* sTex, const GSVector4i& r, const GSVector2
 }
 
 // Copy a sub part of a texture into another
+struct ps5_copyprof_t { unsigned long long n = 0, ticks = 0, px = 0, last = 0; unsigned long long maxt = 0; int mw = 0, mh = 0; };
+ps5_copyprof_t ps5_copyprof, ps5_readprof;
+void ps5_copyprof_report()
+{
+	const unsigned long long now = __builtin_ia32_rdtsc();
+	if (!ps5_copyprof.last) { ps5_copyprof.last = now; return; }
+	if (now - ps5_copyprof.last < 2000000000ULL * 3) return;
+	ps5_copyprof.last = now;
+	const double tpms = 1600000.0;
+	std::printf("[copyprof] copyrect n=%llu ms=%.1f px=%llu max_ms=%.1f (%dx%d) | readback n=%llu ms=%.1f px=%llu max_ms=%.1f (%dx%d)\n",
+		ps5_copyprof.n, ps5_copyprof.ticks / tpms, ps5_copyprof.px, ps5_copyprof.maxt / tpms, ps5_copyprof.mw, ps5_copyprof.mh,
+		ps5_readprof.n, ps5_readprof.ticks / tpms, ps5_readprof.px, ps5_readprof.maxt / tpms, ps5_readprof.mw, ps5_readprof.mh);
+	std::fflush(stdout);
+	ps5_copyprof.n = ps5_copyprof.ticks = ps5_copyprof.px = ps5_copyprof.maxt = 0;
+	ps5_readprof.n = ps5_readprof.ticks = ps5_readprof.px = ps5_readprof.maxt = 0;
+}
+struct ps5_copyprof_scope
+{
+	ps5_copyprof_t& p; unsigned long long t0; int w, h;
+	ps5_copyprof_scope(ps5_copyprof_t& p_, int w_, int h_) : p(p_), t0(__builtin_ia32_rdtsc()), w(w_), h(h_) {}
+	~ps5_copyprof_scope()
+	{
+		const unsigned long long dt = __builtin_ia32_rdtsc() - t0;
+		p.n++; p.ticks += dt; p.px += (unsigned long long)w * h;
+		if (dt > p.maxt) { p.maxt = dt; p.mw = w; p.mh = h; }
+		ps5_copyprof_report();
+	}
+};
+
 void GSDeviceOGL::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY)
 {
+	ps5_copyprof_scope ps5_cps(ps5_copyprof, r.width(), r.height());
 	// Empty rect, abort copy.
 	if (r.rempty())
 	{
@@ -1784,6 +2167,28 @@ void GSDeviceOGL::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r
 	if (dTex->GetState() == GSTexture::State::Cleared && !full_draw_copy)
 		CommitClear(dTex, false);
 
+	// eerec-236 copyrect: NULL copy-image entry points -> shader copy.
+	{
+		const bool have_copy = (GLAD_GL_VERSION_4_3 || GLAD_GL_ARB_copy_image) ? (glCopyImageSubData != nullptr) :
+							   GLAD_GL_EXT_copy_image ? (glCopyImageSubDataEXT != nullptr) :
+							   GLAD_GL_NV_copy_image ? (glCopyImageSubDataNV != nullptr) : false;
+		if (!have_copy)
+		{
+			static bool s_logged = false;
+			if (!s_logged)
+			{
+				s_logged = true;
+				std::printf("[copyrect] copy_image entry point NULL (43=%d arb=%d ext=%d nv=%d) -> StretchRect fallback\n",
+					(int)GLAD_GL_VERSION_4_3, (int)GLAD_GL_ARB_copy_image, (int)GLAD_GL_EXT_copy_image, (int)GLAD_GL_NV_copy_image);
+				std::fflush(stdout);
+			}
+			const GSVector4 sRect = GSVector4(r) / GSVector4(sTex->GetSize()).xyxy();
+			const GSVector4 dRect(static_cast<float>(destX), static_cast<float>(destY),
+				static_cast<float>(destX + r.width()), static_cast<float>(destY + r.height()));
+			StretchRect(sTex, sRect, dTex, dRect, dTex->IsDepthStencil() ? ShaderConvert::DEPTH_COPY : ShaderConvert::COPY, Filter::Nearest);
+			return;
+		}
+	}
 	if (GLAD_GL_VERSION_4_3 || GLAD_GL_ARB_copy_image)
 	{
 		glCopyImageSubData(sid, GL_TEXTURE_2D, 0, r.x, r.y, 0, did, GL_TEXTURE_2D,
@@ -1902,6 +2307,7 @@ void GSDeviceOGL::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture
 	prog.Uniform2fv(6, &cb.SourceResolution.x);
 	prog.Uniform2fv(7, &cb.RcpSourceResolution.x);
 	prog.Uniform1f(8, cb.TimeAndPad.x);
+	{ extern float g_orbis_present_param[4]; prog.Uniform4fv(9, g_orbis_present_param); } // eerec-278
 
 	OMSetDepthStencilState(m_convert.dss);
 	OMSetBlendState(false);
@@ -1917,6 +2323,222 @@ void GSDeviceOGL::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture
 	// Only flipping the backbuffer is transparent (I hope)...
 	const GSVector4 flip_sr(sRect.xwzy());
 	DrawStretchRect(flip_sr, dRect, ds);
+
+}
+
+
+// Orbis: present the current GL frame through the CPU overlay's VideoOut.
+// PCSX2's own present path is disabled (surfaceless window info) because
+// ps5-opengl's flip path kernel-panicked when driven from the MTGS thread.
+// Orbis: sample the window back buffer (the EGL surface that ps5-opengl
+// presents) so we can tell whether PCSX2's blit landed there.
+// eerec-279: read a texture back through a read FBO and report how much of it is non-black.
+void OrbisDiagTexture(const char* tag, GSTexture* t)
+{
+	if (!t)
+	{
+		printf("[swgl] %s null\n", tag);
+		fflush(stdout);
+		return;
+	}
+	GSTextureOGL* tex = static_cast<GSTextureOGL*>(t);
+	const int w = tex->GetWidth(), h = tex->GetHeight();
+	std::vector<u32> buf(static_cast<size_t>(w) * h, 0xdeadbeefu);
+	GLint prev_read = 0, prev_pack = 0;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev_pack);
+	static GLuint s_fbo = 0;
+	if (!s_fbo)
+		glGenFramebuffers(1, &s_fbo);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fbo);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex->GetID(), 0);
+	const GLenum st = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+	const GLenum err = glGetError();
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_read);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, prev_pack);
+	size_t nonblack = 0, untouched = 0;
+	for (const u32 v : buf)
+	{
+		nonblack += (v & 0x00ffffffu) != 0;
+		untouched += (v == 0xdeadbeefu);
+	}
+	printf("[swgl] %s id=%u %dx%d rt=%d lv=%d fbo=%x nonblack=%zu/%zu untouched=%zu center=%08x quarter=%08x err=%x\n", tag,
+		tex->GetID(), w, h, static_cast<int>(t->IsRenderTarget()), t->GetMipmapLevels(), st, nonblack, buf.size(), untouched,
+		buf[static_cast<size_t>(h / 2) * w + w / 2], buf[static_cast<size_t>(h / 4) * w + w / 4], err);
+	fflush(stdout);
+}
+
+void OrbisSampleWindow()
+{
+	if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::OpenGL)
+		return;
+
+	static unsigned long long n = 0;
+	if ((n++ % 120) != 0)
+		return;
+
+	u8 px[64 * 64 * 4];
+	std::memset(px, 0, sizeof(px));
+	GLint vp[4] = {0, 0, 0, 0};
+	glGetIntegerv(GL_VIEWPORT, vp);
+	const GLint x = (vp[2] > 64) ? (vp[2] / 2 - 32) : 0;
+	const GLint y = (vp[3] > 64) ? (vp[3] / 2 - 32) : 0;
+	glReadPixels(x, y, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	unsigned long long sum = 0;
+	unsigned mx = 0;
+	for (size_t i = 0; i < sizeof(px); i++)
+	{
+		sum += px[i];
+		if (px[i] > mx)
+			mx = px[i];
+	}
+	printf("[glwin] #%llu vp=%d,%d %dx%d mean=%.2f max=%u err=0x%x\n", n, vp[0], vp[1], vp[2], vp[3],
+		static_cast<double>(sum) / static_cast<double>(sizeof(px)), mx, static_cast<unsigned>(glGetError()));
+	fflush(stdout);
+}
+
+void OrbisPresentGLFrame()
+{
+	if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::OpenGL)
+		return;
+
+	GSTexture* cur = g_gs_device->GetCurrent();
+	if (!cur)
+		return;
+
+	GSTextureOGL* src = static_cast<GSTextureOGL*>(cur);
+	const int w = src->GetWidth();
+	const int h = src->GetHeight();
+	if (w <= 0 || h <= 0 || src->GetID() == 0)
+		return;
+
+	static std::vector<u8> s_rb;
+	static std::vector<u8> s_flip;
+	static GLuint s_read_fbo = 0;
+	if (s_rb.size() < static_cast<size_t>(w) * h * 4)
+	{
+		s_rb.resize(static_cast<size_t>(w) * h * 4);
+		s_flip.resize(static_cast<size_t>(w) * h * 4);
+	}
+	if (s_read_fbo == 0)
+		glGenFramebuffers(1, &s_read_fbo);
+
+	GLint prev_read = 0;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, s_read_fbo);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src->GetID(), 0);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_rb.data());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_read);
+
+	for (int y = 0; y < h; y++)
+		std::memcpy(&s_flip[static_cast<size_t>(y) * w * 4],
+			&s_rb[static_cast<size_t>(h - 1 - y) * w * 4], static_cast<size_t>(w) * 4);
+
+	orbis_present_frame(s_flip.data(), w, h, w * 4);
+
+	// Orbis: compare the GL readback against the GS-memory view of the display
+	// framebuffer. Tells us whether the HW renderer's target is empty while GS
+	// memory has content (HW path broken) or both are empty (game/display setup).
+	{
+		static unsigned long long orbis_cmp = 0;
+		unsigned long long n = orbis_cmp++;
+		if (n < 3 || (n % 120) == 0)
+		{
+			const auto& disp = g_gs_renderer->PCRTCDisplays.PCRTCDisplays[1];
+			if (disp.enabled && disp.FBW != 0)
+			{
+				GSLocalMemory& mem = g_gs_renderer->m_mem;
+				const u32 bp = disp.Block() * 256u;
+				const u32 px = mem.ReadPixel32(disp.displayRect.x + 100, disp.displayRect.y + 100, bp, disp.FBW);
+				const u32 px2 = mem.ReadPixel32(disp.displayRect.x + 200, disp.displayRect.y + 150, bp, disp.FBW);
+				const u32 gl100 = (100 < w && 100 < h) ? *reinterpret_cast<const u32*>(&s_flip[(static_cast<size_t>(100) * w + 100) * 4]) : 0xDEADBEEF;
+				printf("[gsmem] #%llu disp1 block=%05x fbw=%u psm=%u rect=(%d,%d,%d,%d) px100=%08x px2=%08x gl100=%08x\n",
+					n, (unsigned)disp.Block(), (unsigned)disp.FBW, (unsigned)disp.PSM,
+					disp.displayRect.x, disp.displayRect.y, disp.displayRect.z, disp.displayRect.w, px, px2, gl100);
+				fflush(stdout);
+
+				// Orbis: dump the GS-memory view of the display framebuffer as a
+				// BMP so the game's own output can be inspected offline.
+				if ((n % 240) == 0 && disp.PSM == 0 && disp.FBW != 0)
+				{
+					FILE* gf = fopen("/data/PCSX2/gsframe.bmp", "wb");
+					if (gf)
+					{
+						const int gw = 512, gh = 512;
+						unsigned char hdr[54] = {0};
+						const unsigned rowbytes = static_cast<unsigned>(gw) * 4;
+						const unsigned imgsize = rowbytes * static_cast<unsigned>(gh);
+						hdr[0] = 'B'; hdr[1] = 'M';
+						*reinterpret_cast<unsigned*>(hdr + 2) = 54 + imgsize;
+						*reinterpret_cast<unsigned*>(hdr + 10) = 54;
+						*reinterpret_cast<unsigned*>(hdr + 14) = 40;
+						*reinterpret_cast<int*>(hdr + 18) = gw;
+						*reinterpret_cast<int*>(hdr + 22) = gh;
+						*reinterpret_cast<unsigned short*>(hdr + 26) = 1;
+						*reinterpret_cast<unsigned short*>(hdr + 28) = 32;
+						*reinterpret_cast<unsigned*>(hdr + 34) = imgsize;
+						fwrite(hdr, 1, 54, gf);
+						std::vector<u8> row(static_cast<size_t>(gw) * 4);
+						for (int yy = gh - 1; yy >= 0; yy--)
+						{
+							for (int xx = 0; xx < gw; xx++)
+							{
+								const u32 v = mem.ReadPixel32(xx, yy, bp, disp.FBW);
+								*reinterpret_cast<u32*>(&row[static_cast<size_t>(xx) * 4]) = v;
+							}
+							fwrite(row.data(), 1, row.size(), gf);
+						}
+						fclose(gf);
+						printf("[gsmem] wrote gsframe.bmp (GS memory view)\n");
+						fflush(stdout);
+					}
+				}
+				fflush(stdout);
+			}
+			else
+			{
+				printf("[gsmem] #%llu disp1 disabled or fbw=0\n", n);
+				fflush(stdout);
+			}
+		}
+	}
+
+	static unsigned long long rb = 0;
+	unsigned long long n = rb++;
+	if (n < 3 || (n % 120) == 0)
+	{
+		const size_t mid = (static_cast<size_t>(h / 2) * w + w / 2) * 4;
+		printf("[glpresent] #%llu readback %dx%d center=%02x%02x%02x err=0x%x\n", n, w, h,
+			s_flip[mid + 0], s_flip[mid + 1], s_flip[mid + 2], (unsigned)glGetError());
+		fflush(stdout);
+
+		// Full-frame dump for offline inspection.
+		FILE* f = fopen("/data/PCSX2/glframe.bmp", "wb");
+		if (f)
+		{
+			unsigned char hdr[54] = {0};
+			const unsigned rowbytes = static_cast<unsigned>(w) * 4;
+			const unsigned imgsize = rowbytes * static_cast<unsigned>(h);
+			hdr[0] = 'B'; hdr[1] = 'M';
+			*reinterpret_cast<unsigned*>(hdr + 2) = 54 + imgsize;
+			*reinterpret_cast<unsigned*>(hdr + 10) = 54;
+			*reinterpret_cast<unsigned*>(hdr + 14) = 40;
+			*reinterpret_cast<int*>(hdr + 18) = w;
+			*reinterpret_cast<int*>(hdr + 22) = h;
+			*reinterpret_cast<unsigned short*>(hdr + 26) = 1;
+			*reinterpret_cast<unsigned short*>(hdr + 28) = 32;
+			*reinterpret_cast<unsigned*>(hdr + 34) = imgsize;
+			fwrite(hdr, 1, 54, f);
+			for (int yy = h - 1; yy >= 0; yy--)
+				fwrite(s_flip.data() + static_cast<size_t>(yy) * w * 4, 1, rowbytes, f);
+			fclose(f);
+		}
+	}
 }
 
 void GSDeviceOGL::UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize)
@@ -2385,6 +3007,7 @@ void GSDeviceOGL::IASetPrimitiveTopology(GLenum topology)
 
 void GSDeviceOGL::PSSetShaderResource(int i, GSTexture* sr)
 {
+
 	pxAssert(i < static_cast<int>(std::size(GLState::tex_unit)));
 
 	const GLuint id = sr ?  static_cast<GSTextureOGL*>(sr)->GetID() : 0;
@@ -2510,6 +3133,12 @@ bool GSDeviceOGL::CreateImGuiProgram()
 
 void GSDeviceOGL::RenderImGui()
 {
+	// Orbis: this port has no ImGui backend, so no context is ever created.
+	// ImGui::Render()/GetDrawData() dereference the (null) current context and
+	// crash the MTGS thread. Nothing to draw in that case.
+	if (!ImGui::GetCurrentContext())
+		return;
+
 	ImGui::Render();
 	const ImDrawData* draw_data = ImGui::GetDrawData();
 	if (draw_data->CmdLists.Size == 0)
@@ -2722,6 +3351,7 @@ void GSDeviceOGL::OMSetBlendState(bool enable, GLenum src_factor, GLenum dst_fac
 
 void GSDeviceOGL::OMSetRenderTargets(GSTexture* rt, GSTexture* ds_as_rt, GSTexture* ds, const GSVector4i* scissor)
 {
+
 	const bool rt_changed = (rt != GLState::rt);
 	const bool ds_as_rt_changed = (ds_as_rt != GLState::ds_as_rt);
 	const bool ds_changed = (ds != GLState::ds);
@@ -2798,6 +3428,7 @@ void GSDeviceOGL::SetScissor(const GSVector4i& scissor)
 
 void GSDeviceOGL::SetupPipeline(const ProgramSelector& psel)
 {
+
 	auto it = m_programs.find(psel);
 	if (it != m_programs.end())
 	{
@@ -2841,8 +3472,14 @@ static constexpr std::array<GLenum, 3> s_gl_blend_ops = { {
 } };
 // clang-format on
 
+extern unsigned long long g_orbis_renderhw_ticks, g_orbis_renderhw_n;
 void GSDeviceOGL::RenderHW(GSHWDrawConfig& config)
 {
+	struct OrbisRenderHwTimer
+	{
+		const unsigned long long t0 = __builtin_ia32_rdtsc();
+		~OrbisRenderHwTimer() { g_orbis_renderhw_ticks += __builtin_ia32_rdtsc() - t0; ++g_orbis_renderhw_n; }
+	} orbis_renderhw_timer;
 	if (!GLState::scissor.eq(config.scissor))
 	{
 		glScissor(config.scissor.x, config.scissor.y, config.scissor.width(), config.scissor.height());
@@ -3259,11 +3896,21 @@ void GSDeviceOGL::SendHWDraw(const GSHWDrawConfig& config,
 	GSTexture* draw_rt_clone, GSTexture* draw_rt, GSTexture* draw_ds_clone, GSTexture* draw_ds,
 	const bool one_barrier, const bool full_barrier)
 {
+
 #ifdef PCSX2_DEVBUILD
 	if ((one_barrier || full_barrier) && !(config.IsFeedbackLoopRT(config.ps) || config.IsFeedbackLoopDepth(config.ps))) [[unlikely]]
 		Console.Warning("OpenGL: Possible unnecessary barrier detected.");
 #endif
 
+	// eerec-240 onebarrier
+	static const bool s_ps5_fullbarrier = (access("/data/PCSX2/fullbarrier", 0) == 0);
+	if (full_barrier && m_features.texture_barrier && !s_ps5_fullbarrier)
+	{
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+		glTextureBarrier();
+		Draw(config);
+		return;
+	}
 	if (full_barrier)
 	{
 		pxAssert(config.drawlist && !config.drawlist->empty());

@@ -28,6 +28,11 @@
 #include "DebugTools/SymbolGuardian.h"
 #include "R5900OpcodeTables.h"
 
+// Orbis: stdout is 1MB-buffered; neuter hot-path fflush in this TU (see
+// iR5900.cpp). Crash handler flushes first thing (separate TU).
+#undef fflush
+#define fflush(f) ((void)0)
+
 #include "fmt/format.h"
 
 using namespace R5900;	// for R5900 disasm tools
@@ -190,6 +195,11 @@ void cpuTlbMissW(u32 addr, u32 bd) {
 	cpuTlbMiss(addr, bd, EXC_CODE_TLBS);
 }
 
+static unsigned long long orbis_forced_event_count = 0;
+static unsigned long long orbis_small_event_delta_count = 0;
+static unsigned long long orbis_cpu_int_counts[32] = {};
+static unsigned long long orbis_guest_wait_skips = 0;
+
 // sets a branch test to occur some time from an arbitrary starting point.
 __fi void cpuSetNextEvent( u64 startCycle, s32 delta )
 {
@@ -205,6 +215,8 @@ __fi void cpuSetNextEvent( u64 startCycle, s32 delta )
 // sets a branch to occur some time from the current cycle
 __fi void cpuSetNextEventDelta( s32 delta )
 {
+	if (delta < 100)
+		orbis_small_event_delta_count++;
 	cpuSetNextEvent( cpuRegs.cycle, delta );
 }
 
@@ -233,6 +245,7 @@ __fi int cpuTestCycle( u64 startCycle, s32 delta )
 // tells the EE to run the branch test the next time it gets a chance.
 __fi void cpuSetEvent()
 {
+	orbis_forced_event_count++;
 	cpuRegs.nextEventCycle = cpuRegs.cycle;
 }
 
@@ -438,11 +451,20 @@ __fi void _cpuEventTest_Shared()
 	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
 	const int nextIopEventDeta = ((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier);
 	// 8 or more cycles behind and there's an event scheduled
+	static unsigned long long orbis_rapid = 0, orbis_total = 0, orbis_eecy = 0;
+	static u32 orbis_last_cycle = 0;
+	static bool orbis_have_last_cycle = false;
+	orbis_total++;
+	if (orbis_have_last_cycle)
+		orbis_eecy += static_cast<u32>(cpuRegs.cycle - orbis_last_cycle);
+	orbis_last_cycle = cpuRegs.cycle;
+	orbis_have_last_cycle = true;
 	if (EEsCycle >= nextIopEventDeta)
 	{
 		// EE's running way ahead of the IOP still, so we should branch quickly to give the
 		// IOP extra timeslices in short order.
 
+		orbis_rapid++;
 		cpuSetNextEventDelta(48);
 		//Console.Warning( "EE ahead of the IOP -- Rapid Event!  %d", EEsCycle );
 	}
@@ -454,6 +476,48 @@ __fi void _cpuEventTest_Shared()
 
 	// Apply vsync and other counter nextCycles
 	cpuSetNextEvent(nextStartCounter, nextDeltaCounter);
+
+	/* Ratchet & Clank SCES-50916 has a pure guest-side wait at 0x00118cc0:
+	 * lw v0,0(sp); beq v0,zero,loop. Fast-forward only while the flag is
+	 * zero; the next scheduled event still runs before checking it again. */
+	if (EmuConfig.Speedhacks.WaitLoop &&
+		(cpuRegs.pc == 0x00118cc0 || cpuRegs.pc == 0x00118cb0) &&
+		cpuRegs.GPR.r[2].UL[0] == 0 && cpuRegs.nextEventCycle > cpuRegs.cycle)
+	{
+		cpuRegs.cycle = cpuRegs.nextEventCycle;
+		++orbis_guest_wait_skips;
+	}
+
+	if ((orbis_total % 20000) == 0)
+	{
+		// Orbis: cheap event-test rate diagnostic (no clock calls on the hot path).
+		if (0) printf("[dbg] evtrate: rapid=%llu/%llu cycles_per_test=%llu forced=%llu small_delta=%llu "
+			"nextEventDelta=%lld nextDelta=%d hsDelta=%u vsDelta=%u "
+			"c0=%u/%u c1=%u/%u c2=%u/%u c3=%u/%u iopCyc=%u eeCyc=%u\n",
+			orbis_rapid, orbis_total, (unsigned long long)(orbis_eecy / orbis_total),
+			orbis_forced_event_count, orbis_small_event_delta_count, nextIopEventDeta,
+			(long long)(cpuRegs.nextEventCycle - cpuRegs.cycle),
+			(unsigned)nextDeltaCounter, (unsigned)hsyncCounter.deltaCycles,
+			(unsigned)vsyncCounter.deltaCycles,
+			(unsigned)counters[0].count, (unsigned)counters[0].target,
+			(unsigned)counters[1].count, (unsigned)counters[1].target,
+			(unsigned)counters[2].count, (unsigned)counters[2].target,
+			(unsigned)counters[3].count, (unsigned)counters[3].target,
+			(unsigned)psxRegs.cycle, (unsigned)cpuRegs.cycle);
+		if (0) printf("[dbg] evint: vif0=%llu vif1=%llu gif=%llu ipu=%llu sif0=%llu sif1=%llu sif2=%llu "
+			"vu0=%llu vu1=%llu mtvu=%llu\n",
+			orbis_cpu_int_counts[DMAC_VIF0], orbis_cpu_int_counts[DMAC_VIF1],
+			orbis_cpu_int_counts[DMAC_GIF], orbis_cpu_int_counts[IPU_PROCESS],
+			orbis_cpu_int_counts[DMAC_SIF0], orbis_cpu_int_counts[DMAC_SIF1],
+			orbis_cpu_int_counts[DMAC_SIF2], orbis_cpu_int_counts[VIF_VU0_FINISH],
+			orbis_cpu_int_counts[VIF_VU1_FINISH], orbis_cpu_int_counts[VU_MTVU_BUSY]);
+		if (0) printf("[dbg] evwait: skips=%llu\n", orbis_guest_wait_skips);
+		orbis_rapid = 0; orbis_total = 0; orbis_eecy = 0;
+		orbis_forced_event_count = 0; orbis_small_event_delta_count = 0;
+		for (unsigned i = 0; i < 32; ++i)
+			orbis_cpu_int_counts[i] = 0;
+		orbis_guest_wait_skips = 0;
+	}
 
 	eeEventTestIsActive = false;
 }
@@ -521,6 +585,7 @@ __fi void CPU_SET_DMASTALL(EE_EventType n, bool set)
 
 __fi void CPU_INT( EE_EventType n, s32 ecycle)
 {
+	++orbis_cpu_int_counts[static_cast<unsigned>(n) & 31u];
 	// If it's retunning too quick, just rerun the DMA, there's no point in running the EE for < 4 cycles.
 	// This causes a huge uplift in performance for ONI FMV's.
 	if (ecycle < 4 && !(cpuRegs.dmastall & (1 << n)) && eeRunInterruptScan != INT_NOT_RUNNING)

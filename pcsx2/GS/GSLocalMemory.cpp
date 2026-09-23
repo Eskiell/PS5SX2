@@ -5,6 +5,7 @@
 #include "GS/GSLocalMemory.h"
 #include "GS/GSExtra.h"
 #include "GS/GSPng.h"
+#include "common/Console.h"
 #include <unordered_set>
 
 template <typename Fn>
@@ -51,6 +52,7 @@ GSLocalMemory::GSLocalMemory()
 	: m_clut(this)
 {
 	m_vm8 = (u8*)GSAllocateWrappedMemory(m_vmsize, 4);
+	Console.WriteLn("[dbg] gsm: GSAllocateWrappedMemory -> %p", m_vm8);
 	if (!m_vm8)
 		pxFailRel("Failed to allocate GS memory storage.");
 

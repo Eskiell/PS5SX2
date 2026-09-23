@@ -35,8 +35,8 @@ static std::mutex s_cache_lock;
 
 static std::atomic<bool> cdvd_is_open;
 
-//bits: 12 would use 1<<12 entries, or 4096*16 sectors ~ 128MB
-#define CACHE_SIZE 12
+// Orbis: reduced to 8 (256 entries, ~9.6MB) to fit bigapp BSS budget
+#define CACHE_SIZE 8
 
 static constexpr u32 CacheSize = 1U << CACHE_SIZE;
 static SectorInfo Cache[CacheSize];

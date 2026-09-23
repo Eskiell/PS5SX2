@@ -106,6 +106,8 @@ public:
 	bool IsMaskEnable() { return m_depth_mask != GL_FALSE; }
 };
 
+extern bool g_ps5_nopbo;
+
 class GSDeviceOGL final : public GSDevice
 {
 public:
@@ -330,7 +332,7 @@ public:
 	__fi bool IsDownloadPBODisabled() const { return m_disable_download_pbo; }
 	__fi u32 GetFBORead() const { return m_fbo_read; }
 	__fi u32 GetFBOWrite() const { return m_fbo_write; }
-	__fi GLStreamBuffer* GetTextureUploadBuffer() const { return m_texture_upload_buffer.get(); }
+	__fi GLStreamBuffer* GetTextureUploadBuffer() const { return g_ps5_nopbo ? nullptr : m_texture_upload_buffer.get(); }
 	void CommitClear(GSTexture* t, bool use_write_fbo);
 
 	RenderAPI GetRenderAPI() const override;

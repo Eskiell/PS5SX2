@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "iR3000A.h"
+#include "R5900.h"
 #include "Host.h"
 #include "R3000A.h"
 #include "BaseblockEx.h"
@@ -9,6 +10,8 @@
 #include "IopBios.h"
 #include "IopHw.h"
 #include "Common.h"
+#include <chrono>
+#include <cstdio>
 #include "common/HeapArray.h"
 #include "VMManager.h"
 
@@ -27,6 +30,14 @@
 #include "common/Path.h"
 #include "common/Perf.h"
 #include "DebugTools/Breakpoints.h"
+
+// Orbis on-screen boot console (live IOP feed). Header is ours (port).
+#include "debug_overlay.h"
+
+// Orbis: stdout is 1MB-buffered; neuter hot-path fflush in this TU (see
+// iR5900.cpp). Crash handler flushes first thing (separate TU).
+#undef fflush
+#define fflush(f) ((void)0)
 
 //#define DUMP_BLOCKS 1
 //#define TRACE_BLOCKS 1
@@ -291,6 +302,18 @@ static void _DynGen_Dispatchers()
 	iopUnmappedRecLUTPage =  _DynGen_UnmappedRecLUTPage();
 
 	recBlocks.SetJITCompile(iopJITCompile);
+
+	{
+		const u8* p = start;
+		printf("[dbg] iopcodeprobe: base=%p len=%u\n", (void*)p, (unsigned)(xGetPtr() - start));
+		for (int i = 0; i < 128; i += 16)
+		{
+			printf("[dbg] iopcodeprobe: +%03x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", i,
+				p[i], p[i+1], p[i+2], p[i+3], p[i+4], p[i+5], p[i+6], p[i+7],
+				p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13], p[i+14], p[i+15]);
+		}
+		fflush(stdout);
+	}
 
 	Perf::any.Register(start, xGetPtr() - start, "IOP Dispatcher");
 }
@@ -1615,6 +1638,21 @@ static void PreBlockCheck(u32 blockpc)
 
 static void iopRecRecompile(const u32 startpc)
 {
+	if (0) printf("[dbg] iop: recRecompile pc=%08x\n", startpc); // Orbis: no fflush (hot path; ticker flushes 1/s)
+	{
+		static unsigned iop_probe = 0;
+		const unsigned n = iop_probe++;
+		ps5::debug::set_line(6, "iop[%u] pc=%08x", n, startpc);
+		(void)n;
+		{
+			unsigned long long sp = 0;
+			asm volatile("mov %%rsp, %0" : "=r"(sp));
+			static unsigned long long last_sp = 0;
+			if (sp < 0x1000000000ULL && last_sp >= 0x1000000000ULL)
+				printf("[dbg] RSP-WILD iop pc=%08x rsp=%llx\n", startpc, sp);
+			last_sp = sp;
+		}
+	}
 	u32 i;
 	u32 link_next_block = 0;
 
@@ -1668,6 +1706,7 @@ static void iopRecRecompile(const u32 startpc)
 	psxbranch = 0;
 
 	s_pCurBlock->SetFnptr((uptr)x86Ptr);
+	if (0) printf("[dbg] iop: block store pc=%08x fnptr=%p (entry@%p)\n", startpc, (void*)x86Ptr, (void*)s_pCurBlock); // Orbis: no fflush (hot path)
 	s_psxBlockCycles = 0;
 
 	// reset recomp state variables

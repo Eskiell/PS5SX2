@@ -37,6 +37,7 @@ BIOS
 
 #include "common/AlignedMalloc.h"
 #include "common/Error.h"
+#include <sys/mman.h>
 
 #ifdef ENABLECACHE
 #include "Cache.h"
@@ -85,44 +86,107 @@ namespace HostMemoryMap
 	}
 } // namespace HostMemoryMap
 
+extern "C" unsigned long long orbis_self_alloc(unsigned long long len);
+extern "C" void* orbis_alloc_pool(unsigned long long len);
+extern "C" void* orbis_alloc_jit(unsigned long long len);
+extern "C" long long sceKernelGetDirectMemorySize(void);
+extern "C" int sceKernelAllocateDirectMemory(long long, long long, unsigned long long,
+	unsigned long long, int, long long*);
+extern "C" int sceKernelMapDirectMemory(void**, unsigned long long, int, int, long long, unsigned long long);
+extern "C" int sceKernelReserveVirtualRange(void**, unsigned long long, int, unsigned long long);
+extern "C" void orbis_vtlb_dump();
+extern "C" int sceKernelReleaseDirectMemory(long long, unsigned long long);
+
+volatile unsigned long long g_orbis_map_addr = 0;
+volatile unsigned long long g_orbis_map_ready = 0;
+extern "C" volatile unsigned long long g_orbis_data_base = 0;
+extern "C" volatile unsigned long long g_orbis_data_size = 0;
+extern "C" volatile unsigned long long g_orbis_code_base = 0;
+extern "C" volatile unsigned long long g_orbis_code_size = 0;
+
 bool SysMemory::AllocateMemoryMap()
 {
+	Console.WriteLn("[dbg] memmap: MainSize=%u CodeSize=%u", HostMemoryMap::MainSize, HostMemoryMap::CodeSize);
+	// Orbis: DATA in kernel direct memory (separate region - thread stacks can
+	// never overlap it; validated by ProsperoAI's direct-memory allocation).
+	// CODE in a flexible mapping protected by the stack-guard dummy mapped at
+	// process start (stacks land inside the dummy, code after it).
+	{
+		const unsigned long long main_size = HostMemoryMap::MainSize;
+		const unsigned long long code_size = HostMemoryMap::CodeSize;
+		const unsigned long long align = 0x4000;
+		printf("[dbg] memmap sizes main=%llx code=%llx sw=%llx\n", main_size,
+			code_size, (unsigned long long)HostMemoryMap::SWrecSize);
+
+		// DATA region: direct memory (RW + GPU-visible), mapped at a 32-bit hint.
+		long long phys = -1;
+		long long total = sceKernelGetDirectMemorySize();
+		printf("[dbg] memmap: direct memory size=%lld\n", total);
+		fflush(stdout);
+		// Keep direct emulation memory outside the PS5 flexible-memory heap.
+		u8* data = (u8*)0x600000000ULL;
+		int rc = sceKernelAllocateDirectMemory(0, total, main_size, align, 12, &phys);
+		printf("[dbg] memmap: alloc direct rc=%d phys=%lld\n", rc, phys);
+		fflush(stdout);
+		int rc2 = -1;
+		if (rc == 0)
+			rc2 = sceKernelMapDirectMemory((void**)&data, main_size, 0x33, 0, phys, align);
+		printf("[dbg] memmap: map direct rc=%d addr=%p\n", rc2, data);
+		fflush(stdout);
+
+		if (rc == 0 && rc2 == 0)
+		{
+			// CODE prefers real JIT shared memory (executable; needs root).
+			// Falls back to direct memory when unprivileged.
+			u8* code = (u8*)orbis_alloc_jit(code_size);
+			int rcc = code ? 0 : -1, rcc2 = rcc;
+			printf("[dbg] memmap: code jit rc=%d addr=%p\n", rcc, code);
+			fflush(stdout);
+			if (rcc != 0)
+			{
+				long long phys2 = -1;
+				code = (u8*)0x680000000ULL;
+				rcc = sceKernelAllocateDirectMemory(0, total, code_size, align, 12, &phys2);
+				printf("[dbg] memmap: alloc code direct rc=%d phys=%lld\n", rcc, phys2);
+				fflush(stdout);
+				rcc2 = -1;
+				if (rcc == 0)
+					rcc2 = sceKernelMapDirectMemory((void**)&code, code_size, 0x33, 0, phys2, align);
+				printf("[dbg] memmap: map code direct rc=%d addr=%p\n", rcc2, code);
+				fflush(stdout);
+			}
+			if (rcc == 0 && rcc2 == 0)
+			{
+				s_data_memory = data;
+				s_code_memory = (u8*)code;
+				g_orbis_data_base = (unsigned long long)data;
+				g_orbis_data_size = main_size;
+				g_orbis_code_base = (unsigned long long)code;
+				g_orbis_code_size = code_size;
+				Console.WriteLn("[dbg] memmap: data=%p (direct) code=%p (flexible)", (void*)s_data_memory, (void*)s_code_memory);
+				HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
+				HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
+				HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemOffset);
+				DumpMemoryMap();
+				return true;
+			}
+			sceKernelReleaseDirectMemory(phys, main_size);
+		}
+		Console.WriteLn("[dbg] memmap: direct alloc failed, falling through");
+	}
 	s_data_memory_file_handle = HostSys::CreateSharedMemory(HostSys::GetFileMappingName("pcsx2").c_str(), HostMemoryMap::MainSize);
 	if (!s_data_memory_file_handle)
 	{
-		Host::ReportErrorAsync("Error", "Failed to create shared memory file.");
-		ReleaseMemoryMap();
-		return false;
+		Console.Error("[dbg] memmap: CreateSharedMemory failed (continuing without shm file)");
 	}
-
-	if (!(s_memory_mapping_area = SharedMemoryMappingArea::Create(HostMemoryMap::MainSize + HostMemoryMap::CodeSize, true)))
+	else
 	{
-		Host::ReportErrorAsync("Error", "Failed to map main memory.");
-		ReleaseMemoryMap();
-		return false;
+		Console.WriteLn("[dbg] memmap: shm fd=%d", (int)(intptr_t)s_data_memory_file_handle);
 	}
 
-	if ((s_data_memory = s_memory_mapping_area->Map(s_data_memory_file_handle, 0, s_memory_mapping_area->BasePointer(), HostMemoryMap::MainSize, PageAccess_ReadWrite())) == nullptr)
-	{
-		Host::ReportErrorAsync("Error", "Failed to map data memory.");
-		ReleaseMemoryMap();
 		return false;
-	}
-
-	if ((s_code_memory = s_memory_mapping_area->Map(nullptr, 0, s_memory_mapping_area->OffsetPointer(HostMemoryMap::MainSize), HostMemoryMap::CodeSize, PageAccess_Any())) == nullptr)
-	{
-		Host::ReportErrorAsync("Error", "Failed to allocate code memory.");
-		ReleaseMemoryMap();
-		return false;
-	}
-
-	HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
-	HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
-	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemOffset);
-
-	DumpMemoryMap();
-	return true;
 }
+
 
 void SysMemory::DumpMemoryMap()
 {
@@ -193,9 +257,35 @@ void SysMemory::Reset()
 {
 	DevCon.WriteLn(Color_StrongBlue, "Resetting host memory for virtual systems...");
 
+	// Orbis: VMManager::Initialize calls Reset before the CPU thread performs
+	// Allocate(). Ensure the main memory map (s_data_memory) and the VTLB core
+	// allocation exist so memReset() -> vtlb_Init() -> vtlb_VMapUnmap() does
+	// not touch a NULL s_data_memory/vmap (that would fault) or an empty
+	// s_fastmem_virtual_mapping (that would be UB / hang).
+	if (!vtlb_private::vtlbdata.vmap)
+	{
+		Console.WriteLn("[dbg] sysmem: pre-allocating memory map + VTLB core");
+		if (!AllocateMemoryMap())
+			Console.Error("[dbg] sysmem: AllocateMemoryMap failed");
+		if (!vtlb_Core_Alloc())
+			Console.Error("[dbg] sysmem: vtlb_Core_Alloc failed");
+		// Orbis: the CPU thread's Allocate() (which normally sets eeMem/iopMem/vuMem)
+		// runs on the CPU thread during CPUThreadInitialize, i.e. AFTER
+		// VMManager::Initialize. Set the memory pointers now so memReset() has a
+		// valid eeMem to zero.
+		memAllocate();
+		iopMemAlloc();
+		vuMemAllocate();
+		Console.WriteLn("[dbg] sysmem: mem ptrs set");
+	}
+
+	Console.WriteLn("[dbg] sysmem: memReset");
 	memReset();
+	Console.WriteLn("[dbg] sysmem: iopMemReset");
 	iopMemReset();
+	Console.WriteLn("[dbg] sysmem: vuMemReset");
 	vuMemReset();
+	Console.WriteLn("[dbg] sysmem: done");
 
 	// Note: newVif is reset as part of other VIF structures.
 	// Software is reset on the GS thread.
@@ -1039,9 +1129,11 @@ void memReset()
 #endif
 
 	vtlb_Init();
+	printf("[dbg] memReset: vtlb_Init done\n"); fflush(stdout);
 
 	null_handler = vtlb_RegisterHandler(nullRead8, nullRead16, nullRead32, nullRead64, nullRead128,
 		nullWrite8, nullWrite16, nullWrite32, nullWrite64, nullWrite128);
+	printf("[dbg] memReset: null_handler=%u\n", null_handler); fflush(stdout);
 
 	tlb_fallback_0 = vtlb_RegisterHandlerTempl1(_ext_mem,0);
 	tlb_fallback_3 = vtlb_RegisterHandlerTempl1(_ext_mem,3);
@@ -1133,16 +1225,33 @@ void memReset()
 	//vtlb_VMap(0x00000000,0x00000000,0x20000000);
 	//vtlb_VMapUnmap(0x20000000,0x60000000);
 
+	printf("[dbg] memReset: memMapPhy begin\n"); fflush(stdout);
 	memMapPhy();
+	printf("[dbg] memReset: memMapPhy done\n"); fflush(stdout);
 	memMapVUmicro();
+	printf("[dbg] memReset: memMapVUmicro done\n"); fflush(stdout);
 	memMapKernelMem();
+	// The generic KSEG1 mirror leaves the BIOS page unmapped on Orbis. Map the
+	// ROM buffer directly so the reset vector at 0xBFC00000 is readable.
+	vtlb_VMapBuffer(0x9FC00000, eeMem->ROM, Ps2MemSize::Rom);
+	vtlb_VMapBuffer(0xBFC00000, eeMem->ROM, Ps2MemSize::Rom);
+	printf("[dbg] biosmap: rom=%p size=%u\n", (void*)eeMem->ROM, Ps2MemSize::Rom);
+	orbis_vtlb_dump();
+	printf("[dbg] memReset: memMapKernel done\n"); fflush(stdout);
+	orbis_vtlb_dump();
 	memMapSupervisorMem();
 	memMapUserMem();
 	memSetKernelMode();
 
 	vtlb_VMap(0x00000000,0x00000000,0x20000000);
 	vtlb_VMapUnmap(0x20000000,0x60000000);
+	// Reapply the BIOS aliases after all generic vmap operations. Some Orbis
+	// reset paths restore the KSEG1 pages to the unmapped handler.
+	vtlb_VMapBuffer(0x9FC00000, eeMem->ROM, Ps2MemSize::Rom);
+	vtlb_VMapBuffer(0xBFC00000, eeMem->ROM, Ps2MemSize::Rom);
+	orbis_vtlb_dump();
 
+	Console.WriteLn("[dbg] memReset: zeroing s_ba");
 	std::memset(s_ba, 0, sizeof(s_ba));
 
 	s_ba[0xA] = 1; // Power on
@@ -1155,8 +1264,11 @@ void memReset()
 	s_dve_regs[0x7e] = 0x1C; // Status register. 0x1C seems to be the value it's expecting for everything being OK.
 
 	// BIOS is included in eeMem, so it needs to be copied after zeroing.
+	Console.WriteLn("[dbg] memReset: zeroing eeMem (%zu bytes)", sizeof(*eeMem));
 	std::memset(eeMem, 0, sizeof(*eeMem));
+	Console.WriteLn("[dbg] memReset: CopyBIOSToMemory");
 	CopyBIOSToMemory();
+	Console.WriteLn("[dbg] memReset: done");
 }
 
 void memRelease()

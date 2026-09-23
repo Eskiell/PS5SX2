@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/CocoaTools.h"
+#include <unistd.h>
+#include <sys/stat.h>
+#include <cstdio>
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "common/SettingsInterface.h"
@@ -1182,6 +1185,25 @@ bool Pcsx2Config::GSOptions::UseHardwareRenderer() const
 
 bool Pcsx2Config::GSOptions::ShouldDump(u64 draw, int frame) const
 {
+	// eerec-261 dumpnow
+	{
+		static int s_dump_frame = -1;
+		static int s_last_checked = -1;
+		if (frame != s_last_checked)
+		{
+			s_last_checked = frame;
+			if (access("/data/PCSX2/dumpnow", 0) == 0)
+			{
+				unlink("/data/PCSX2/dumpnow");
+				mkdir("/data/PCSX2/dump", 0777);
+				s_dump_frame = frame + 1;
+				std::printf("[dumpnow] armed for frame %d\n", s_dump_frame);
+				std::fflush(stdout);
+			}
+		}
+		if (s_dump_frame >= 0 && frame == s_dump_frame)
+			return true;
+	}
 	int drawOffset = static_cast<int>(draw - static_cast<u64>(SaveDrawStart));
 	int frameOffset = frame - SaveFrameStart;
 	return DumpGSData &&

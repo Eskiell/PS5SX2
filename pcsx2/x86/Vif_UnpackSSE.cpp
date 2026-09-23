@@ -330,7 +330,7 @@ void VifUnpackSSE_Simple::doMaskWrite(const xRegisterSSE& regX) const
 {
 	xMOVAPS(xmm3, ptr[dstIndirect]);
 	const int offX = std::min(curCycle, 3);
-	sptr base = reinterpret_cast<sptr>(nVifMask[2]);
+	sptr base = reinterpret_cast<sptr>(&nVifMask[0][0][0]); // eerec-251: rax = &nVifMask[0][0][0]
 	xLoadFarAddr(rax, nVifMask);
 	xPAND(regX, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[0][offX]) - base)]);
 	xPAND(xmm3, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[1][offX]) - base)]);
@@ -365,13 +365,20 @@ void VifUnpackSSE_Init()
 {
 	DevCon.WriteLn("Generating SSE-optimized unpacking functions for VIF interpreters...");
 
-	xSetTextPtr(nullptr);
+	// Orbis: the emitter computes RIP-relative operands relative to xTextPtr;
+	// nullptr would produce [rip+f] garbage in generated code. Use the code base.
+	xSetTextPtr(SysMemory::GetVIFUnpackRec());
 	xSetPtr(SysMemory::GetVIFUnpackRec());
+	printf("[dbg] vifinit: rec=%p\n", (void*)SysMemory::GetVIFUnpackRec()); fflush(stdout);
 
 	for (int a = 0; a < 2; a++)
 		for (int b = 0; b < 2; b++)
 			for (int c = 0; c < 4; c++)
+			{
+				printf("[dbg] vifinit: gen %d,%d,%d\n", a, b, c); fflush(stdout);
 				nVifGen(a, b, c);
+			}
+	printf("[dbg] vifinit: done\n"); fflush(stdout);
 
 	DevCon.WriteLn("Unpack function generation complete.  Generated function statistics:");
 	DevCon.WriteLn(

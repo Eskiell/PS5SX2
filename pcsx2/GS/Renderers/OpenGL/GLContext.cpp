@@ -3,7 +3,9 @@
 
 #include "GS/Renderers/OpenGL/GLContext.h"
 
-#if defined(_WIN32)
+#if defined(__PROSPERO__)
+#include "GLContextPS5.h"
+#elif defined(_WIN32)
 #include "GS/Renderers/OpenGL/GLContextWGL.h"
 #else // Linux
 #ifdef X11_API
@@ -42,7 +44,9 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, Error* error)
 
 	std::unique_ptr<GLContext> context;
 	Error local_error;
-#if defined(_WIN32)
+#if defined(__PROSPERO__)
+	context = GLContextPS5::Create(wi, vlist, error);
+#elif defined(_WIN32)
 	context = GLContextWGL::Create(wi, vlist, error);
 #else // Linux
 #if defined(X11_API)

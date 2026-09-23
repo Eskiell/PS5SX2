@@ -1,3 +1,4 @@
+#include <cstdio>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -322,6 +323,21 @@ const xRegister32
 		else
 		{
 			pxAssertMsg(displacement == (s32)displacement, "SIB target is too far away, needs an indirect register");
+			if (displacement != (s32)displacement)
+			{
+				static sptr seen[64];
+				static int nseen;
+				bool dup = false;
+				for (int i = 0; i < nseen; i++)
+					dup |= seen[i] == displacement;
+				if (!dup && nseen < 64)
+				{
+					seen[nseen++] = displacement;
+					std::printf("[sibwarn] TRUNCATED absolute memref target=%p at jit=%p ra=%p\n", address, (void*)x86Ptr,
+						__builtin_return_address(0));
+					std::fflush(stdout);
+				}
+			}
 			ModRM(0, regfield, ModRm_UseSib);
 			SibSB(0, Sib_EIZ, Sib_UseDisp32);
 		}
@@ -1458,7 +1474,10 @@ const xRegister32
 			if (tbase == (s32)tbase)
 				return offset + RTEXTPTR + tbase;
 		}
-		xLEA(tmpRegister, ptr[base]);
+		// Orbis: base is not reachable by any 32-bit displacement (PS5 direct
+		// maps live above 4GB and far from the JIT area). xLEA would silently
+		// truncate it; use movabs instead, which always works.
+		xMOV64(tmpRegister, (sptr)base);
 		return offset + tmpRegister;
 	}
 

@@ -42,7 +42,9 @@
 #include "fmt/format.h"
 
 #include <csetjmp>
-#include <png.h>
+// eerec-282: no libpng/libzip on Orbis: states are flat files without a screenshot (see below).
+#include <cstdio>
+extern "C" zip_file_t* orbis_zip_mem_fopen(const void* data, zip_uint64_t size);
 
 using namespace R5900;
 
@@ -757,6 +759,8 @@ std::unique_ptr<ArchiveEntryList> SaveState_DownloadState(Error* error)
 
 std::unique_ptr<SaveStateScreenshotData> SaveState_SaveScreenshot()
 {
+	return nullptr; // eerec-282: Orbis states carry no screenshot
+#if 0
 	static constexpr u32 SCREENSHOT_WIDTH = 640;
 	static constexpr u32 SCREENSHOT_HEIGHT = 480;
 
@@ -773,8 +777,10 @@ std::unique_ptr<SaveStateScreenshotData> SaveState_SaveScreenshot()
 	data->height = height;
 	data->pixels = std::move(pixels);
 	return data;
+#endif
 }
 
+#if 0 // eerec-282: zip + png archive layer
 static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* zf)
 {
 	zip_error_t ze = {};
@@ -1029,172 +1035,152 @@ static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateSc
 	return true;
 }
 
+#endif // eerec-282
+
+// eerec-282: an Orbis state is one flat file holding the entries PCSX2 would zip:
+//   "OPS2STAT", u32 save version, u32 entry count, then per entry u32 name length, name, u64 size, data.
+static constexpr char ORBIS_STATE_MAGIC[8] = {'O', 'P', 'S', '2', 'S', 'T', 'A', 'T'};
+
 bool SaveState_ZipToDisk(
 	std::unique_ptr<ArchiveEntryList> srclist, std::unique_ptr<SaveStateScreenshotData> screenshot,
 	const char* filename, Error* error)
 {
-	zip_error_t ze = {};
-	zip_source_t* zs = zip_source_file_create(filename, 0, 0, &ze);
-	zip_t* zf = nullptr;
-	if (zs && !(zf = zip_open_from_source(zs, ZIP_CREATE | ZIP_TRUNCATE, &ze)))
+	(void)screenshot;
+	const std::string tmp = std::string(filename) + ".tmp";
+	std::FILE* fp = std::fopen(tmp.c_str(), "wb");
+	if (!fp)
 	{
-		Error::SetStringFmt(error,
-			TRANSLATE_FS("SaveState", "Failed to open zip file '{}' for save state: {}."),
-			filename, zip_error_strerror(&ze));
-
-		// have to clean up source
-		zip_source_free(zs);
+		Error::SetStringFmt(error, "Failed to open '{}' for writing.", tmp);
 		return false;
 	}
-
-	// discard zip file if we fail saving something
-	if (!SaveState_AddToZip(zf, srclist.get(), screenshot.get()))
+	const auto put = [fp](const void* p, size_t n) { return n == 0 || std::fwrite(p, 1, n, fp) == n; };
+	u32 count = 0;
+	for (uint i = 0; i < static_cast<uint>(srclist->GetLength()); i++)
+		count += ((*srclist)[i].GetDataSize() != 0) ? 1u : 0u;
+	const u32 version = g_SaveVersion;
+	bool ok = put(ORBIS_STATE_MAGIC, sizeof(ORBIS_STATE_MAGIC)) && put(&version, sizeof(version)) && put(&count, sizeof(count));
+	u64 total = 0;
+	for (uint i = 0; ok && i < static_cast<uint>(srclist->GetLength()); i++)
 	{
-		Error::SetStringFmt(error,
-			TRANSLATE_FS("SaveState", "Failed to save state to zip file '{}'."), filename);
-		zip_discard(zf);
+		const ArchiveEntry& entry = (*srclist)[i];
+		if (!entry.GetDataSize())
+			continue;
+		const std::string& name = entry.GetFilename();
+		const u32 name_len = static_cast<u32>(name.size());
+		const u64 size = entry.GetDataSize();
+		ok = put(&name_len, sizeof(name_len)) && put(name.data(), name_len) && put(&size, sizeof(size)) &&
+			 put(srclist->GetPtr(static_cast<uint>(entry.GetDataIndex())), static_cast<size_t>(size));
+		total += size;
+	}
+	ok = (std::fclose(fp) == 0) && ok;
+	if (!ok || std::rename(tmp.c_str(), filename) != 0)
+	{
+		std::remove(tmp.c_str());
+		Error::SetStringFmt(error, "Failed to write save state '{}'.", filename);
 		return false;
 	}
-
-	// force the zip to close, this is the expensive part with libzip.
-	if (zip_close(zf) != 0)
-	{
-		Error::SetStringFmt(error,
-			TRANSLATE_FS("SaveState", "Failed to save state to zip file '{}': {}."), filename, zip_strerror(zf));
-		zip_discard(zf);
-		return false;
-	}
-
+	std::printf("[state] wrote %s: %u entries, %llu bytes\n", filename, count, static_cast<unsigned long long>(total));
+	std::fflush(stdout);
 	return true;
 }
 
 bool SaveState_ReadScreenshot(const std::string& filename, u32* out_width, u32* out_height, std::vector<u32>* out_pixels)
 {
-	zip_error_t ze = {};
-	auto zf = zip_open_managed(filename.c_str(), ZIP_RDONLY, &ze);
-	if (!zf)
-	{
-		Console.Error("Failed to open zip file '%s' for save state screenshot: %s", filename.c_str(), zip_error_strerror(&ze));
-		return false;
-	}
-
-	return SaveState_ReadScreenshot(zf.get(), out_width, out_height, out_pixels);
-}
-
-static bool CheckVersion(const std::string& filename, zip_t* zf, Error* error)
-{
-	u32 savever;
-
-	auto zff = zip_fopen_managed(zf, EntryFilename_StateVersion, 0);
-	if (!zff || zip_fread(zff.get(), &savever, sizeof(savever)) != sizeof(savever))
-	{
-		Error::SetString(error, "Savestate file does not contain version indicator.");
-		return false;
-	}
-
-	char version_string[STATE_PCSX2_VERSION_SIZE];
-	if (zip_fread(zff.get(), version_string, STATE_PCSX2_VERSION_SIZE) == STATE_PCSX2_VERSION_SIZE)
-		version_string[STATE_PCSX2_VERSION_SIZE - 1] = 0;
-	else
-		StringUtil::Strlcpy(version_string, "Unknown", std::size(version_string));
-
-	// Major version mismatch.  Means we can't load this savestate at all.  Support for it
-	// was removed entirely.
-	// check for a "minor" version incompatibility; which happens if the savestate being loaded is a newer version
-	// than the emulator recognizes.  99% chance that trying to load it will just corrupt emulation or crash.
-	if (savever > g_SaveVersion || (savever >> 16) != (g_SaveVersion >> 16))
-	{
-		std::string current_emulator_version = BuildVersion::GitTag;
-		if (current_emulator_version.empty())
-		{
-			current_emulator_version = "Unknown";
-		}
-		Error::SetString(error, fmt::format(TRANSLATE_FS("SaveState","This save state was created with PCSX2 version {0}. It is no longer compatible "
-											"with your current PCSX2 version {1}.\n\n"
-											"If you have any unsaved progress on this save state, you can download the compatible PCSX2 version {0} "
-											"from pcsx2.net, load the save state, and save your progress to the memory card."),
-											version_string, current_emulator_version));
-		return false;
-	}
-
-	return true;
-}
-
-static zip_int64_t CheckFileExistsInState(zip_t* zf, const char* name, bool required)
-{
-	zip_int64_t index = zip_name_locate(zf, name, /*ZIP_FL_NOCASE*/ 0);
-	if (index >= 0)
-	{
-		DevCon.WriteLn(Color_Green, " ... found '%s'", name);
-		return index;
-	}
-
-	if (required)
-		Console.WriteLn(Color_Red, " ... not found '%s'!", name);
-	else
-		DevCon.WriteLn(Color_Red, " ... not found '%s'!", name);
-
-	return index;
-}
-
-static bool LoadInternalStructuresState(zip_t* zf, s64 index, Error* error)
-{
-	zip_stat_t zst;
-	if (zip_stat_index(zf, index, 0, &zst) != 0 || zst.size > std::numeric_limits<int>::max())
-		return false;
-
-	// Load all the internal data
-	auto zff = zip_fopen_index_managed(zf, index, 0);
-	if (!zff)
-		return false;
-
-	std::vector<u8> buffer(zst.size);
-	if (zip_fread(zff.get(), buffer.data(), buffer.size()) != static_cast<zip_int64_t>(buffer.size()))
-		return false;
-
-	memLoadingState state(buffer);
-	if (!state.FreezeBios())
-		return false;
-	
-	if (!state.FreezeInternals(error))
-		return false;
-
-	return true;
+	(void)filename;
+	(void)out_width;
+	(void)out_height;
+	(void)out_pixels;
+	return false; // eerec-282: no screenshots
 }
 
 bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
 {
-	zip_error_t ze = {};
-	auto zf = zip_open_managed(filename.c_str(), ZIP_RDONLY, &ze);
-	if (!zf)
+	std::vector<u8> file;
+	if (std::FILE* fp = std::fopen(filename.c_str(), "rb"))
 	{
-		Console.Error("Failed to open zip file '%s' for save state load: %s", filename.c_str(), zip_error_strerror(&ze));
-		if (zip_error_code_zip(&ze) == ZIP_ER_NOENT)
-			Error::SetString(error, "Savestate file does not exist.");
-		else
-			Error::SetString(error, fmt::format("Savestate zip error: {}", zip_error_strerror(&ze)));
-
+		std::fseek(fp, 0, SEEK_END);
+		const long len = std::ftell(fp);
+		std::fseek(fp, 0, SEEK_SET);
+		if (len > 0)
+		{
+			file.resize(static_cast<size_t>(len));
+			if (std::fread(file.data(), 1, file.size(), fp) != file.size())
+				file.clear();
+		}
+		std::fclose(fp);
+	}
+	else
+	{
+		Error::SetString(error, "Savestate file does not exist.");
 		return false;
 	}
 
-	// look for version and screenshot information in the zip stream:
-	if (!CheckVersion(filename, zf.get(), error))
+	struct OrbisStateEntry
+	{
+		std::string name;
+		const u8* data;
+		u64 size;
+	};
+	std::vector<OrbisStateEntry> entries;
+	size_t pos = 0;
+	const auto get = [&file, &pos](void* dst, size_t n) {
+		if (pos + n > file.size())
+			return false;
+		std::memcpy(dst, file.data() + pos, n);
+		pos += n;
+		return true;
+	};
+	char magic[sizeof(ORBIS_STATE_MAGIC)];
+	u32 version = 0, count = 0;
+	if (!get(magic, sizeof(magic)) || std::memcmp(magic, ORBIS_STATE_MAGIC, sizeof(magic)) != 0 || !get(&version, sizeof(version)) ||
+		!get(&count, sizeof(count)))
+	{
+		Error::SetString(error, "Not an Orbis save state, or the file is truncated.");
 		return false;
+	}
+	if (version > g_SaveVersion || (version >> 16) != (g_SaveVersion >> 16))
+	{
+		Error::SetStringFmt(error, "Save state version {:08x} does not match this build ({:08x}).", version, g_SaveVersion);
+		return false;
+	}
+	for (u32 i = 0; i < count; i++)
+	{
+		u32 name_len = 0;
+		u64 size = 0;
+		if (!get(&name_len, sizeof(name_len)) || pos + name_len > file.size())
+		{
+			Error::SetString(error, "Save state is truncated.");
+			return false;
+		}
+		std::string name(reinterpret_cast<const char*>(file.data() + pos), name_len);
+		pos += name_len;
+		if (!get(&size, sizeof(size)) || size > file.size() - pos)
+		{
+			Error::SetString(error, "Save state is truncated.");
+			return false;
+		}
+		entries.push_back({std::move(name), file.data() + pos, size});
+		pos += static_cast<size_t>(size);
+	}
+	const auto find = [&entries](const char* name) -> const OrbisStateEntry* {
+		for (const OrbisStateEntry& e : entries)
+		{
+			if (e.name == name)
+				return &e;
+		}
+		return nullptr;
+	};
 
-	// check that all parts are included
-	const s64 internal_index = CheckFileExistsInState(zf.get(), EntryFilename_InternalStructures, true);
-	s64 entryIndices[std::size(SavestateEntries)];
-
-	// Log any parts and pieces that are missing, and then generate an exception.
-	bool allPresent = (internal_index >= 0);
+	const OrbisStateEntry* internal = find(EntryFilename_InternalStructures);
+	const OrbisStateEntry* found[std::size(SavestateEntries)];
+	bool allPresent = (internal != nullptr);
 	for (u32 i = 0; i < std::size(SavestateEntries); i++)
 	{
-		const bool required = SavestateEntries[i]->IsRequired();
-		entryIndices[i] = CheckFileExistsInState(zf.get(), SavestateEntries[i]->GetFilename(), required);
-		if (entryIndices[i] < 0 && required)
+		found[i] = find(SavestateEntries[i]->GetFilename());
+		if (!found[i] && SavestateEntries[i]->IsRequired())
 		{
+			Console.WriteLn(Color_Red, " ... not found '%s'!", SavestateEntries[i]->GetFilename());
 			allPresent = false;
-			break;
 		}
 	}
 	if (!allPresent)
@@ -1205,25 +1191,31 @@ bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
 
 	PreLoadPrep();
 
-	if (!LoadInternalStructuresState(zf.get(), internal_index, error))
 	{
-		if (!error->IsValid())
-			Error::SetString(error, "Save state corruption in internal structures.");
-
-		VMManager::Reset();
-		return false;
+		const std::vector<u8> buffer(internal->data, internal->data + internal->size);
+		memLoadingState state(buffer);
+		if (!state.FreezeBios() || !state.FreezeInternals(error))
+		{
+			if (error && !error->IsValid())
+				Error::SetString(error, "Save state corruption in internal structures.");
+			VMManager::Reset();
+			return false;
+		}
 	}
 
 	for (u32 i = 0; i < std::size(SavestateEntries); ++i)
 	{
-		if (entryIndices[i] < 0)
+		if (!found[i])
 		{
 			SavestateEntries[i]->FreezeIn(nullptr);
 			continue;
 		}
 
-		auto zff = zip_fopen_index_managed(zf.get(), entryIndices[i], 0);
-		if (!zff || !SavestateEntries[i]->FreezeIn(zff.get()))
+		zip_file_t* zf = orbis_zip_mem_fopen(found[i]->data, found[i]->size);
+		const bool ok = zf && SavestateEntries[i]->FreezeIn(zf);
+		if (zf)
+			zip_fclose(zf);
+		if (!ok)
 		{
 			Error::SetString(error, fmt::format("Save state corruption in {}.", SavestateEntries[i]->GetFilename()));
 			VMManager::Reset();
@@ -1232,6 +1224,8 @@ bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
 	}
 
 	PostLoadPrep();
+	std::printf("[state] loaded %s: %u entries\n", filename.c_str(), count);
+	std::fflush(stdout);
 	return true;
 }
 

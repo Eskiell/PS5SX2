@@ -619,6 +619,7 @@ struct Gif_Unit
 	// If transfer cannot take place at this moment the return value is 0
 	u32 TransferGSPacketData(GIF_TRANSFER_TYPE tranType, u8* pMem, u32 size, bool aligned = false)
 	{
+		{ static bool logged = false; if (!logged) { logged = true; printf("[dbg] gifunit: TransferGSPacketData type=%d size=%u\n", (int)tranType, size); fflush(stdout); } }
 
 		if (THREAD_VU1)
 		{
@@ -736,6 +737,7 @@ struct Gif_Unit
 	// on EOPs or on Path 3 Images when IMT is set.
 	int Execute(bool isPath3, bool isResume)
 	{
+		{ static bool logged = false; if (!logged) { logged = true; printf("[dbg] gifunit: Execute\n"); fflush(stdout); } }
 		if (!CanDoGif())
 		{
 			DevCon.Error("Gif Unit - Signal or PSE Set or Dir = GS to EE");

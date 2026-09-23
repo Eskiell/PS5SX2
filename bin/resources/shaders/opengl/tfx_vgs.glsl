@@ -48,14 +48,22 @@ const float exp_min32 = exp2(-32.0f);
 layout(location = 0) in vec2  i_st;
 layout(location = 2) in vec4  i_c;
 layout(location = 3) in float i_q;
-layout(location = 4) in uvec2 i_p;
+layout(location = 4) in uint  i_p_packed;
 layout(location = 5) in uint  i_z;
-layout(location = 6) in uvec2 i_uv;
+layout(location = 6) in uint  i_uv_packed;
 layout(location = 7) in vec4  i_f;
+
+// Orbis: the PS5 GL driver only fetches 32-bit vertex attributes (R16G16_UINT
+// is unsupported), so XYZ.XY and UV arrive packed as one uint each. Unpack
+// them back into the uvec2 the shader logic expects.
+uvec2 orbis_unpack_u16x2(uint v)
+{
+	return uvec2(v & 0xffffu, v >> 16u);
+}
 
 void texture_coord()
 {
-	vec2 uv = vec2(i_uv) - TextureOffset;
+	vec2 uv = vec2(orbis_unpack_u16x2(i_uv_packed)) - TextureOffset;
 	vec2 st = i_st - TextureOffset;
 
 	// Float coordinate
@@ -82,7 +90,7 @@ void vs_main()
 	// example: ceil(afterseveralvertextransformations(y = 133)) => 134 => line 133 stays empty
 	// input granularity is 1/16 pixel, anything smaller than that won't step drawing up/left by one pixel
 	// example: 133.0625 (133 + 1/16) should start from line 134, ceil(133.0625 - 0.05) still above 133
-	gl_Position.xy = vec2(i_p) - vec2(0.05f, 0.05f);
+	gl_Position.xy = vec2(orbis_unpack_u16x2(i_p_packed)) - vec2(0.05f, 0.05f);
 	gl_Position.xy = gl_Position.xy * VertexScale - VertexOffset;
 
 	#if HAS_CLIP_CONTROL

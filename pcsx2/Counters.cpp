@@ -190,7 +190,7 @@ void rcntInit()
 
 	hsyncCounter.Mode = MODE_HRENDER;
 	hsyncCounter.startCycle = cpuRegs.cycle;
-	hsyncCounter.deltaCycles = vSyncInfo.hRender;
+	hsyncCounter.deltaCycles = vSyncInfo.hRender; // Coalesce HSync - only VBlank triggers event test
 	vsyncCounter.Mode = MODE_VRENDER;
 	vsyncCounter.deltaCycles = vSyncInfo.Render;
 	vsyncCounter.startCycle = cpuRegs.cycle;

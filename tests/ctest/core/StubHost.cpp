@@ -1,3 +1,4 @@
+#include <cstdio>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -10,6 +11,9 @@
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/Input/InputManager.h"
 #include "pcsx2/VMManager.h"
+#include "common/Error.h"
+#include <atomic>
+#include <string>
 #include "common/ProgressCallback.h"
 
 void Host::CommitBaseSettingChanges()
@@ -40,10 +44,14 @@ std::unique_ptr<ProgressCallback> Host::CreateHostProgressCallback()
 
 void Host::ReportInfoAsync(const std::string_view title, const std::string_view message)
 {
+	std::printf("[host-info] %.*s: %.*s\n", (int)title.size(), title.data(), (int)message.size(), message.data());
+	std::fflush(stdout);
 }
 
 void Host::ReportErrorAsync(const std::string_view title, const std::string_view message)
 {
+	std::printf("[host-error] %.*s: %.*s\n", (int)title.size(), title.data(), (int)message.size(), message.data());
+	std::fflush(stdout);
 }
 
 void Host::OpenURL(const std::string_view url)
@@ -101,7 +109,18 @@ void Host::SetMouseLock(bool state)
 
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 {
-	return std::nullopt;
+	// Orbis/PS5: no window system, but ps5-opengl's EGL surface IS a real
+	// presentable fullscreen surface (VideoOut). PCSX2 treats Surfaceless as
+	// "headless, never present" (GSDeviceOGL::BeginPresent/SetSwapInterval/
+	// RenderBlankFrame early-out on it), so report a windowed type. Nothing on
+	// this platform branches on the specific value.
+	WindowInfo wi;
+	wi.type = WindowInfo::Type::X11;
+	wi.surface_width = 1920;
+	wi.surface_height = 1080;
+	wi.surface_scale = 1.0f;
+	wi.surface_refresh_rate = 60.0f;
+	return wi;
 }
 
 void Host::ReleaseRenderWindow()
@@ -202,8 +221,45 @@ void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool def
 {
 }
 
+// eerec-282: savestate requests from the pad thread (1 = save slot 1, 2 = load slot 1), run here at
+// vsync on the CPU thread as PCSX2's hotkeys run through RunOnCPUThread.
+std::atomic<int> g_orbis_state_request{0};
+void OrbisOSDLabel(const char* text);
+
+extern std::atomic<int> g_orbis_gsini_reload, g_orbis_pin_request; // eerec-285 (GSRenderer.cpp)
+void orbis_reload_gs_ini_cpu(); // eerec-285 (main-boot.cpp)
+void OrbisCpuSample(int slot);
+void OrbisApplyPinning(int mode);
 void Host::PumpMessagesOnCPUThread()
 {
+	OrbisCpuSample(0); // eerec-285: EE thread
+	if (g_orbis_gsini_reload.exchange(0, std::memory_order_acq_rel))
+		orbis_reload_gs_ini_cpu();
+	if (const int pin = g_orbis_pin_request.exchange(-1, std::memory_order_acq_rel); pin >= 0)
+		OrbisApplyPinning(pin);
+	const int req = g_orbis_state_request.exchange(0, std::memory_order_acq_rel);
+	if (req == 1)
+	{
+		bool failed = false;
+		VMManager::SaveStateToSlot(1, false, [&failed](const std::string& err) {
+			failed = true;
+			std::printf("[state] save failed: %s\n", err.c_str());
+		});
+		OrbisOSDLabel(failed ? "SAVE FAILED" : "SAVED");
+		std::fflush(stdout);
+	}
+	else if (req == 2)
+	{
+		Error err;
+		if (VMManager::LoadStateFromSlot(1, false, &err))
+			OrbisOSDLabel("LOADED");
+		else
+		{
+			std::printf("[state] load failed: %s\n", err.GetDescription().c_str());
+			OrbisOSDLabel("LOAD FAILED");
+		}
+		std::fflush(stdout);
+	}
 }
 
 s32 Host::Internal::GetTranslatedStringImpl(

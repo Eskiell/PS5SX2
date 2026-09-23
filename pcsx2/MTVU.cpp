@@ -10,6 +10,8 @@
 #include <thread>
 
 VU_Thread vu1Thread;
+unsigned long long g_orbis_vu_idle_ticks, g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks; // eerec-281
+void OrbisCpuSample(int slot); // eerec-285 (GSRenderer.cpp)
 
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
@@ -131,7 +133,12 @@ void VU_Thread::ExecuteRingBuffer()
 
 	for (;;)
 	{
-		semaEvent.WaitForWork();
+		{
+			const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
+			semaEvent.WaitForWork();
+			g_orbis_vu_idle_ticks += __builtin_ia32_rdtsc() - t0;
+			OrbisCpuSample(2); // eerec-285
+		}
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
 
@@ -211,6 +218,7 @@ void VU_Thread::ExecuteRingBuffer()
 // Should only be called by ReserveSpace()
 __ri void VU_Thread::WaitOnSize(s32 size)
 {
+	struct OrbisRingTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisRingTimer() { g_orbis_ee_vuring_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_ring_timer; // eerec-281
 	for (;;)
 	{
 		s32 readPos = GetReadPos();
@@ -435,7 +443,9 @@ bool VU_Thread::IsDone()
 void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
+	const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
 	semaEvent.WaitForEmpty();
+	g_orbis_ee_waitvu_ticks += __builtin_ia32_rdtsc() - t0;
 }
 
 void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)

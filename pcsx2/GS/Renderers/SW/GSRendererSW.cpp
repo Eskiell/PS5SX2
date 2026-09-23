@@ -8,6 +8,12 @@
 
 #include "common/StringUtil.h"
 
+class GSTexture;
+extern int g_orbis_swtex; // eerec-279
+extern int g_orbis_diag; // eerec-280
+extern int g_orbis_testpat;
+void OrbisDiagTexture(const char* tag, GSTexture* t);
+
 MULTI_ISA_UNSHARED_IMPL;
 
 GSRenderer* CURRENT_ISA::makeGSRendererSW(int threads)
@@ -101,10 +107,25 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 {
 	Sync(1);
 
+	{
+		static bool logged = false;
+		if (!logged) { logged = true; printf("[dbg] SW GetOutput i=%d\n", i); fflush(stdout); }
+	}
+
 	int index = i >= 0 ? i : 1;
 	GSPCRTCRegs::PCRTCDisplay& curFramebuffer = PCRTCDisplays.PCRTCDisplays[index];
 	GSVector2i framebufferSize = PCRTCDisplays.GetFramebufferSize(i);
 	GSVector4i framebufferRect = PCRTCDisplays.GetFramebufferRect(i);
+	{
+		static bool logged2 = false;
+		if (!logged2) { logged2 = true;
+			printf("[dbg] SW GetOutput fb: FBW=%u enabled0=%d enabled1=%d rect=%d,%d,%d,%d size=%d,%d\n",
+				curFramebuffer.FBW, (int)PCRTCDisplays.PCRTCDisplays[0].enabled, (int)PCRTCDisplays.PCRTCDisplays[1].enabled,
+				framebufferRect.x, framebufferRect.y, framebufferRect.z, framebufferRect.w,
+				framebufferSize.x, framebufferSize.y);
+			fflush(stdout);
+		}
+	}
 
 	// Try to avoid broken/incomplete setups which are probably ignored on console, but can cause us problems.
 	if (framebufferRect.rempty() || curFramebuffer.FBW == 0 || framebufferSize.x < 0 || framebufferSize.y < 0)
@@ -113,7 +134,25 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 	const int w = curFramebuffer.FBW * 64;
 	const int h = framebufferSize.y;
 
-	if (g_gs_device->ResizeRenderTarget(&m_texture[index], w, h, false, false))
+	// eerec-279: SW output texture kind for the GL presenter (live.ini swtex=): 0 = render target
+	// (PCSX2 default), 1 = plain texture, 2 = plain texture with 2 mip levels (driver linear layout).
+	bool orbis_tex_ok;
+	if (::g_orbis_swtex <= 0 || g_gs_device->GetRenderAPI() != RenderAPI::OpenGL)
+		orbis_tex_ok = g_gs_device->ResizeRenderTarget(&m_texture[index], w, h, false, false);
+	else
+	{
+		const int lv = (::g_orbis_swtex >= 2) ? 2 : 1;
+		GSTexture*& t = m_texture[index];
+		if (t && (t->GetWidth() != w || t->GetHeight() != h || t->GetMipmapLevels() != lv || t->IsRenderTarget()))
+		{
+			g_gs_device->Recycle(t);
+			t = nullptr;
+		}
+		if (!t)
+			t = g_gs_device->CreateTexture(w, h, lv, GSTexture::Format::Color);
+		orbis_tex_ok = (t != nullptr);
+	}
+	if (orbis_tex_ok)
 	{
 		const GSLocalMemory::psm_t& psm = GSLocalMemory::m_psm[curFramebuffer.PSM];
 		constexpr int pitch = 1024 * 4;
@@ -155,6 +194,24 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 
 		// Top left rect
 		psm.rtx(m_mem, m_mem.GetOffset(curFramebuffer.Block(), curFramebuffer.FBW, curFramebuffer.PSM), r.ralign<Align_Outside>(psm.bs), m_output, pitch, texa);
+		{
+			static unsigned goc = 0;
+			if ((goc++ % 200) == 0)
+			{
+				u32* mo = reinterpret_cast<u32*>(m_output);
+				unsigned out_nz = 0;
+				for (int k = 0; k < w * h; k++)
+					if (mo[k]) out_nz++;
+				u32* vm = reinterpret_cast<u32*>(m_mem.m_vm8);
+				unsigned vram_nz = 0;
+				for (int k = 0; k < 1024 * 1024; k++)
+					if (vm[k]) vram_nz++;
+				printf("[dbg] SW getout#%u: out_nz=%u/%d vram_nz=%u/1048576 (PSM=%u block=%u fbw=%u) mtex=%p\n",
+					goc, out_nz, w * h, vram_nz, (unsigned)curFramebuffer.PSM, curFramebuffer.Block(), curFramebuffer.FBW,
+					(void*)m_texture[index]);
+				fflush(stdout);
+			}
+		}
 
 		int top = (h_wrap) ? ((r.bottom - r.top) * pitch) : 0;
 		int left = (w_wrap) ? (r.right - r.left) * (GSLocalMemory::m_psm[curFramebuffer.PSM].bpp / 8) : 0;
@@ -177,7 +234,22 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 			psm.rtx(m_mem, m_mem.GetOffset(curFramebuffer.Block(), curFramebuffer.FBW, curFramebuffer.PSM), rwh.ralign<Align_Outside>(psm.bs), &m_output[top + left], pitch, texa);
 		}
 
+		if (::g_orbis_testpat) // eerec-279: known pattern instead of the game frame
+		{
+			u32* o = reinterpret_cast<u32*>(m_output);
+			for (int yy = 0; yy < h; yy++)
+				for (int xx = 0; xx < w; xx++)
+					o[yy * 1024 + xx] = 0xff000000u | (static_cast<u32>(xx * 255 / std::max(w, 1)) & 0xffu) |
+						((static_cast<u32>(yy * 255 / std::max(h, 1)) & 0xffu) << 8) | ((((xx >> 6) + (yy >> 6)) & 1) ? 0x00c00000u : 0u);
+		}
 		m_texture[index]->Update(out_r, m_output, pitch);
+		{
+			static unsigned s_d = 0;
+			if (::g_orbis_diag && (s_d++ % 250) == 5 && g_gs_device->GetRenderAPI() == RenderAPI::OpenGL) // eerec-280
+			{
+				::OrbisDiagTexture("swtex", m_texture[index]);
+			}
+		} // eerec-279
 
 		if (GSConfig.SaveFrame && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 		{
@@ -307,6 +379,15 @@ MULTI_ISA_UNSHARED_END
 
 void GSRendererSW::Draw()
 {
+	{
+		static unsigned long long draws = 0;
+		unsigned long long n = draws++;
+		if (n < 3 || (n % 10000) == 0)
+		{
+			if (0) printf("[dbg] SW Draw #%llu\n", n);
+			fflush(stdout);
+		}
+	}
 	const GSDrawingContext* context = m_context;
 	if (!GSConfig.UserHacks_RewriteLargeST)
 	{

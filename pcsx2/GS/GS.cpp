@@ -7,6 +7,7 @@
 #include "ImGui/ImGuiManager.h"
 #include "GS/GS.h"
 #include "GS/GSCapture.h"
+#include "GSDeviceOrbis.h"
 #include "GS/GSExtra.h"
 #include "GS/GSGL.h"
 #include "GS/GSLzma.h"
@@ -107,7 +108,23 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool recreate_window,
 	GSVSyncMode vsync_mode, bool allow_present_throttle)
 {
-	const RenderAPI new_api = GetAPIForRenderer(renderer);
+	// Orbis: SW uses the CPU-only GSDeviceOrbis. Null is truly headless:
+	// no GSDevice at all, matching GSRenderer::VSync early-out (!g_gs_device).
+	// GPU APIs are not built for Orbis.
+	if (renderer == GSRendererType::Null)
+	{
+		g_gs_device.reset();
+		return true;
+	}
+	// eerec-278: flag swgl -> the SW renderer's frames are merged/presented by GSDeviceOGL (GPU upscale).
+	extern bool g_orbis_sw_on_gl;
+	if (renderer == GSRendererType::SW && !g_orbis_sw_on_gl)
+	{
+		g_gs_device = std::make_unique<GSDeviceOrbis>(false);
+		return true;
+	}
+
+	const RenderAPI new_api = (renderer == GSRendererType::SW) ? RenderAPI::OpenGL : GetAPIForRenderer(renderer);
 	switch (new_api)
 	{
 #ifdef _WIN32
@@ -200,13 +217,27 @@ static void GSClampUpscaleMultiplier(Pcsx2Config::GSOptions& config)
 	config.UpscaleMultiplier = static_cast<float>(max_upscale_multiplier);
 }
 
+extern "C" int sceKernelAvailableFlexibleMemorySize(unsigned long long*);
+extern "C" int sceKernelInternalMemoryGetAvailableSize(long long*);
+
 static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 {
 	// Must be done first, initialization routines in GSState use GSIsHardwareRenderer().
 	GSCurrentRenderer = renderer;
-
+	Console.WriteLn("[dbg] gs: InitStatic begin");
 	GSVertexSW::InitStatic();
+	Console.WriteLn("[dbg] gs: InitStatic end");
 
+	{
+		unsigned long long flex_avail = 0;
+		long long internal_avail = 0;
+		sceKernelAvailableFlexibleMemorySize(&flex_avail);
+		sceKernelInternalMemoryGetAvailableSize(&internal_avail);
+		void* testp = malloc(sizeof(GSRendererNull));
+		Console.WriteLn("[dbg] gs: malloc test %zu -> %p", sizeof(GSRendererNull), testp);
+		if (testp)
+			free(testp);
+	}
 	if (renderer == GSRendererType::Null)
 	{
 		g_gs_renderer = std::make_unique<GSRendererNull>();
@@ -221,9 +252,13 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 		g_gs_renderer = std::unique_ptr<GSRenderer>(MULTI_ISA_SELECT(makeGSRendererSW)(GSConfig.SWExtraThreads));
 	}
 
+	Console.WriteLn("[dbg] gs: renderer created");
 	g_gs_renderer->SetRegsMem(basemem);
+	Console.WriteLn("[dbg] gs: SetRegsMem done");
 	g_gs_renderer->ResetPCRTC();
+	Console.WriteLn("[dbg] gs: ResetPCRTC done");
 	g_gs_renderer->UpdateRenderFixes();
+	Console.WriteLn("[dbg] gs: UpdateRenderFixes done");
 	g_perfmon.Reset();
 	return true;
 }
@@ -348,10 +383,18 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 	if (renderer == GSRendererType::Auto)
 		renderer = GSUtil::GetPreferredRenderer();
 
+	Console.WriteLn("[dbg] gs: GSopen renderer=%d", (int)renderer);
 	bool res = OpenGSDevice(renderer, true, false, vsync_mode, allow_present_throttle);
+	Console.WriteLn("[dbg] gs: OpenGSDevice res=%d", (int)res);
 	if (res)
 	{
+		Console.WriteLn("[dbg] gs: OpenGSRenderer begin");
 		res = OpenGSRenderer(renderer, basemem);
+		Console.WriteLn("[dbg] gs: OpenGSRenderer end res=%d", (int)res);
+	if (g_gs_renderer)
+		printf("[dbg] gs: g_gs_renderer=%p vtbl=%p size=%zu\n", (void*)g_gs_renderer.get(),
+			(void*)*(void**)g_gs_renderer.get(), sizeof(*g_gs_renderer));
+	fflush(stdout);
 		if (!res)
 			CloseGSDevice(true);
 	}
@@ -380,6 +423,8 @@ void GSclose()
 
 void GSreset(bool hardware_reset)
 {
+	Console.WriteLn("[dbg] gsreset: hw=%d renderer=%p vtbl=%p", (int)hardware_reset, (void*)g_gs_renderer.get(),
+		(void*)*(void**)g_gs_renderer.get());
 	g_gs_renderer->Reset(hardware_reset);
 
 	// Restart video capture if it's been started.
@@ -438,7 +483,13 @@ void GSgifTransfer3(u8* mem, u32 size)
 
 void GSvsync(u32 field, bool registers_written)
 {
+	{
+		static bool logged = false;
+		if (!logged) { logged = true; printf("[dbg] gsvsync called field=%u\n", field); fflush(stdout); }
+	}
 	// Update this here because we need to check if the pending draw affects the current frame, so our regs need to be updated.
+	if (0) Console.WriteLn("[dbg] gsvsync: field=%u renderer=%p vtbl=%p", field, (void*)g_gs_renderer.get(),
+		g_gs_renderer ? (void*)*(void**)g_gs_renderer.get() : nullptr);
 	g_gs_renderer->PCRTCDisplays.SetVideoMode(g_gs_renderer->GetVideoMode());
 	g_gs_renderer->PCRTCDisplays.EnableDisplays(g_gs_renderer->m_regs->PMODE, g_gs_renderer->m_regs->SMODE2, g_gs_renderer->isReallyInterlaced());
 	g_gs_renderer->PCRTCDisplays.SetRects(0, g_gs_renderer->m_regs->DISP[0].DISPLAY, g_gs_renderer->m_regs->DISP[0].DISPFB);
@@ -1003,6 +1054,7 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 
 	const char* file_name = "/GS.mem";
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+	Console.WriteLn("[dbg] gsm: shm_open -> %d", s_shm_fd);
 	if (s_shm_fd != -1)
 	{
 		shm_unlink(file_name); // file is deleted but descriptor is still open
@@ -1017,13 +1069,16 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
 
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
+	Console.WriteLn("[dbg] gsm: mmap fifo=%p", fifo);
 
 	for (size_t i = 1; i < repeat; i++)
 	{
 		void* base = (u8*)fifo + size * i;
 		u8* next = (u8*)mmap(base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_shm_fd, 0);
 		if (next != base)
-			fprintf(stderr, "Fail to mmap contiguous segment\n");
+			fprintf(stderr, "Fail to mmap contiguous segment (base=%p next=%p)\n", base, next);
+		else
+			fprintf(stderr, "mmap contiguous segment OK at %p\n", base);
 	}
 
 	return fifo;

@@ -972,6 +972,10 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 static void vtlb_RemoveFastmemMapping(u32 vaddr)
 {
 	const u32 page = vaddr / VTLB_PAGE_SIZE;
+	// Orbis: fastmem may never have been reserved (interpreter-only boot), so
+	// the mapping vector is empty. Reading it would be out-of-bounds UB.
+	if (s_fastmem_virtual_mapping.empty())
+		return;
 	if (s_fastmem_virtual_mapping[page] == NO_FASTMEM_MAPPING)
 		return;
 
@@ -1210,7 +1214,11 @@ void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 		}
 	}
 
+	const bool is_bios = (vaddr == 0xBFC00000);
 	uptr bu8 = (uptr)buffer;
+	if (is_bios)
+		printf("[dbg] vmapbuffer: bios buffer=%p size=%u before=%llx\n", buffer, size,
+			(unsigned long long)vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS].raw());
 	while (size > 0)
 	{
 		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS] = VTLBVirtual::fromPointer(bu8, vaddr);
@@ -1218,6 +1226,9 @@ void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 		bu8 += VTLB_PAGE_SIZE;
 		size -= VTLB_PAGE_SIZE;
 	}
+	if (is_bios)
+		printf("[dbg] vmapbuffer: bios after=%llx\n",
+			(unsigned long long)vtlbdata.vmap[0xBFC00000 >> VTLB_PAGE_BITS].raw());
 }
 
 void vtlb_VMapUnmap(u32 vaddr, u32 size)
@@ -1227,15 +1238,41 @@ void vtlb_VMapUnmap(u32 vaddr, u32 size)
 
 	vtlb_RemoveFastmemMappings(vaddr, size);
 
+	u32 count = 0;
 	while (size > 0)
 	{
 		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS] = VTLBVirtual(VTLBPhysical::fromHandler(UnmappedVirtHandler), vaddr, vaddr);
 		vaddr += VTLB_PAGE_SIZE;
 		size -= VTLB_PAGE_SIZE;
+		++count;
 	}
 }
 
 // vtlb_Init -- Clears vtlb handlers and memory mappings.
+extern "C" __attribute__((visibility("default"), used)) void orbis_vtlb_dump()
+{
+	for (int i = 0; i < 4; i++)
+		printf("[dbg] vmapprobe: pmap[%d]=%llx\n", i, (unsigned long long)vtlbdata.pmap[i].raw());
+	printf("[dbg] vmapprobe: pmap[1fc00]=%llx\n",
+		(unsigned long long)vtlbdata.pmap[0x1fc00].raw());
+	if (vtlbdata.vmap)
+	{
+		for (int i = 0; i < 4; i++)
+			printf("[dbg] vmapprobe: vmap[%d]=%llx\n", i, (unsigned long long)vtlbdata.vmap[i].raw());
+		printf("[dbg] vmapprobe: vmap[bfc0]=%llx vmap[bfc00]=%llx vmap[8000]=%llx\n",
+			(unsigned long long)vtlbdata.vmap[0xbfc0].raw(),
+			(unsigned long long)vtlbdata.vmap[0xbfc0-0x1fc0].raw(),
+			(unsigned long long)vtlbdata.vmap[0x8000].raw());
+		printf("[dbg] vmapprobe: vmap[afc0]=%llx vmap[a0000]=%llx\n",
+			(unsigned long long)vtlbdata.vmap[0xafc0].raw(),
+			(unsigned long long)vtlbdata.vmap[0xa0000].raw());
+	}
+	for (int m = 0; m < 2; m++)
+		for (int b = 0; b < 5; b++)
+			printf("[dbg] vmapprobe: RWFTbase[%d][%d]=%p\n", b, m, (void*)vtlbdata.RWFT[b][m]);
+	fflush(stdout);
+}
+
 void vtlb_Init()
 {
 	vtlbHandlerCount = 0;
@@ -1247,25 +1284,45 @@ void vtlb_Init()
 		baseName##WriteSm<mem8_t>, baseName##WriteSm<mem16_t>, baseName##WriteSm<mem32_t>, \
 		baseName##WriteSm<mem64_t>, baseName##WriteLg
 
+	printf("[dbg] vtlbinit: begin\n"); fflush(stdout);
 	//Register default handlers
 	//Unmapped Virt handlers _MUST_ be registered first.
 	//On address translation the top bit cannot be preserved.This is not normaly a problem since
 	//the physical address space can be 'compressed' to just 29 bits.However, to properly handle exceptions
 	//there must be a way to get the full address back.Thats why i use these 2 functions and encode the hi bit directly into em :)
 
+	printf("[dbg] vtlbinit: register handlers\n"); fflush(stdout);
 	UnmappedVirtHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedV));
+	printf("[dbg] vtlbinit: unmappedV done\n"); fflush(stdout);
 	UnmappedPhyHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedP));
-	DefaultPhyHandler = vtlb_RegisterHandler(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+	printf("[dbg] vtlbinit: unmappedP done\n"); fflush(stdout);
+	// Orbis: the recompiler emits indirect calls to handler tables (RWFT). A
+	// null-function DefaultPhyHandler means a call to address 0 (crash) whenever
+	// an unhandled physical page is touched. Use the unmapped-phy handlers so
+	// such accesses perform a proper TLB miss/bus error instead.
+	DefaultPhyHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedP));
+	printf("[dbg] vtlbinit: default done\n"); fflush(stdout);
 
 	//done !
 
 	//Setup the initial mappings
+	printf("[dbg] vtlbinit: MapHandler\n"); fflush(stdout);
 	vtlb_MapHandler(DefaultPhyHandler, 0, VTLB_PMAP_SZ);
+	printf("[dbg] vtlbinit: MapHandler done\n"); fflush(stdout);
 
 	//Set the V space as unmapped
+	printf("[dbg] vtlbinit: vmap=%p ppmap=%p\n", (void*)vtlbdata.vmap, (void*)vtlbdata.ppmap);
+	fflush(stdout);
+	for (int i = 0; i < 6; i++)
+		printf("[dbg] vtlbprobe: RWFT[0][0][%d]=%p RWFT[2][0][%d]=%p\n", i, (void*)vtlbdata.RWFT[0][0][i], i, (void*)vtlbdata.RWFT[2][0][i]);
+	for (int i = 0; i < 6; i++)
+		printf("[dbg] vtlbprobe: vmap[%d].raw=%llx\n", i, (unsigned long long)vtlbdata.vmap[i].raw());
+	fflush(stdout);
 	vtlb_VMapUnmap(0, (VTLB_VMAP_ITEMS - 1) * VTLB_PAGE_SIZE);
+	printf("[dbg] vtlbinit: VMapUnmap A done\n"); fflush(stdout);
 	//yeah i know, its stupid .. but this code has to be here for now ;p
 	vtlb_VMapUnmap((VTLB_VMAP_ITEMS - 1) * VTLB_PAGE_SIZE, VTLB_PAGE_SIZE);
+	printf("[dbg] vtlbinit: VMapUnmap B done\n"); fflush(stdout);
 
 	// The LUT is only used for 1 game so we allocate it only when the gamefix is enabled (save 4MB)
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
@@ -1331,24 +1388,34 @@ bool vtlb_Core_Alloc()
 
 	vtlbdata.vmap = reinterpret_cast<VTLBVirtual*>(SysMemory::GetVTLBVirtualMap());
 
+	// Orbis: the 4GB fastmem reservation can fail in the bigapp budget when
+	// fastmem/recompilers are disabled. Interpreter mode never touches it, so
+	// degrade gracefully instead of failing the whole VTLB core allocation.
 	pxAssert(!s_fastmem_area);
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
 	if (!s_fastmem_area)
 	{
-		Host::ReportErrorAsync("Error", "Failed to allocate fastmem area");
-		return false;
+		Console.Warning("Fastmem area reservation failed (continuing without fastmem).");
+	}
+	else
+	{
+		s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
+		vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
+		DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
+			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
 	}
 
-	s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
-	vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
-	DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
-		vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
-
-	Error error;
-	if (!PageFaultHandler::Install(&error))
+	// Orbis: PageFaultHandler may already be installed by the host (main-boot
+	// installs it at startup). The double-install assertion would abort; skip
+	// it when fastmem was not reserved (interpreter-only boot).
+	if (s_fastmem_area)
 	{
-		Host::ReportErrorAsync("Failed to install page fault handler.", error.GetDescription());
-		return false;
+		Error error;
+		if (!PageFaultHandler::Install(&error))
+		{
+			Host::ReportErrorAsync("Failed to install page fault handler.", error.GetDescription());
+			return false;
+		}
 	}
 
 	return true;

@@ -12,6 +12,9 @@
 #include "common/FastJmp.h"
 
 #include <float.h>
+#include <chrono>
+#include <cstdio>
+extern "C" void orbis_stage(const char* stage) __attribute__((weak));
 
 using namespace R5900;		// for OPCODE and OpcodeImpl
 
@@ -213,7 +216,17 @@ static void execI()
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
+	if (pc >= 0xbfc00000 && pc < 0xbfc00040)
+		printf("[dbg] execI: pc=%08x code=%08x name=%s interpret=%p\n",
+			pc, cpuRegs.code, opcode.Name, (void*)opcode.interpret);
+	fflush(stdout);
+
 	opcode.interpret();
+	if (pc >= 0xbfc00000 && pc < 0xbfc00040)
+	{
+		printf("[dbg] execI: after pc=%08x k0=%08x branch=%u\n", pc, cpuRegs.GPR.r[26].UL[0], cpuRegs.branch);
+		fflush(stdout);
+	}
 }
 
 static __fi void _doBranch_shared(u32 tar)
@@ -591,11 +604,41 @@ static void intExecute()
 {
 	// This will come back as zero the first time it runs, or on instruction cancel.
 	// It will come back as nonzero when we exit execution.
+	if (orbis_stage) orbis_stage("Execute: intExecute begin");
+	printf("[dbg] intExecute: begin pc=%08x\n", cpuRegs.pc);
+	{
+		unsigned long long sp = 0;
+		asm volatile("mov %%rsp, %0" : "=r"(sp));
+		printf("[dbg] intExecute: rsp=%p\n", (void*)sp);
+	}
+	fflush(stdout);
 	if (fastjmp_set(&intJmpBuf) != 0)
+	{
+		printf("[dbg] intExecute: fastjmp return\n");
+		fflush(stdout);
 		return;
+	}
+	printf("[dbg] intExecute: loop start\n");
+	fflush(stdout);
+	unsigned long long i_count = 0;
+	auto hb_tp = std::chrono::steady_clock::now();
+	auto hb_cyc = cpuRegs.cycle;
 
 	for (;;)
 	{
+		if (i_count < 12 || (i_count % 100000ULL) == 0)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const double dt = std::chrono::duration<double, std::milli>(now - hb_tp).count();
+			const long long dc = (long long)(cpuRegs.cycle - hb_cyc);
+			printf("[dbg] intExecute: pc=%08x booted=%d entry=%08x i=%llu cyc=%lld (+%lld in %.0fms)\n", cpuRegs.pc,
+				(int)VMManager::Internal::HasBootedELF(),
+				VMManager::Internal::GetCurrentELFEntryPoint(), i_count, (long long)cpuRegs.cycle, dc, dt);
+			fflush(stdout);
+			hb_tp = now;
+			hb_cyc = cpuRegs.cycle;
+		}
+		i_count++;
 		if (!VMManager::Internal::HasBootedELF())
 		{
 			// Avoid reloading every instruction.
@@ -605,6 +648,10 @@ static void intExecute()
 
 			while (true)
 			{
+				// debug prints removed: file I/O to boot.log is ~0.6s/write and
+				// throttles the interpreter to ~1000 instr/s.
+				i_count++;
+
 				execI();
 
 				if (cpuRegs.pc == EELOAD_START)

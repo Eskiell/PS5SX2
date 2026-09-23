@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Assertions.h"
+extern "C" int orbis_reserve_range(void** addr, unsigned long long len);
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/CrashHandler.h"
@@ -162,9 +163,18 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 	if (jit)
 		flags |= MAP_JIT;
 #endif
-	void* alloc = mmap(nullptr, size, PROT_NONE, flags, -1, 0);
+	// Orbis: reserve the range first so the flexible allocator cannot place
+	// thread stacks inside it, then map flexible memory at the reserved address.
+	void* reserved = nullptr;
+	if (orbis_reserve_range(&reserved, size) != 0)
+		reserved = nullptr;
+	void* alloc = mmap(reserved, size, PROT_NONE, flags | MAP_FIXED, -1, 0);
 	if (alloc == MAP_FAILED)
-		return nullptr;
+	{
+		alloc = mmap(nullptr, size, PROT_NONE, flags, -1, 0);
+		if (alloc == MAP_FAILED)
+			return nullptr;
+	}
 
 	return std::unique_ptr<SharedMemoryMappingArea>(new SharedMemoryMappingArea(static_cast<u8*>(alloc), size, size / __pagesize));
 }
@@ -267,9 +277,33 @@ namespace PageFaultHandler
 {
 	static void SignalHandler(int sig, siginfo_t* info, void* ctx);
 } // namespace PageFaultHandler
+static bool s_pf_crashing = false;
 
+extern "C" volatile unsigned long long orbis_fault_count;
 void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 {
+	orbis_fault_count++;
+	// Orbis: log EVERY fault at entry (before any handling). Lets us reconstruct
+	// primary->secondary chains when a handler forwards or mishandles.
+	{
+		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		if (f)
+		{
+			void* epc = nullptr;
+			void* esp = nullptr;
+			if (ctx)
+			{
+#if defined(__FreeBSD__) && defined(ARCH_X86)
+				ucontext_t* uc = static_cast<ucontext_t*>(ctx);
+				epc = reinterpret_cast<void*>(uc->uc_mcontext.mc_rip);
+				esp = reinterpret_cast<void*>(uc->uc_mcontext.mc_rsp);
+#endif
+			}
+			fprintf(f, "[pf+] sig=%d pc=%p rsp=%p addr=%p\n",
+				sig, epc, esp, info ? reinterpret_cast<void*>(info->si_addr) : nullptr);
+			fclose(f);
+		}
+	}
 #if defined(__linux__)
 	void* const exception_address = reinterpret_cast<void*>(info->si_addr);
 
@@ -295,6 +329,19 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 
 #endif
 
+	// Orbis: recursive fault while the handler is already active - the mutex is
+	// held, so bail immediately to avoid a deadlock/fault-storm (kernel panic).
+	if (s_in_exception_handler)
+	{
+		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		if (f)
+		{
+			fprintf(f, "[pf] sig=%d pc=%p addr=%p write=%d (recursive, bail)\n", sig, exception_pc, exception_address, is_write);
+			fclose(f);
+		}
+		_exit(1);
+	}
+
 	// Executing the handler concurrently from multiple threads wouldn't go down well.
 	s_exception_handler_mutex.lock();
 
@@ -314,7 +361,21 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 		return;
 
 	// We couldn't handle it. Pass it off to the crash dumper.
+	{
+		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		if (f)
+		{
+			fprintf(f, "[pf] sig=%d pc=%p addr=%p write=%d\n", sig, exception_pc, exception_address, is_write);
+			fclose(f);
+		}
+	}
+	// Orbis: prevent a fault-storm (fault while the crash dumper runs) from
+	// looping and taking the kernel down. A recursive fault bails immediately.
+	if (s_pf_crashing)
+		_exit(1);
+	s_pf_crashing = true;
 	CrashHandler::CrashSignalHandler(sig, info, ctx);
+	_exit(1);
 }
 
 bool PageFaultHandler::Install(Error* error)

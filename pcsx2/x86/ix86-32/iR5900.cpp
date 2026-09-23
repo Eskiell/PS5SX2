@@ -25,6 +25,16 @@
 // Only for MOVQ workaround.
 #include "common/emitter/internal.h"
 
+// Orbis on-screen boot console (live pc/block feed). Header is ours (port).
+#include "debug_overlay.h"
+#include <pthread.h>
+
+// Orbis: stdout is now 1MB-buffered (see main-boot). Hot-path fflush calls
+// would defeat it, so neuter them in this TU. Crash safety comes from the
+// crash handler, which flushes first thing (separate TU, unaffected).
+#undef fflush
+#define fflush(f) ((void)0)
+
 //#define DUMP_BLOCKS 1
 //#define TRACE_BLOCKS 1
 
@@ -397,6 +407,30 @@ static const void* UnmappedRecLUTPage = nullptr;
 
 static void recEventTest()
 {
+	{
+		static unsigned evt_probe = 0;
+		if ((evt_probe & 4095) == 0)
+		{
+			// Orbis: RSP canary. Main-thread stack lives ~32GB; anything
+			// below 64GB here means the stack pointer went wild. Print once
+			// per crossing so the log brackets the pivot, then carry on.
+			unsigned long long sp = 0;
+			asm volatile("mov %%rsp, %0" : "=r"(sp));
+			static unsigned long long last_sp = 0;
+			if (sp < 0x1000000000ULL && last_sp >= 0x1000000000ULL)
+				printf("[dbg] RSP-WILD ee pc=%08x cy=%u rsp=%llx\n", cpuRegs.pc, (unsigned)cpuRegs.cycle, sp);
+			last_sp = sp;
+		}
+		if ((evt_probe & 65535) == 0)
+		{
+			// Orbis: execution heartbeat (event tests run constantly during
+			// execution, unlike compiles). Brackets the true crash site.
+			unsigned long long sp = 0;
+			asm volatile("mov %%rsp, %0" : "=r"(sp));
+			if (0) printf("[dbg] evthb ev=%u pc=%08x cy=%u rsp=%llx\n", evt_probe, cpuRegs.pc, (unsigned)cpuRegs.cycle, sp);
+		}
+		evt_probe++;
+	}
 	_cpuEventTest_Shared();
 
 	if (eeRecExitRequested)
@@ -404,6 +438,57 @@ static void recEventTest()
 		eeRecExitRequested = false;
 		recExitExecution();
 	}
+}
+
+extern "C" __attribute__((visibility("default"), used)) void orbis_rec_dump()
+{
+	printf("[dbg] recdump: recRAM=%p recROM=%p\n", (void*)recRAM, (void*)recROM);
+	printf("[dbg] recdump: recRAM[0]=%p recRAM[1]=%p recROM[0]=%p recROM[1]=%p\n",
+		(void*)recRAM[0].GetFnptr(), (void*)recRAM[1].GetFnptr(),
+		(void*)recROM[0].GetFnptr(), (void*)recROM[1].GetFnptr());
+	printf("[dbg] recdump: recLUT[bfc0]=%p recLUT[0000]=%p recLUT[8000]=%p\n",
+		(void*)recLUT[0xbfc0], (void*)recLUT[0x0000], (void*)recLUT[0x8000]);
+	fflush(stdout);
+}
+
+static void __attribute__((noinline)) orbis_probe_disp2()
+{
+	u32 pc = cpuRegs.pc;
+	uptr base = recLUT[pc >> 16];
+	uptr target = *(uptr*)(base + (uptr)pc * 2);
+	unsigned long long sp = 0, bx = 0, r14 = 0, r15 = 0;
+	asm volatile(
+		"mov %%rsp, %0\n\t"
+		"mov %%rbx, %1\n\t"
+		"mov %%r14, %2\n\t"
+		"mov %%r15, %3\n\t"
+		: "=r"(sp), "=r"(bx), "=r"(r14), "=r"(r15));
+	printf("[dbg] disp: pc=%08x lut=%p target=%p rsp=%llx rbx=%llx r14=%llx r15=%llx\n",
+		pc, (void*)base, (void*)target, sp, bx, r14, r15);
+	fflush(stdout);
+}
+
+static void __attribute__((noinline)) orbis_probe_rsp()
+{
+	unsigned long long sp = 0, bx = 0, r14 = 0, r15 = 0;
+	asm volatile(
+		"mov %%rsp, %0\n\t"
+		"mov %%rbx, %1\n\t"
+		"mov %%r14, %2\n\t"
+		"mov %%r15, %3\n\t"
+		: "=r"(sp), "=r"(bx), "=r"(r14), "=r"(r15));
+	printf("[dbg] rsp: enter=%p rsp=%p pc=%08x rbx=%llx r14=%llx r15=%llx\n",
+		(void*)EnterRecompiledCode, (void*)sp, cpuRegs.pc, bx, r14, r15);
+	fflush(stdout);
+}
+
+static void __attribute__((noinline)) orbis_probe_disp()
+{
+	u32 pc = cpuRegs.pc;
+	uptr base = recLUT[pc >> 16];
+	uptr entry = *(uptr*)(base + (uptr)pc * 2);
+	printf("[dbg] jc: pc=%08x lut=%p target=%p\n", pc, (void*)base, (void*)entry);
+	fflush(stdout);
 }
 
 // The address for all cleared blocks.  It recompiles the current pc and then
@@ -416,6 +501,9 @@ static const void* _DynGen_JITCompile()
 
 	xFastCall((const void*)recRecompile, ptr32[&cpuRegs.pc]);
 
+	// Orbis: orbis_probe_disp (jc:) removed - it fired per dispatch and cost
+	// measurable boot time. Re-add if dispatch targets are ever suspect again.
+
 	// C equivalent:
 	// u32 addr = cpuRegs.pc;
 	// void(**base)() = (void(**)())recLUT[addr >> 16];
@@ -424,6 +512,9 @@ static const void* _DynGen_JITCompile()
 	xMOV(edx, eax);
 	xSHR(eax, 16);
 	xMOV(rcx, ptrNative[xComplexAddress(rcx, recLUT, rax * wordsize)]);
+	// NOTE(orbis): a probe xFastCall must NEVER sit here: rcx/rdx are live
+	// across it (consumed by the xJMP below) and any call clobbers them
+	// (SysV scratch regs), sending the dispatch jump wild. See eerec-04.
 	xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
 
 	return retval;
@@ -461,6 +552,8 @@ static const void* _DynGen_EnterRecompiledCode()
 	pxAssertMsg(DispatcherReg, "Dynamically generated dispatchers are required prior to generating EnterRecompiledCode!");
 
 	u8* retval = xGetAlignedCallTarget();
+
+	xFastCall((const void*)orbis_probe_rsp);
 
 #ifdef ENABLE_VTUNE
 	xScopedStackFrame frame(true, true);
@@ -538,6 +631,24 @@ static void _DynGen_Dispatchers()
 
 static void recError(u32 error)
 {
+	{
+		static const char* const names[32] = {"zr","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
+			"s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
+		std::printf("[recerr] error=%u pc=%08x cycle=%llu EPC=%08x Status=%08x Cause=%08x\n", error, cpuRegs.pc,
+			(unsigned long long)cpuRegs.cycle, cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause);
+		for (int i = 0; i < 32; i += 4)
+			std::printf("[recerr] %s=%08x_%08x %s=%08x_%08x %s=%08x_%08x %s=%08x_%08x\n",
+				names[i], cpuRegs.GPR.r[i].UL[1], cpuRegs.GPR.r[i].UL[0], names[i+1], cpuRegs.GPR.r[i+1].UL[1], cpuRegs.GPR.r[i+1].UL[0],
+				names[i+2], cpuRegs.GPR.r[i+2].UL[1], cpuRegs.GPR.r[i+2].UL[0], names[i+3], cpuRegs.GPR.r[i+3].UL[1], cpuRegs.GPR.r[i+3].UL[0]);
+		(fflush)(stdout);
+		static bool s_dumped = false;
+		if (!s_dumped)
+		{
+			s_dumped = true;
+			FILE* df = std::fopen("/data/PCSX2/eeram.bin", "wb");
+			if (df) { std::fwrite(eeMem->Main, 1, Ps2MemSize::MainRam, df); std::fclose(df); std::printf("[recerr] eeram dumped\n"); (fflush)(stdout); }
+		}
+	}
 	switch (error)
 	{
 		case 0:
@@ -562,15 +673,19 @@ static void recReserveRAM()
 {
 	// One entry per possible call target
 	recLutEntries = (Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2) / 4;
+	printf("[dbg] recReserveRAM: entries=%u\n", recLutEntries); fflush(stdout);
 
 	if (recRAMCopy.size() != Ps2MemSize::ExposedRam)
 		recRAMCopy.resize(Ps2MemSize::ExposedRam);
+	printf("[dbg] recReserveRAM: ramcopy done size=%zu\n", recRAMCopy.size()); fflush(stdout);
 
 	if (recLutReserve_RAM.size() != recLutEntries)
 		recLutReserve_RAM.resize(recLutEntries);
+	printf("[dbg] recReserveRAM: lut done size=%zu\n", recLutReserve_RAM.size()); fflush(stdout);
 
 	// Allocate one LUT page of memory for unmapped pages to reference
 	recLutUnmapped.resize(_64kb / 4);
+	printf("[dbg] recReserveRAM: lutunmapped done size=%zu\n", recLutUnmapped.size()); fflush(stdout);
 
 	BASEBLOCK* basepos = recLutReserve_RAM.data();
 	recRAM = basepos;
@@ -624,6 +739,8 @@ static void recReserveRAM()
 
 static void recReserve()
 {
+	printf("[dbg] recReserve: eerec=%p ExposedRam=%u\n", (void*)SysMemory::GetEERec(), Ps2MemSize::ExposedRam);
+	fflush(stdout);
 	recPtr = SysMemory::GetEERec();
 	recPtrEnd = SysMemory::GetEERecEnd() - _64kb;
 	recReserveRAM();
@@ -651,17 +768,101 @@ static void recResetRaw()
 
 	EE::Profiler.Reset();
 
+	printf("[dbg] recreset: textptr=%p\n", (void*)R5900_TEXTPTR);
+	fflush(stdout);
 	xSetTextPtr(R5900_TEXTPTR);
+	printf("[dbg] recreset: eerec=%p\n", (void*)SysMemory::GetEERec());
+	fflush(stdout);
 	xSetPtr(SysMemory::GetEERec());
+	printf("[dbg] recreset: _DynGen_Dispatchers begin\n");
+	fflush(stdout);
 	_DynGen_Dispatchers();
+	printf("[dbg] recreset: _DynGen_Dispatchers done\n");
+	fflush(stdout);
+	{
+		u8* p = (u8*)SysMemory::GetEERec();
+		printf("[dbg] codeprobe: text=%p\n", (void*)p);
+		for (int i = 0; i < 16; i += 16)
+		{
+			printf("[dbg] codeprobe: +%03x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", i,
+				p[i], p[i+1], p[i+2], p[i+3], p[i+4], p[i+5], p[i+6], p[i+7],
+				p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13], p[i+14], p[i+15]);
+		}
+		fflush(stdout);
+	printf("[dbg] stubaddrs: Event=%p Reg=%p JIT=%p Enter=%p Discard=%p PageReset=%p Unmapped=%p end=%p evttest=%p\n",
+		(void*)DispatcherEvent, (void*)DispatcherReg, (void*)JITCompile, (void*)EnterRecompiledCode,
+		(void*)DispatchBlockDiscard, (void*)DispatchPageReset, (void*)UnmappedRecLUTPage, (void*)xGetPtr(),
+		(const void*)recEventTest);
+	fflush(stdout);
+	{
+		// Orbis: vmap survey for this block. For each mapped page of the
+		// block, print the runtime vtlb vmap entry + expected host pointer.
+		// Tags: VMH = vmap handler (not RAM), VMB = mapped buffer.
+		// NOTE: s_pCurBlockEx is null during recReset (no block compiled yet);
+		// dereferencing it faults at addr 0, which the guest PageFaultHandler
+		// mistakes for a PS2-RAM access and redirects into JIT code.
+		if (!s_pCurBlockEx)
+		{
+			printf("[dbg] vmapsurvey: skip (no current block)\n");
+			fflush(stdout);
+		}
+		else
+		{
+		u32 bpc = s_pCurBlockEx->startpc;
+		u32 bn = s_pCurBlockEx->size;
+		for (u32 w = 0; w < bn; w += 256)
+		{
+			u32 pcw = (bpc + w * 4) & 0x1fffffff;
+			const auto& ent = vtlb_private::vtlbdata.vmap[pcw >> vtlb_private::VTLB_PAGE_BITS];
+			if (ent.isHandler(pcw))
+				printf("[dbg] vmapsurvey: page=%05x VMH raw=%llx\n", pcw >> vtlb_private::VTLB_PAGE_BITS, (unsigned long long)ent.raw());
+			else
+				printf("[dbg] vmapsurvey: page=%05x VMB host=%p\n", pcw >> vtlb_private::VTLB_PAGE_BITS, (void*)ent.assumePtr(pcw));
+		}
+		fflush(stdout);
+		}
+	}
+	{
+		// Survey: what does the dispatcher's SIB recLUT read ACTUALLY address?
+		// (x86-64 SIB disp32-only is RIP-relative; verify base + sample slots.)
+		const u8* t = (const u8*)SysMemory::GetEERec();
+		for (int o = 0; o < 0x300 - 8; o++)
+		{
+			if (t[o] == 0x48 && t[o+1] == 0x8b && t[o+2] == 0x0c && t[o+3] == 0xc5)
+			{
+				s32 d = (s32)((u32)t[o+4] | ((u32)t[o+5] << 8) | ((u32)t[o+6] << 16) | ((u32)t[o+7] << 24));
+				uptr base = (uptr)(t + o + 8) + (sptr)d;
+				uptr v0 = *(uptr*)(base + 0xbfc0u * 8);
+				uptr v1 = *(uptr*)(base + 0x9fc4u * 8);
+				printf("[dbg] sibprobe: off=%03x sib_base=%p [bfc0]=%p [9fc4]=%p\n",
+					o, (void*)base, (void*)v0, (void*)v1);
+			}
+		}
+		fflush(stdout);
+	}
+	}
 	vtlb_DynGenDispatchers();
+	printf("[dbg] recreset: vtlb done\n");
+	fflush(stdout);
 	recPtr = xGetPtr();
 
+	printf("[dbg] recreset: lut ptr=%p size=%zu recRAMCopy=%zu\n",
+		(void*)recLutReserve_RAM.data(), recLutReserve_RAM.size(), recRAMCopy.size());
+	fflush(stdout);
 	ClearRecLUT(recLutReserve_RAM.data(),
 		Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2);
+	printf("[dbg] recreset: ClearRecLUT done\n"); fflush(stdout);
+	{
+		BASEBLOCK* r0 = (BASEBLOCK*)recLutReserve_RAM.data();
+		printf("[dbg] clearprobe: base=%p r0fn=%p raw0=%llx raw1=%llx\n",
+			(void*)r0, (void*)r0[0].GetFnptr(),
+			(unsigned long long)((u64*)r0)[0], (unsigned long long)((u64*)r0)[1]);
+		fflush(stdout);
+	}
 
 	for (int i = 0; i < _64kb / 4; i++)
 		recLutUnmapped.data()[i].SetFnptr((uptr)UnmappedRecLUTPage);
+	printf("[dbg] recreset: lutunmapped done\n"); fflush(stdout);
 
 	recRAMCopy.fill(0);
 
@@ -671,13 +872,28 @@ static void recResetRaw()
 		memset(s_pInstCache, 0, sizeof(EEINST) * s_nInstCacheSize);
 
 	recBlocks.Reset();
+	printf("[dbg] recreset: recBlocks done\n"); fflush(stdout);
 	vtlb_ClearLoadStoreInfo();
+	printf("[dbg] recreset: loadstore done\n"); fflush(stdout);
 
 	g_branch = 0;
 	g_resetEeScalingStats = true;
 
 	memset(manual_page, 0, sizeof(manual_page));
 	memset(manual_counter, 0, sizeof(manual_counter));
+	printf("[dbg] recreset: all done\n"); fflush(stdout);
+	{
+		printf("[dbg] probe: recLUT addr=%p\n", (void*)recLUT);
+		printf("[dbg] probe: recRAM=%p recROM=%p basepos=%p\n", (void*)recRAM, (void*)recROM, (void*)recLutReserve_RAM.data());
+		printf("[dbg] probe: recLUT[bfc0]=%p recLUT[0000]=%p recLUT[8000]=%p\n", (void*)recLUT[0xbfc0], (void*)recLUT[0x0000], (void*)recLUT[0x8000]);
+		printf("[dbg] probe: recLUT[1fc0]=%p recLUT[2000]=%p recLUT[bfc0]-recROM=%p\n", (void*)recLUT[0x1fc0], (void*)recLUT[0x2000], (void*)(recLUT[0xbfc0] - (uptr)recROM));
+		printf("[dbg] probe: JITCompile=%p\n", (void*)JITCompile);
+		printf("[dbg] probe: unmapped data=%p\n", (void*)recLutUnmapped.data());
+		printf("[dbg] probe: recROM0 fnptr=%p\n", (void*)recROM[0].GetFnptr());
+		printf("[dbg] probe: recRAM0 fnptr=%p\n", (void*)recRAM[0].GetFnptr());
+		printf("[dbg] probe: dispTargetAddr=%p\n", (void*)(recLUT[0xbfc0] + 0xbfc00000u * 2));
+		fflush(stdout);
+	}
 }
 
 void recShutdown()
@@ -766,6 +982,41 @@ static void recExecute()
 	if (!fastjmp_set(&m_SetJmp_StateCheck))
 	{
 		eeCpuExecuting = true;
+		printf("[dbg] exec: pc=%08x EnterRec=%p recRecompile=%p JITCompile=%p\n",
+			cpuRegs.pc, (void*)EnterRecompiledCode, (void*)recRecompile, (void*)JITCompile);
+		{
+			unsigned long long sp = 0;
+			asm volatile("mov %%rsp, %0" : "=r"(sp));
+			printf("[dbg] exec: rsp=%p\n", (void*)sp);
+		}
+		{
+			// Orbis: raw RSP at every EE entry (which thread/stack runs JIT?).
+			static unsigned exec_n = 0;
+			if (exec_n < 3)
+			{
+				unsigned long long sp = 0;
+				asm volatile("mov %%rsp, %0" : "=r"(sp));
+				printf("[dbg] exec: entry[%u] rsp=%llx tid=%llu\n", exec_n,
+					sp, (unsigned long long)pthread_self());
+			}
+			exec_n++;
+		}
+		{
+			u8* jc = (u8*)JITCompile;
+			printf("[dbg] exec: jc bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				jc[0], jc[1], jc[2], jc[3], jc[4], jc[5], jc[6], jc[7],
+				jc[8], jc[9], jc[10], jc[11], jc[12], jc[13], jc[14], jc[15]);
+		}
+		fflush(stdout);
+		{
+			extern BASEBLOCK* recROM_extern;
+			printf("[dbg] exec2: recROM0=%p recRAM0=%p\n",
+				(void*)recROM[0].GetFnptr(), (void*)recRAM[0].GetFnptr());
+			u8* p2 = (u8*)SysMemory::GetEERec();
+			printf("[dbg] exec2: code+04e: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				p2[0x4e], p2[0x4f], p2[0x50], p2[0x51], p2[0x52], p2[0x53], p2[0x54], p2[0x55]);
+			fflush(stdout);
+		}
 		((void (*)())EnterRecompiledCode)();
 
 		// Generally unreachable code here ...
@@ -2043,6 +2294,12 @@ void dyna_page_reset(u32 start, u32 sz)
 
 static void memory_protect_recompiled_code(u32 startpc, u32 size)
 {
+	// Orbis bring-up: the manual-protection prologue it emits addresses host
+	// RAM with a truncated 32-bit displacement (same disease as the vmap LEA),
+	// so every RAM block takes the discard path (or faults) and dies. The BIOS
+	// boot here is write-then-execute (no in-place SMC), so skip it for now.
+	// TODO: re-enable with a movabs-based prologue once boot is stable.
+	// eerec-231 smc: manual integrity checks only (see patch_smc.py).
 	u32 inpage_ptr = HWADDR(startpc);
 	const u32 inpage_sz = size * 4;
 
@@ -2051,7 +2308,8 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 	const bool contains_thread_stack = ((startpc >> 12) == 0x81) || ((startpc >> 12) == 0x80001);
 
 	// note: blocks are guaranteed to reside within the confines of a single page.
-	const vtlb_ProtectionMode PageType = contains_thread_stack ? ProtMode_Manual : mmap_GetRamPageInfo(inpage_ptr);
+	const vtlb_ProtectionMode PageType = (mmap_GetRamPageInfo(inpage_ptr) == ProtMode_NotRequired) ? ProtMode_NotRequired : ProtMode_Manual;
+	(void)contains_thread_stack;
 
 	switch (PageType)
 	{
@@ -2072,14 +2330,20 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 			u32 lpc = inpage_ptr;
 			u32 stg = inpage_sz;
 
-			while (stg > 0)
+			xMOV64(rax, (s64)(uptr)PSM(lpc));
 			{
-				xCMP(ptr32[PSM(lpc)], *(u32*)PSM(lpc));
-				xJNE(DispatchBlockDiscard);
+				s32 disp = 0;
+				while (stg > 0)
+				{
+					xCMP(ptr32[rax + disp], *(u32*)PSM(lpc));
+					xJNE(DispatchBlockDiscard);
 
-				stg -= 4;
-				lpc += 4;
+					stg -= 4;
+					lpc += 4;
+					disp += 4;
+				}
 			}
+			break;
 
 			// Tweakpoint!  3 is a 'magic' number representing the number of times a counted block
 			// is re-protected before the recompiler gives up and sets it up as an uncounted (permanent)
@@ -2196,6 +2460,27 @@ static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 
 static void recRecompile(const u32 startpc)
 {
+	if (0) printf("[dbg] rec: recRecompile pc=%08x\n", startpc); // Orbis: no fflush (hot path; ticker flushes 1/s)
+	{
+		void* rsp_now = nullptr;
+#if defined(__x86_64__)
+		asm volatile("mov %%rsp, %0" : "=r"(rsp_now));
+#endif
+		static unsigned rec_probe = 0;
+		static void* lowest_rsp = nullptr;
+		const unsigned n = rec_probe++;
+		if (!lowest_rsp || rsp_now < lowest_rsp)
+			lowest_rsp = rsp_now;
+		if (n < 8 || (n % 100) == 0)
+		{
+			printf("[dbg] rec: recompile[%u] pc=%08x rsp=%p lowest=%p\n", n, startpc, rsp_now, lowest_rsp);
+			fflush(stdout);
+		}
+		{
+			ps5::debug::set_line(4, "rec[%u] pc=%08x", n, startpc);
+			ps5::debug::set_line(5, "pc=%08x cy=%u", cpuRegs.pc, (unsigned)cpuRegs.cycle);
+		}
+	}
 	u32 i = 0;
 	u32 willbranch3 = 0;
 
@@ -2702,6 +2987,7 @@ StartRecomp:
 	}
 
 	s_pCurBlock->SetFnptr((uptr)recPtr);
+	if (0) printf("[dbg] rec: block store fnptr=%p (entry@%p)\n", (void*)recPtr, (void*)s_pCurBlock); // Orbis: no fflush (hot path)
 
 	if (!(pc & 0x10000000))
 		maxrecmem = std::max((pc & ~0xa0000000), maxrecmem);
@@ -2757,6 +3043,40 @@ StartRecomp:
 #endif
 	Perf::ee.RegisterPC((void*)s_pCurBlockEx->fnptr, s_pCurBlockEx->x86size, s_pCurBlockEx->startpc);
 
+	if (0) printf("[dbg] blk: pc=%08x fnptr=%p x86size=%u insns=%u\n", s_pCurBlockEx->startpc, (void*)s_pCurBlockEx->fnptr, s_pCurBlockEx->x86size, s_pCurBlockEx->size);
+	if (s_pCurBlockEx->startpc == 0x00001000 || s_pCurBlockEx->startpc == 0x00005c30 ||
+	    s_pCurBlockEx->startpc == 0x0000e530 || s_pCurBlockEx->startpc == 0x0000e4f8)
+	{
+		const u32* ew = (const u32*)PSM(s_pCurBlockEx->startpc);
+		for (u32 w = 0; w < s_pCurBlockEx->size; w++)
+			printf("[dbg] eew+%02x: %08x\n", w * 4, ew[w]);
+		const u8* xb = (const u8*)s_pCurBlockEx->fnptr;
+		u32 xn = s_pCurBlockEx->x86size;
+		for (u32 o = 0; o < xn; o += 16)
+		{
+			printf("[dbg] xb+%03x:", o);
+			for (u32 k = 0; k < 16 && o + k < xn; k++)
+				printf(" %02x", xb[o + k]);
+			printf("\n");
+		}
+	}
+	{
+		// Survey: what does each vmap LEA in the block ACTUALLY address?
+		const u8* b = (const u8*)s_pCurBlockEx->fnptr;
+		u32 n = s_pCurBlockEx->x86size;
+		int hits = 0;
+		for (u32 o = 0; o + 7 < n && hits < 8; o++)
+		{
+			if (b[o] == 0x48 && b[o+1] == 0x8d && b[o+2] == 0x14 && b[o+3] == 0x25)
+			{
+				s32 d = (s32)((u32)b[o+4] | ((u32)b[o+5] << 8) | ((u32)b[o+6] << 16) | ((u32)b[o+7] << 24));
+				uptr base = (uptr)(b + o + 7) + (sptr)d;
+				printf("[dbg] leaprobe: blkpc=%08x off=%03x lea_base=%p\n", s_pCurBlockEx->startpc, o, (void*)base);
+				hits++;
+			}
+		}
+		fflush(stdout);
+	}
 	recPtr = xGetPtr();
 
 	pxAssert((g_cpuHasConstReg & g_cpuFlushedConstReg) == g_cpuHasConstReg);
