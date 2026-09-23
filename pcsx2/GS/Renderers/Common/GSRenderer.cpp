@@ -193,6 +193,7 @@ extern unsigned long long g_orbis_gs_idle_ticks, g_orbis_ee_waitgs_ticks, g_orbi
 extern unsigned long long g_orbis_ee_vsyncq_ticks, g_orbis_vu_idle_ticks, g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks,
 	g_orbis_ee_throttle_ticks, g_orbis_gs_swsync_ticks, g_orbis_sw_busy_ticks[16]; // eerec-281
 #ifdef ORBIS_VULKAN
+extern std::atomic<int> g_orbis_widescreen, g_orbis_ws_active; // vk-285-12 (pcsx2/OrbisWidescreen.cpp)
 void OrbisEEProfMark(); // vk-285-8 (the port's orbis_eeprof.cpp)
 #endif
 // eerec-281: ms per second each thread spent waiting (TSC, calibrated against steady_clock every print)
@@ -253,7 +254,31 @@ namespace
 	int s_orbis_label_frames = 0;
 	bool s_orbis_fps_box = true;
 	bool s_orbis_gl = false;
+	int s_orbis_res[4] = {}; // vk-285-12: source w/h and on-screen w/h of the last presented frame (GS thread)
 } // namespace
+
+#ifdef ORBIS_VULKAN
+// vk-285-12: the native-resolution pre-sharpen needs the port's Vulkan shadeboost.glsl (it
+// carries the ORBIS_PRESHARP marker). With PCSX2's stock one, ShadeBoost would desaturate.
+static bool OrbisVkPresharpShader()
+{
+	static int s_ok = -1;
+	if (s_ok < 0)
+	{
+		s_ok = 0;
+		if (FILE* f = fopen("/data/PCSX2/shaders/vulkan/shadeboost.glsl", "rb"))
+		{
+			char buf[4096];
+			const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+			fclose(f);
+			buf[n] = 0;
+			s_ok = strstr(buf, "ORBIS_PRESHARP") ? 1 : 0;
+		}
+		printf("[present] Vulkan shadeboost.glsl: %s\n", s_ok ? "native pre-sharpen (ORBIS_PRESHARP)" : "stock, pre-sharpen off");
+	}
+	return s_ok == 1;
+}
+#endif
 
 static void OrbisApplyMode(int m, bool announce)
 {
@@ -265,10 +290,9 @@ static void OrbisApplyMode(int m, bool announce)
 	GSConfig.ShadeBoost = (pm.presharp > 0);
 	GSConfig.ShadeBoost_Saturation = static_cast<u8>(std::clamp(pm.presharp / 2, 0, 100));
 #ifdef ORBIS_VULKAN
-	// The port's GL shadeboost.glsl reads the saturation as a pre-sharpen amount.
-	// The Vulkan build runs PCSX2's own shadeboost, where 25 means desaturate to
-	// half (50 is neutral), so it stays off.
-	if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::Vulkan)
+	// The port's shadeboost.glsl reads the saturation as a pre-sharpen amount. On Vulkan
+	// that needs the port's shader (vk-285-12); PCSX2's stock one would desaturate.
+	if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::Vulkan && !OrbisVkPresharpShader())
 		GSConfig.ShadeBoost = false;
 #endif
 	g_orbis_present_param[0] = static_cast<float>(pm.sharp) / 100.0f;
@@ -309,6 +333,13 @@ static void OrbisLiveTune()
 			}
 		}
 		s_orbis_fps_box = (access("/data/PCSX2/nofps", F_OK) != 0);
+#ifdef ORBIS_VULKAN
+		// vk-285-12: on Vulkan the driver's queue submit waits for the GPU, so GPU time is
+		// GS-thread time. FSR starts as native pre-sharpen + EASU; the output RCAS (four more
+		// EASU evaluations per pixel at 4K) is opt-in with live.ini sharp=.
+		if (g_gs_device->GetRenderAPI() == RenderAPI::Vulkan)
+			s_orbis_modes[0].sharp = 0;
+#endif
 		OrbisApplyMode(m, false);
 	}
 	const int cyc = g_orbis_filter_cycle.load(std::memory_order_relaxed);
@@ -414,6 +445,10 @@ static void OrbisLiveTune()
 			g_orbis_perf = (v != 0.0f);
 		else if (k == "pin") // eerec-285
 			g_orbis_pin_request.store(std::clamp(static_cast<int>(v), 0, 2), std::memory_order_release);
+#ifdef ORBIS_VULKAN
+		else if (k == "widescreen") // vk-285-12: R&C PAL 16:9 patch (pcsx2/OrbisWidescreen.cpp)
+			g_orbis_widescreen.store(v != 0.0f ? 1 : 0, std::memory_order_release);
+#endif
 		else if (k == "aspect")
 		{
 			const int a = static_cast<int>(v);
@@ -480,11 +515,16 @@ static void OrbisGLOSD()
 	else
 		return;
 
-	constexpr int TW = 480, TH = 50, SCALE = 3; // eerec-280: 320 -> 480 for the perf text
+	// vk-285-12: second line, the game's frame size and the size it is drawn at on screen.
+	char text2[48] = {};
+	if (s_orbis_fps_box && s_orbis_res[0] > 0)
+		snprintf(text2, sizeof(text2), "%dx%d > %dx%d", s_orbis_res[0], s_orbis_res[1], s_orbis_res[2], s_orbis_res[3]);
+
+	constexpr int TW = 480, TH = 80, SCALE = 3, LINE2_Y = 45; // eerec-280: 320 -> 480; vk-285-12: two lines
 	static GSTexture* s_tex = nullptr;
 	static GSDevice* s_dev = nullptr;
-	static char s_last[48] = {};
-	static int s_box_w = TW;
+	static char s_last[96] = {};
+	static int s_box_w = TW, s_box_h = TH;
 	if (s_dev != g_gs_device.get())
 	{
 		s_dev = g_gs_device.get();
@@ -493,17 +533,29 @@ static void OrbisGLOSD()
 	}
 	if (!s_tex)
 		return;
-	if (strcmp(text, s_last) != 0)
+	char key[96];
+	snprintf(key, sizeof(key), "%s|%s", text, text2);
+	if (strcmp(key, s_last) != 0)
 	{
 		static u32 s_buf[TW * TH];
-		int tw = 0;
-		for (const char* c = text; *c; c++)
-			tw += ((*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z')) ? 6 * SCALE : 2 * SCALE;
-		s_box_w = std::min(TW, tw + 30 - SCALE);
+		const auto width = [](const char* str) {
+			int tw = 0;
+			for (const char* c = str; *c; c++)
+			{
+				const bool known = (*c >= '0' && *c <= '9') || (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+								   *c == '>' || *c == ':' || *c == '.' || *c == '-' || *c == '/' || *c == '%';
+				tw += known ? 6 * SCALE : 2 * SCALE;
+			}
+			return tw;
+		};
+		s_box_w = std::min(TW, std::max(width(text), width(text2)) + 30 - SCALE);
+		s_box_h = text2[0] ? TH : 50;
 		std::fill(std::begin(s_buf), std::end(s_buf), 0xFF202020u);
 		orbis_text_rgba(s_buf, TW, TH, 15, 12, text, SCALE, 0xFF00FFFFu);
+		if (text2[0])
+			orbis_text_rgba(s_buf, TW, TH, 15, LINE2_Y, text2, SCALE, 0xFFE0E0E0u);
 		s_tex->Update(GSVector4i(0, 0, TW, TH), s_buf, TW * 4);
-		snprintf(s_last, sizeof(s_last), "%s", text);
+		snprintf(s_last, sizeof(s_last), "%s", key);
 	}
 	const float ww = static_cast<float>(g_gs_device->GetWindowWidth());
 	const float wh = static_cast<float>(g_gs_device->GetWindowHeight());
@@ -511,12 +563,12 @@ static void OrbisGLOSD()
 #ifdef ORBIS_VULKAN
 	// Vulkan's window origin is the top-left corner: 40 px below the top edge.
 	(void)wh;
-	const float y0 = 40.0f, y1 = y0 + static_cast<float>(TH);
+	const float y0 = 40.0f, y1 = y0 + static_cast<float>(s_box_h);
 #else
-	const float y1 = wh - 40.0f, y0 = y1 - static_cast<float>(TH); // GL lower-left origin: 40 px below the top edge
+	const float y1 = wh - 40.0f, y0 = y1 - static_cast<float>(s_box_h); // GL lower-left origin: 40 px below the top edge
 #endif
-	g_gs_device->PresentRect(s_tex, GSVector4(0.0f, 0.0f, static_cast<float>(s_box_w) / TW, 1.0f), nullptr,
-		GSVector4(x0, y0, x1, y1), PresentShader::COPY, 0.0f, Nearest);
+	g_gs_device->PresentRect(s_tex, GSVector4(0.0f, 0.0f, static_cast<float>(s_box_w) / TW, static_cast<float>(s_box_h) / TH),
+		nullptr, GSVector4(x0, y0, x1, y1), PresentShader::COPY, 0.0f, Nearest);
 }
 // ---- end eerec-278 ----
 
@@ -1198,6 +1250,10 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				src_rect, current->GetSize(), s_display_alignment, g_gs_device->UsesLowerLeftOrigin(),
 				GetVideoMode() == GSVideoMode::SDTV_480P);
 			s_last_draw_rect = draw_rect;
+			s_orbis_res[0] = src_rect.width(); // vk-285-12: OSD resolution line
+			s_orbis_res[1] = src_rect.height();
+			s_orbis_res[2] = static_cast<int>(draw_rect.z - draw_rect.x + 0.5f);
+			s_orbis_res[3] = static_cast<int>(std::abs(draw_rect.w - draw_rect.y) + 0.5f);
 
 			if (GSConfig.CASMode != GSCASMode::Disabled)
 			{

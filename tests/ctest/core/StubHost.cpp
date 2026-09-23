@@ -232,12 +232,14 @@ void OrbisCpuSample(int slot);
 void OrbisApplyPinning(int mode);
 #ifdef ORBIS_VULKAN
 void OrbisEEProfStart(); // vk-285-8 (the port's orbis_eeprof.cpp): once, on this thread
+void OrbisWidescreenTick(); // vk-285-12 (pcsx2/OrbisWidescreen.cpp)
 #endif
 void Host::PumpMessagesOnCPUThread()
 {
 	OrbisCpuSample(0); // eerec-285: EE thread
 #ifdef ORBIS_VULKAN
 	OrbisEEProfStart();
+	OrbisWidescreenTick();
 #endif
 	if (g_orbis_gsini_reload.exchange(0, std::memory_order_acq_rel))
 		orbis_reload_gs_ini_cpu();

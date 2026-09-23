@@ -3067,6 +3067,10 @@ void GSDeviceVK::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, const GS
 		m_present.at(static_cast<u32>(shader)), filter, true);
 }
 
+#ifdef ORBIS_VULKAN
+extern float g_orbis_present_param[4]; // GSRenderer.cpp (live.ini): x = FSR sharpening 0..1, y = split x in pixels
+#endif
+
 void GSDeviceVK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 	PresentShader shader, float shaderTime, Filter filter)
 {
@@ -3074,6 +3078,10 @@ void GSDeviceVK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	cb.SetSource(sRect, sTex->GetSize());
 	cb.SetTarget(dRect, dTex ? dTex->GetSize() : GSVector2i(GetWindowWidth(), GetWindowHeight()));
 	cb.SetTime(shaderTime);
+#ifdef ORBIS_VULKAN
+	// vk-285-12: u_orbis_sharp / u_orbis_split of the port's FSR present.glsl (cb10 after u_time).
+	cb.TimeAndPad = GSVector4(shaderTime, g_orbis_present_param[0], g_orbis_present_param[1], 0.0f);
+#endif
 	SetUtilityPushConstants(&cb, sizeof(cb));
 
 	DoStretchRect(static_cast<GSTextureVK*>(sTex), sRect, static_cast<GSTextureVK*>(dTex), dRect,

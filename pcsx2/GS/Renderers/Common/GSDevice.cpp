@@ -1033,11 +1033,20 @@ void GSDevice::ShadeBoost()
 	if (ResizeRenderTarget(&m_target_tmp, m_current->GetWidth(), m_current->GetHeight(), false, false))
 	{
 		// predivide to avoid the divide (multiply) in the shader
-		const GSVector4 params(
+		GSVector4 params(
 			static_cast<float>(GSConfig.ShadeBoost_Brightness) * (1.0f / 50.0f),
 			static_cast<float>(GSConfig.ShadeBoost_Contrast) * (1.0f / 50.0f),
 			static_cast<float>(GSConfig.ShadeBoost_Saturation) * (1.0f / 50.0f),
 			static_cast<float>(GSConfig.ShadeBoost_Gamma) * (1.0f / 50.0f));
+#ifdef ORBIS_VULKAN
+		// vk-285-12: the port's Vulkan shadeboost.glsl is a native pre-sharpen (amount in z). It
+		// takes the texel size from xy: the PS5 shader compiler has no image queries (textureSize).
+		if (GetRenderAPI() == RenderAPI::Vulkan)
+		{
+			params.x = 1.0f / static_cast<float>(m_current->GetWidth());
+			params.y = 1.0f / static_cast<float>(m_current->GetHeight());
+		}
+#endif
 
 		DoShadeBoost(m_current, m_target_tmp, params.v);
 
