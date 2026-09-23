@@ -462,7 +462,13 @@ bool VKSwapChain::CreateSwapChain()
 	}
 
 	// Select swap chain flags, we only need a colour attachment
+#ifdef ORBIS_VULKAN
+	// PS5: the display's images are colour attachments (and transfer sources) only;
+	// GSDeviceVK::RenderBlankFrame clears them with a render pass instead.
+	VkImageUsageFlags image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+#else
 	VkImageUsageFlags image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+#endif
 	if ((surface_capabilities.supportedUsageFlags & image_usage) != image_usage)
 	{
 		Console.Error("Vulkan: Swap chain does not support usage as color attachment");

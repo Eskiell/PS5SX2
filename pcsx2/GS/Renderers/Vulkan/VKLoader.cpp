@@ -56,9 +56,12 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 	pxAssertRel(!s_vulkan_library_loaded, "Vulkan module is not loaded.");
 	vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
 
+	// With no instance, an ICD answers only the global commands. vkDestroyInstance is
+	// a module export of the desktop loader but an instance command of the driver:
+	// LoadVulkanInstanceFunctions fetches it once the instance exists.
 	bool required_functions_missing = false;
 #define VULKAN_MODULE_ENTRY_POINT(name, required) \
-	if (std::strcmp(#name, "vkGetInstanceProcAddr") != 0) \
+	if (std::strcmp(#name, "vkGetInstanceProcAddr") != 0 && std::strcmp(#name, "vkDestroyInstance") != 0) \
 	{ \
 		name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(VK_NULL_HANDLE, #name)); \
 		if (!name && required) \
@@ -167,6 +170,9 @@ bool Vulkan::LoadVulkanInstanceFunctions(VkInstance instance)
 	LoadFunction(reinterpret_cast<PFN_vkVoidFunction*>(&name), #name, required);
 #include "VKEntryPoints.inl"
 #undef VULKAN_INSTANCE_ENTRY_POINT
+#ifdef ORBIS_VULKAN
+	LoadFunction(reinterpret_cast<PFN_vkVoidFunction*>(&vkDestroyInstance), "vkDestroyInstance", true);
+#endif
 
 	return !required_functions_missing;
 }

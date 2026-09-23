@@ -4739,11 +4739,29 @@ void GSDeviceVK::RenderBlankFrame()
 
 	VkCommandBuffer cmdbuffer = GetCurrentCommandBuffer();
 	GSTextureVK* sctex = m_swap_chain->GetCurrentTexture();
+#ifdef ORBIS_VULKAN
+	// PS5: the swap chain images are not transfer destinations (VKSwapChain.cpp), so
+	// the blank frame is an empty render pass that clears on load, as BeginPresent's.
+	sctex->OverrideImageLayout(GSTextureVK::Layout::Undefined);
+	sctex->TransitionToLayout(cmdbuffer, GSTextureVK::Layout::ColorAttachment);
+	const VkFramebuffer fb = sctex->GetFramebuffer(false);
+	if (fb != VK_NULL_HANDLE)
+	{
+		const VkRenderPassBeginInfo rp = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, nullptr,
+			GetRenderPass(sctex->GetVkFormat(), VK_FORMAT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_CLEAR,
+				VK_ATTACHMENT_STORE_OP_STORE),
+			fb, {{0, 0}, {static_cast<u32>(sctex->GetWidth()), static_cast<u32>(sctex->GetHeight())}}, 1u,
+			&s_present_clear_color};
+		vkCmdBeginRenderPass(cmdbuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
+		vkCmdEndRenderPass(cmdbuffer);
+	}
+#else
 	sctex->TransitionToLayout(cmdbuffer, GSTextureVK::Layout::TransferDst);
 
 	constexpr VkImageSubresourceRange srr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 	vkCmdClearColorImage(
 		cmdbuffer, sctex->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &s_present_clear_color.color, 1, &srr);
+#endif
 
 	m_swap_chain->GetCurrentTexture()->TransitionToLayout(cmdbuffer, GSTextureVK::Layout::PresentSrc);
 	SubmitCommandBuffer(m_swap_chain.get());
