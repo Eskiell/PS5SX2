@@ -1282,12 +1282,12 @@ namespace
 		e.extra = extra;
 	}
 
-	[[noreturn]] void OrbisVkHangExit(const char* where)
+	// Writes the ring's entries of the submits from `hung - 2` on to `path`, after a header line.
+	void OrbisVkTraceWrite(const char* path, const char* header, u32 hung)
 	{
-		const u32 hung = s_orbis_submit;
-		if (FILE* f = fopen("/data/PCSX2/vkhang.txt", "w"))
+		if (FILE* f = fopen(path, "w"))
 		{
-			fprintf(f, "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.\n", where, hung);
+			fprintf(f, "%s\n", header);
 			fprintf(f, "kinds: 1 draw, 2 copy, 3 clear, 4 stretch, 5 multi-stretch, 6 readback, 7 upload; tex = ptr WxH f<GSTexture::Format>\n");
 			fprintf(f, "draw: topo(0 pt,1 line,2 tri) vs depth colormask date(0 off,1 stencil,2 stencilone,3 primid,4 full) sampler flags(1 one-barrier,2 full-barrier,4 alpha2,8 blend-mp,16 line-expand,32+ hazard) blend ps nv/ni rt ds tex pal drawarea scissor\n");
 			const u64 first = s_orbis_trace_seq > ORBIS_VK_TRACE_N ? s_orbis_trace_seq - ORBIS_VK_TRACE_N : 0;
@@ -1317,6 +1317,15 @@ namespace
 			fsync(fileno(f));
 			fclose(f);
 		}
+	}
+
+	[[noreturn]] void OrbisVkHangExit(const char* where)
+	{
+		const u32 hung = s_orbis_submit;
+		char header[160];
+		snprintf(header, sizeof(header), "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.", where,
+			hung);
+		OrbisVkTraceWrite("/data/PCSX2/vkhang.txt", header, hung);
 		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote /data/PCSX2/vkhang.txt; closing the app\n",
 			where, hung);
 		fflush(stdout);
@@ -1540,6 +1549,18 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 	}
 #ifdef ORBIS_VULKAN
 	s_orbis_submit++;
+	// vk-285-18: `putdata vktrace` asks for the last submits' draws while the game runs. Every
+	// 64th submit (about once a second) checks for the flag file; the dump goes to vktrace.txt.
+	if ((s_orbis_submit & 63) == 0 && access("/data/PCSX2/vktrace", F_OK) == 0)
+	{
+		unlink("/data/PCSX2/vktrace");
+		char header[96];
+		snprintf(header, sizeof(header), "on-demand trace at submit %u (submits %u and %u complete)", s_orbis_submit,
+			s_orbis_submit - 2, s_orbis_submit - 1);
+		OrbisVkTraceWrite("/data/PCSX2/vktrace.txt", header, s_orbis_submit);
+		printf("[vkhw] wrote /data/PCSX2/vktrace.txt at submit %u\n", s_orbis_submit);
+		fflush(stdout);
+	}
 #endif
 
 	if (spin_cycles != 0)
