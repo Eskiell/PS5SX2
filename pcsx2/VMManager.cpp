@@ -41,6 +41,7 @@
 #include "USB/USB.h"
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
+#include "OrbisEEProf.h"
 #include "ps2/BiosTools.h"
 
 #include "common/Console.h"
@@ -2308,6 +2309,7 @@ unsigned long long g_orbis_ee_throttle_ticks; // eerec-281
 void VMManager::Internal::Throttle()
 {
 	struct OrbisThrottleTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisThrottleTimer() { g_orbis_ee_throttle_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_throttle_timer; // eerec-281
+	OrbisEEWaitScope orbis_wait; // vk-285-8
 	if (s_target_speed == 0.0f || s_use_vsync_for_timing)
 		return;
 

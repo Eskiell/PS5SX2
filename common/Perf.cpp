@@ -30,6 +30,12 @@
 #pragma comment(lib, "jitprofiling.lib")
 #endif
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-8): the recompilers' code ranges go to the EE profiler (orbis_eeprof.cpp), which maps
+// its samples in JIT code back to EE/IOP block PCs, VU micro programs and named stubs offline.
+void OrbisJitRegister(const char* group, const void* ptr, size_t size, u64 key, const char* name);
+#endif
+
 namespace Perf
 {
 	Group any("");
@@ -207,6 +213,10 @@ namespace Perf
 			std::snprintf(full_symbol, std::size(full_symbol), "%s%016" PRIX64, prefix, key);
 		RegisterMethod(ptr, size, full_symbol);
 	}
+#elif defined(ORBIS_VULKAN)
+	void Group::Register(const void* ptr, size_t size, const char* symbol) { OrbisJitRegister(m_prefix, ptr, size, 0, symbol); }
+	void Group::RegisterPC(const void* ptr, size_t size, u32 pc) { OrbisJitRegister(m_prefix, ptr, size, pc, nullptr); }
+	void Group::RegisterKey(const void* ptr, size_t size, const char* prefix, u64 key) { OrbisJitRegister(m_prefix, ptr, size, key, prefix); }
 #else
 	void Group::Register(const void* ptr, size_t size, const char* symbol) {}
 	void Group::RegisterPC(const void* ptr, size_t size, u32 pc) {}

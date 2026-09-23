@@ -6,6 +6,7 @@
 #include "MTVU.h"
 #include "VMManager.h"
 #include "Vif_Dynarec.h"
+#include "OrbisEEProf.h"
 
 #include <thread>
 
@@ -219,6 +220,7 @@ void VU_Thread::ExecuteRingBuffer()
 __ri void VU_Thread::WaitOnSize(s32 size)
 {
 	struct OrbisRingTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisRingTimer() { g_orbis_ee_vuring_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_ring_timer; // eerec-281
+	OrbisEEWaitScope orbis_wait; // vk-285-8
 	for (;;)
 	{
 		s32 readPos = GetReadPos();
@@ -444,6 +446,7 @@ void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
 	const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
+	OrbisEEWaitScope orbis_wait; // vk-285-8
 	semaEvent.WaitForEmpty();
 	g_orbis_ee_waitvu_ticks += __builtin_ia32_rdtsc() - t0;
 }

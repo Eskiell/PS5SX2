@@ -9,6 +9,7 @@
 #include "common/RedtapeWindows.h"
 #endif
 
+#include <cerrno>
 #include <limits>
 
 // --------------------------------------------------------------------------------------
@@ -171,7 +172,10 @@ void Threading::KernelSemaphore::Wait()
 #ifdef _WIN32
 	WaitForSingleObject(m_sema, INFINITE);
 #else
-	sem_wait(&m_sema);
+	// A signal handler (the PS5 port's EE profiler, vk-285-8) makes sem_wait return EINTR without a post.
+	while (sem_wait(&m_sema) != 0 && errno == EINTR)
+	{
+	}
 #endif
 }
 

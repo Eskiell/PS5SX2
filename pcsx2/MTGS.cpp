@@ -8,6 +8,7 @@
 #include "Host.h"
 #include "IconsFontAwesome.h"
 #include "VMManager.h"
+#include "OrbisEEProf.h"
 
 #include "common/FPControl.h"
 #include "common/ScopedGuard.h"
@@ -242,6 +243,7 @@ struct RingCmdPacket_Vsync
 };
 
 unsigned long long g_orbis_ee_vsyncq_ticks; // eerec-281: EE blocked because the GS is VsyncQueueSize frames behind
+std::atomic<int> g_orbis_ee_waiting{0}; // vk-285-8: > 0 while the EE thread is in an accounted wait (OrbisEEProf.h)
 void MTGS::PostVsyncStart(bool registers_written)
 {
 	// Optimization note: Typically regset1 isn't needed.  The regs in that area are typically
@@ -285,6 +287,7 @@ void MTGS::PostVsyncStart(bool registers_written)
 
 	{
 		const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
+		OrbisEEWaitScope orbis_wait; // vk-285-8
 		s_sem_Vsync.Wait();
 		g_orbis_ee_vsyncq_ticks += __builtin_ia32_rdtsc() - t0;
 	}
@@ -661,6 +664,7 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	else
 	{
 		const unsigned long long t0 = __builtin_ia32_rdtsc();
+		OrbisEEWaitScope orbis_wait; // vk-285-8
 		if (!s_sem_event.WaitForEmpty())
 			pxFailRel("MTGS Thread Died");
 		g_orbis_ee_waitgs_ticks += __builtin_ia32_rdtsc() - t0;
@@ -747,6 +751,7 @@ void MTGS::GenericStall(uint size)
 	if (freeroom <= size)
 	{
 		struct OrbisStallTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisStallTimer() { g_orbis_ee_stall_ticks += __builtin_ia32_rdtsc() - t0; ++g_orbis_ee_stall_n; } } orbis_stall_timer;
+		OrbisEEWaitScope orbis_wait; // vk-285-8
 		// writepos will overlap readpos if we commit the data, so we need to wait until
 		// readpos is out past the end of the future write pos, or until it wraps around
 		// (in which case writepos will be >= readpos).

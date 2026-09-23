@@ -230,9 +230,15 @@ extern std::atomic<int> g_orbis_gsini_reload, g_orbis_pin_request; // eerec-285 
 void orbis_reload_gs_ini_cpu(); // eerec-285 (main-boot.cpp)
 void OrbisCpuSample(int slot);
 void OrbisApplyPinning(int mode);
+#ifdef ORBIS_VULKAN
+void OrbisEEProfStart(); // vk-285-8 (the port's orbis_eeprof.cpp): once, on this thread
+#endif
 void Host::PumpMessagesOnCPUThread()
 {
 	OrbisCpuSample(0); // eerec-285: EE thread
+#ifdef ORBIS_VULKAN
+	OrbisEEProfStart();
+#endif
 	if (g_orbis_gsini_reload.exchange(0, std::memory_order_acq_rel))
 		orbis_reload_gs_ini_cpu();
 	if (const int pin = g_orbis_pin_request.exchange(-1, std::memory_order_acq_rel); pin >= 0)

@@ -192,6 +192,9 @@ extern double GetVerticalFrequency();
 extern unsigned long long g_orbis_gs_idle_ticks, g_orbis_ee_waitgs_ticks, g_orbis_ee_stall_ticks; // eerec-174
 extern unsigned long long g_orbis_ee_vsyncq_ticks, g_orbis_vu_idle_ticks, g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks,
 	g_orbis_ee_throttle_ticks, g_orbis_gs_swsync_ticks, g_orbis_sw_busy_ticks[16]; // eerec-281
+#ifdef ORBIS_VULKAN
+void OrbisEEProfMark(); // vk-285-8 (the port's orbis_eeprof.cpp)
+#endif
 // eerec-281: ms per second each thread spent waiting (TSC, calibrated against steady_clock every print)
 static void OrbisPrintLoad()
 {
@@ -217,6 +220,9 @@ static void OrbisPrintLoad()
 			printf("%s%.0f", i ? "/" : "", static_cast<double>(g_orbis_sw_busy_ticks[i] - s_prev[10 + i]) * k);
 		OrbisPrintCpu(); // eerec-285
 		printf("\n");
+#ifdef ORBIS_VULKAN
+		OrbisEEProfMark(); // vk-285-8: the EE profiler's sample count at this [load] line
+#endif
 	}
 	for (int i = 0; i < 9; i++)
 		s_prev[i] = cur[i];
