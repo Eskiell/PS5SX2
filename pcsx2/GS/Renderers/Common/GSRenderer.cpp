@@ -269,8 +269,16 @@ static void OrbisApplyMode(int m, bool announce)
 static void OrbisLiveTune()
 {
 	OrbisCpuSample(1); // eerec-285: GS thread
+#ifdef ORBIS_VULKAN
+	// PS5 Vulkan build: the same present modes, live.ini tuning, FPS box and
+	// [perf]/[load] lines on GSDeviceVK.
+	if (!g_gs_device || (g_gs_device->GetRenderAPI() != RenderAPI::OpenGL &&
+							g_gs_device->GetRenderAPI() != RenderAPI::Vulkan))
+		return;
+#else
 	if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::OpenGL)
 		return;
+#endif
 	static bool s_init = false;
 	static int s_seen_cycle = 0;
 	if (!s_init)
@@ -487,7 +495,13 @@ static void OrbisGLOSD()
 	const float ww = static_cast<float>(g_gs_device->GetWindowWidth());
 	const float wh = static_cast<float>(g_gs_device->GetWindowHeight());
 	const float x1 = ww - 20.0f, x0 = x1 - static_cast<float>(s_box_w);
+#ifdef ORBIS_VULKAN
+	// Vulkan's window origin is the top-left corner: 40 px below the top edge.
+	(void)wh;
+	const float y0 = 40.0f, y1 = y0 + static_cast<float>(TH);
+#else
 	const float y1 = wh - 40.0f, y0 = y1 - static_cast<float>(TH); // GL lower-left origin: 40 px below the top edge
+#endif
 	g_gs_device->PresentRect(s_tex, GSVector4(0.0f, 0.0f, static_cast<float>(s_box_w) / TW, 1.0f), nullptr,
 		GSVector4(x0, y0, x1, y1), PresentShader::COPY, 0.0f, Nearest);
 }
