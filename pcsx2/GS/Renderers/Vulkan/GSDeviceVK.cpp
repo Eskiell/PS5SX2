@@ -2621,7 +2621,14 @@ void GSDeviceVK::InsertDebugMessage(DebugMessageCategory category, const char* f
 bool GSDeviceVK::CreateDeviceAndSwapChain()
 {
 	std::unique_lock lock(s_instance_mutex);
+#ifdef ORBIS_VULKAN
+	// PS5: the driver reports why it refuses something through VK_EXT_debug_utils
+	// only (Mesa drops the message when no messenger is registered), so always
+	// register one: its messages land in PCSX2's log. No validation layer exists.
+	bool enable_debug_utils = true;
+#else
 	bool enable_debug_utils = GSConfig.UseDebugDevice;
+#endif
 	bool enable_validation_layer = GSConfig.UseDebugDevice;
 
 	Error error;

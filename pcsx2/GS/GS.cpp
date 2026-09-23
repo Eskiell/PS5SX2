@@ -153,6 +153,13 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 
 #ifdef ENABLE_VULKAN
 		case RenderAPI::Vulkan:
+#ifdef ORBIS_VULKAN
+		{
+			// PS5: what occupies the driver's GPU address window (orbis-shims/orbis_vk.cpp).
+			extern void orbis_vk_window_survey(const char* when);
+			orbis_vk_window_survey("before GSDeviceVK");
+		}
+#endif
 			g_gs_device = std::make_unique<GSDeviceVK>();
 			break;
 #endif

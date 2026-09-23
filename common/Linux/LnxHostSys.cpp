@@ -166,8 +166,22 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 	// Orbis: reserve the range first so the flexible allocator cannot place
 	// thread stacks inside it, then map flexible memory at the reserved address.
 	void* reserved = nullptr;
+#ifdef ORBIS_VULKAN
+	// PS5 Vulkan build: the driver's GPU-visible memory must lie in the 4 GiB window
+	// [0x2'0000'0000, 0x3'0000'0000) (its shaders' address high word is 2), and the
+	// kernel places a reservation with no hint first-fit from the window's start.
+	// This area is 4 GiB (vtlb fastmem): unhinted it takes the whole window, and the
+	// driver's first mapping (vkCreateDevice's submission buffer) lands outside it
+	// (VK_ERROR_OUT_OF_DEVICE_MEMORY, vk-285-1). Ask for space above the window.
+	reserved = reinterpret_cast<void*>(static_cast<uintptr_t>(0x300000000ULL));
+	const int reserve_rc = orbis_reserve_range(&reserved, size);
+	std::printf("[dbg] shmarea: reserve %zu bytes rc=%d at %p\n", size, reserve_rc, reserve_rc == 0 ? reserved : nullptr);
+	if (reserve_rc != 0)
+		reserved = nullptr;
+#else
 	if (orbis_reserve_range(&reserved, size) != 0)
 		reserved = nullptr;
+#endif
 	void* alloc = mmap(reserved, size, PROT_NONE, flags | MAP_FIXED, -1, 0);
 	if (alloc == MAP_FAILED)
 	{
