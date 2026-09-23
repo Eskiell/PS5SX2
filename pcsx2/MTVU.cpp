@@ -219,6 +219,14 @@ void VU_Thread::ExecuteRingBuffer()
 // Should only be called by ReserveSpace()
 __ri void VU_Thread::WaitOnSize(s32 size)
 {
+	// PS5 port (vk-285-9): every ReserveSpace comes through here, so test for room first; the [load]
+	// timer (two rdtsc) and the profiler's wait scope (two locked ops) cost ~2% of the EE thread at a
+	// fight's peak when they ran for every packet (vk-285-8 profile). Same conditions as the loop.
+	{
+		const s32 readPos = GetReadPos();
+		if (readPos <= m_write_pos || readPos > m_write_pos + size + _4kb)
+			return;
+	}
 	struct OrbisRingTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisRingTimer() { g_orbis_ee_vuring_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_ring_timer; // eerec-281
 	OrbisEEWaitScope orbis_wait; // vk-285-8
 	for (;;)

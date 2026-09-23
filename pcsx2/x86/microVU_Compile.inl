@@ -689,7 +689,7 @@ static void mvuPreloadRegisters(microVU& mVU, u32 endCount)
 	mVU.code = orig_code;
 }
 
-void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
+static void* mVUcompileBlock(microVU& mVU, u32 startPC, uptr pState)
 {
 	microFlagCycles mFC;
 	u8* thisPtr = x86Ptr;
@@ -1011,6 +1011,38 @@ perf_and_return:
 	}
 
 	return thisPtr;
+}
+
+// PS5 port (vk-285-9): the x86 emitter's pointers are thread_local, and with the PS5 toolchain's
+// emulated TLS every access is a call to __emutls_get_address and on to pthread_getspecific.
+// mVUexecute and mVUcleanUp set and saved them around every microprogram run: five accesses per
+// VCALLMS, about 16% of the EE thread at a Ratchet & Clank fight's peak (vk-285-8 profile). Code is
+// only emitted here, so the outermost mVUcompile (it recurses through branch targets) now sets them
+// from mVU.prog.x86ptr and saves the end back; runs that compile nothing touch no TLS. Needs proper
+// testing beyond the PS5 build.
+void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
+{
+#ifdef ORBIS_VULKAN
+	struct EmitterScope
+	{
+		microVU& mVU;
+		explicit EmitterScope(microVU& m)
+			: mVU(m)
+		{
+			if (mVU.compileDepth++ == 0)
+			{
+				xSetTextPtr(mVU.textPtr());
+				xSetPtr(mVU.prog.x86ptr);
+			}
+		}
+		~EmitterScope()
+		{
+			if (--mVU.compileDepth == 0)
+				mVU.prog.x86ptr = x86Ptr;
+		}
+	} emitter_scope(mVU);
+#endif
+	return mVUcompileBlock(mVU, startPC, pState);
 }
 
 // Returns the entry point of the block (compiles it if not found)

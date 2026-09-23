@@ -328,8 +328,10 @@ _mVUt void* mVUexecute(u32 startPC, u32 cycles)
 	mVU.cycles = cycles;
 	mVU.totalCycles = cycles;
 
+#ifndef ORBIS_VULKAN // PS5 port: mVUcompile sets the emitter pointers when it emits (microVU_Compile.inl)
 	xSetTextPtr(mVU.textPtr());
 	xSetPtr(mVU.prog.x86ptr); // Set x86ptr to where last program left off
+#endif
 	return mVUsearchProg<vuIndex>(startPC & vuLimit, (uptr)&mVU.prog.lpState); // Find and set correct program
 }
 
@@ -341,9 +343,13 @@ _mVUt void mVUcleanUp()
 {
 	microVU& mVU = mVUx;
 
+#ifdef ORBIS_VULKAN // PS5 port: mVUcompile saved the end of the emitted code in mVU.prog.x86ptr
+	if ((mVU.prog.x86ptr < mVU.prog.x86start) || (mVU.prog.x86ptr >= mVU.prog.x86end))
+#else
 	mVU.prog.x86ptr = x86Ptr;
 
 	if ((xGetPtr() < mVU.prog.x86start) || (xGetPtr() >= mVU.prog.x86end))
+#endif
 	{
 		Console.WriteLn(vuIndex ? Color_Orange : Color_Magenta, "microVU%d: Program cache limit reached.", mVU.index);
 		mVUreset(mVU, false);

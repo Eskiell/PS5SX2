@@ -121,6 +121,7 @@ struct microVU
 	u32 q;            // Holds current Q instance index
 	u32 totalCycles;  // Total Cycles that mVU is expected to run for
 	s32 cycles;       // Cycles Counter
+	u32 compileDepth; // PS5 port: mVUcompile nesting; the outermost one sets and saves the emitter pointers
 
 	VURegs& regs() const { return ::vuRegs[index]; }
 	void* textPtr() const { return (index && THREAD_VU1) ? (void*)&regs().VF[9] : (void*)R5900_TEXTPTR; }
