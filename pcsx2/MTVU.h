@@ -24,8 +24,12 @@ class VU_Thread final {
 	alignas(__cachelinesize) std::atomic<int> m_ato_read_pos; // Only modified by VU thread
 	alignas(__cachelinesize) std::atomic<int> m_ato_write_pos;    // Only modified by EE thread
 	alignas(__cachelinesize) int  m_read_pos; // temporary read pos (local to the VU thread)
-	int  m_write_pos; // temporary write pos (local to the EE thread)
-	Threading::WorkSema semaEvent;
+	// PS5 port (vk-285-10): each thread's position, and the semaphore both threads update on every
+	// packet, get their own cache line. Sharing one, every EE write of m_write_pos and every VU-thread
+	// write of m_read_pos or the semaphore state pulled the line across cores: the first load in
+	// ReserveSpace stood out in the EE profile (vk-285-9). Needs proper testing.
+	alignas(__cachelinesize) int  m_write_pos; // temporary write pos (local to the EE thread)
+	alignas(__cachelinesize) Threading::WorkSema semaEvent;
 	std::atomic_bool m_shutdown_flag{false};
 
 	Threading::Thread m_thread;
@@ -34,7 +38,7 @@ public:
 	alignas(16)  vifStruct        vif;
 	alignas(16)  VIFregisters     vifRegs;
 	Threading::UserspaceSemaphore semaXGkick;
-	std::atomic<unsigned int> vuCycles[4]; // Used for VU cycle stealing hack
+	alignas(__cachelinesize) std::atomic<unsigned int> vuCycles[4]; // Used for VU cycle stealing hack (own line: the VU thread writes it per program)
 	u32 vuCycleIdx;  // Used for VU cycle stealing hack
 	u32 vuFBRST;
 
@@ -46,7 +50,7 @@ public:
 		InterruptFlagVUTBit = 1 << 4,
 	};
 
-	std::atomic<u32> mtvuInterrupts; // Used for GS Signal, Finish etc, plus VU End/T-Bit
+	alignas(__cachelinesize) std::atomic<u32> mtvuInterrupts; // Used for GS Signal, Finish etc, plus VU End/T-Bit (own line: the EE polls it)
 	std::atomic<u64> gsLabel; // Used for GS Label command
 	std::atomic<u64> gsSignal; // Used for GS Signal command
 
