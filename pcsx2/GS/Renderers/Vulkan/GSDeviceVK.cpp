@@ -4662,6 +4662,12 @@ bool GSDeviceVK::CompileImGuiPipeline()
 
 void GSDeviceVK::RenderImGui()
 {
+	// Orbis: this port has no ImGui backend, so no context is ever created (the same
+	// guard as GSDeviceOGL::RenderImGui). ImGui::Render() would dereference the null
+	// context and kill the MTGS thread at the first present (vk-285-2).
+	if (!ImGui::GetCurrentContext())
+		return;
+
 	ImGui::Render();
 	const ImDrawData* draw_data = ImGui::GetDrawData();
 	if (draw_data->CmdLists.Size == 0)
