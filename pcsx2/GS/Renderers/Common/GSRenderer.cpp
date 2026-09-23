@@ -258,6 +258,13 @@ static void OrbisApplyMode(int m, bool announce)
 	GSConfig.LinearPresent = GSPostBilinearMode::BilinearSmooth;
 	GSConfig.ShadeBoost = (pm.presharp > 0);
 	GSConfig.ShadeBoost_Saturation = static_cast<u8>(std::clamp(pm.presharp / 2, 0, 100));
+#ifdef ORBIS_VULKAN
+	// The port's GL shadeboost.glsl reads the saturation as a pre-sharpen amount.
+	// The Vulkan build runs PCSX2's own shadeboost, where 25 means desaturate to
+	// half (50 is neutral), so it stays off.
+	if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::Vulkan)
+		GSConfig.ShadeBoost = false;
+#endif
 	g_orbis_present_param[0] = static_cast<float>(pm.sharp) / 100.0f;
 	if (announce)
 		s_orbis_label_frames = 120;

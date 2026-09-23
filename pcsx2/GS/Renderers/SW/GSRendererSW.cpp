@@ -137,7 +137,16 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 	// eerec-279: SW output texture kind for the GL presenter (live.ini swtex=): 0 = render target
 	// (PCSX2 default), 1 = plain texture, 2 = plain texture with 2 mip levels (driver linear layout).
 	bool orbis_tex_ok;
-	if (::g_orbis_swtex <= 0 || g_gs_device->GetRenderAPI() != RenderAPI::OpenGL)
+#ifdef ORBIS_VULKAN
+	// PS5 Vulkan build: always a plain texture. The driver stores a render target in
+	// tiles, and an upload into tiles runs texel by texel (3.2 ms of each 512x512
+	// frame, the driver's queue profile); a plain texture's rows copy as rows.
+	const bool orbis_plain = g_gs_device->GetRenderAPI() == RenderAPI::Vulkan ||
+							 (::g_orbis_swtex > 0 && g_gs_device->GetRenderAPI() == RenderAPI::OpenGL);
+#else
+	const bool orbis_plain = ::g_orbis_swtex > 0 && g_gs_device->GetRenderAPI() == RenderAPI::OpenGL;
+#endif
+	if (!orbis_plain)
 		orbis_tex_ok = g_gs_device->ResizeRenderTarget(&m_texture[index], w, h, false, false);
 	else
 	{
