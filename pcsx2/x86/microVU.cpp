@@ -55,6 +55,9 @@ void mVUreset(microVU& mVU, bool resetReserve)
 
 	mVU.regs().nextBlockCycles = 0;
 	memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState));
+#ifdef ORBIS_VULKAN
+	mVU.entryCacheGeneration++; // PS5 port (vk-285-11): mVUexecute's lookup cache
+#endif
 	mVU.profiler.Reset(mVU.index);
 
 	// Program Variables
@@ -88,6 +91,9 @@ void mVUreset(microVU& mVU, bool resetReserve)
 // Free Allocated Resources
 void mVUclose(microVU& mVU)
 {
+#ifdef ORBIS_VULKAN
+	mVU.entryCacheGeneration++; // PS5 port (vk-285-11): mVUexecute's lookup cache
+#endif
 	// Delete Programs and Block Managers
 	for (u32 i = 0; i < (mVU.progSize / 2); i++)
 	{
@@ -104,6 +110,9 @@ void mVUclose(microVU& mVU)
 // Clears Block Data in specified range
 __fi void mVUclear(mV, u32 addr, u32 size)
 {
+#ifdef ORBIS_VULKAN
+	mVU.entryCacheGeneration++; // PS5 port (vk-285-11): mVUexecute's lookup cache
+#endif
 	if (!mVU.prog.cleared)
 	{
 		mVU.prog.cleared = 1; // Next execution searches/creates a new microprogram

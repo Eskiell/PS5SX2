@@ -331,6 +331,37 @@ _mVUt void* mVUexecute(u32 startPC, u32 cycles)
 #ifndef ORBIS_VULKAN // PS5 port: mVUcompile sets the emitter pointers when it emits (microVU_Compile.inl)
 	xSetTextPtr(mVU.textPtr());
 	xSetPtr(mVU.prog.x86ptr); // Set x86ptr to where last program left off
+#else
+	// PS5 port (vk-285-11): a repeat of a recent lookup with the same program, entry PC and pipeline
+	// state returns what mVUsearchProg returned then, with the same side effects (isSame, cur; the
+	// quick table's block field is only scratch inside mVUsearchProg). Every compile, clear, reset and
+	// close bumps the generation, so a slot never outlives a change that could alter the answer.
+	// Exact-match states always search. Needs proper testing.
+	const microRegInfo& lp = mVU.prog.lpState;
+	if (!lp.needExactMatch)
+	{
+		const u32 pc = startPC & vuLimit;
+		const u32 progStart = ::vuRegs[vuIndex].start_pc;
+		const u64 quick = lp.quick64[0];
+		u32 h = (pc >> 3) ^ ((progStart >> 3) << 5) ^ static_cast<u32>(quick) ^ static_cast<u32>(quick >> 29);
+		h *= 0x9E3779B1u;
+		microVU::EntryCacheSlot& slot = mVU.entryCache[h >> 26];
+		if (slot.generation == mVU.entryCacheGeneration && slot.entry && slot.quick == quick &&
+			slot.startPC == pc && slot.progStartPC == progStart)
+		{
+			mVU.prog.isSame = -1;
+			mVU.prog.cur = slot.prog;
+			return slot.entry;
+		}
+		void* entry = mVUsearchProg<vuIndex>(pc, (uptr)&mVU.prog.lpState);
+		slot.quick = quick;
+		slot.prog = mVU.prog.cur;
+		slot.entry = entry;
+		slot.startPC = static_cast<u16>(pc);
+		slot.progStartPC = static_cast<u16>(progStart);
+		slot.generation = mVU.entryCacheGeneration; // after the search: it may have compiled
+		return entry;
+	}
 #endif
 	return mVUsearchProg<vuIndex>(startPC & vuLimit, (uptr)&mVU.prog.lpState); // Find and set correct program
 }

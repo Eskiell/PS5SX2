@@ -122,6 +122,23 @@ struct microVU
 	u32 totalCycles;  // Total Cycles that mVU is expected to run for
 	s32 cycles;       // Cycles Counter
 	u32 compileDepth; // PS5 port: mVUcompile nesting; the outermost one sets and saves the emitter pointers
+#ifdef ORBIS_VULKAN
+	// PS5 port (vk-285-11): mVUexecute's recent program/block lookups (microVU_Execute.inl). A lookup
+	// walks the quick table, the program's block array and the block manager's variants: cold cache
+	// lines on a console whose memory latency is high, ~9% of the EE thread at a fight's peak.
+	struct EntryCacheSlot
+	{
+		u64 quick;          // lpState.quick64[0] it was looked up with (needExactMatch == 0)
+		microProgram* prog; // mVU.prog.cur after the lookup
+		void* entry;        // the x86 entry point the lookup returned
+		u16 startPC;        // entry PC
+		u16 progStartPC;    // regs().start_pc: the program's start
+		u32 generation;     // entryCacheGeneration when filled
+	};
+	static constexpr u32 EntryCacheSlots = 64;
+	alignas(64) u32 entryCacheGeneration; // bumped by every compile, clear, reset and close; older slots never hit
+	alignas(64) EntryCacheSlot entryCache[EntryCacheSlots];
+#endif
 
 	VURegs& regs() const { return ::vuRegs[index]; }
 	void* textPtr() const { return (index && THREAD_VU1) ? (void*)&regs().VF[9] : (void*)R5900_TEXTPTR; }
@@ -274,8 +291,13 @@ public:
 };
 
 // microVU rec structs
+#ifdef ORBIS_VULKAN // PS5 port: the entry cache is cache-line aligned (vk-285-11)
+alignas(64) microVU microVU0;
+alignas(64) microVU microVU1;
+#else
 alignas(16) microVU microVU0;
 alignas(16) microVU microVU1;
+#endif
 
 // Debug Helper
 int mVUdebugNow = 0;

@@ -1029,6 +1029,7 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 		explicit EmitterScope(microVU& m)
 			: mVU(m)
 		{
+			mVU.entryCacheGeneration++; // a new block can change what a lookup returns (vk-285-11)
 			if (mVU.compileDepth++ == 0)
 			{
 				xSetTextPtr(mVU.textPtr());
