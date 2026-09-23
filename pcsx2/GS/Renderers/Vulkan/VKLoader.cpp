@@ -36,6 +36,58 @@ void Vulkan::ResetVulkanLibraryFunctionPointers()
 #undef VULKAN_MODULE_ENTRY_POINT
 }
 
+#ifdef ORBIS_VULKAN
+// PS5: the Vulkan driver (Swordpdf/PS5HB_Vulkan) is linked into the eboot rather
+// than loaded -- a title cannot dlopen a module it ships. Its ICD entry point
+// stands in for the loader's vkGetInstanceProcAddr, whose own name the link
+// renames in the driver's archive because this file's function pointer of the
+// same name is a global symbol too (docs: claude/pcsx2-vulkan-integration.md).
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+
+static bool s_vulkan_library_loaded = false;
+
+bool Vulkan::IsVulkanLibraryLoaded()
+{
+	return s_vulkan_library_loaded;
+}
+
+bool Vulkan::LoadVulkanLibrary(Error* error)
+{
+	pxAssertRel(!s_vulkan_library_loaded, "Vulkan module is not loaded.");
+	vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
+
+	bool required_functions_missing = false;
+#define VULKAN_MODULE_ENTRY_POINT(name, required) \
+	if (std::strcmp(#name, "vkGetInstanceProcAddr") != 0) \
+	{ \
+		name = reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(VK_NULL_HANDLE, #name)); \
+		if (!name && required) \
+		{ \
+			ERROR_LOG("Vulkan: the linked driver has no module function {}", #name); \
+			required_functions_missing = true; \
+		} \
+	}
+
+#include "VKEntryPoints.inl"
+#undef VULKAN_MODULE_ENTRY_POINT
+
+	if (required_functions_missing)
+	{
+		ResetVulkanLibraryFunctionPointers();
+		Error::SetStringView(error, "The linked Vulkan driver lacks a required module function.");
+		return false;
+	}
+
+	s_vulkan_library_loaded = true;
+	return true;
+}
+
+void Vulkan::UnloadVulkanLibrary()
+{
+	ResetVulkanLibraryFunctionPointers();
+	s_vulkan_library_loaded = false;
+}
+#else
 static DynamicLibrary s_vulkan_library;
 
 bool Vulkan::IsVulkanLibraryLoaded()
@@ -92,12 +144,18 @@ void Vulkan::UnloadVulkanLibrary()
 	ResetVulkanLibraryFunctionPointers();
 	s_vulkan_library.Close();
 }
+#endif
 
 bool Vulkan::LoadVulkanInstanceFunctions(VkInstance instance)
 {
 	bool required_functions_missing = false;
 	auto LoadFunction = [&required_functions_missing, instance](PFN_vkVoidFunction* func_ptr, const char* name, bool is_required) {
 		*func_ptr = vkGetInstanceProcAddr(instance, name);
+#ifdef ORBIS_VULKAN
+		// A core 1.1 command the driver answers only by its extension's name.
+		if (!(*func_ptr))
+			*func_ptr = vkGetInstanceProcAddr(instance, (std::string(name) + "KHR").c_str());
+#endif
 		if (!(*func_ptr) && is_required)
 		{
 			std::fprintf(stderr, "Vulkan: Failed to load required instance function %s\n", name);
@@ -118,6 +176,10 @@ bool Vulkan::LoadVulkanDeviceFunctions(VkDevice device)
 	bool required_functions_missing = false;
 	auto LoadFunction = [&required_functions_missing, device](PFN_vkVoidFunction* func_ptr, const char* name, bool is_required) {
 		*func_ptr = vkGetDeviceProcAddr(device, name);
+#ifdef ORBIS_VULKAN
+		if (!(*func_ptr))
+			*func_ptr = vkGetDeviceProcAddr(device, (std::string(name) + "KHR").c_str());
+#endif
 		if (!(*func_ptr) && is_required)
 		{
 			std::fprintf(stderr, "Vulkan: Failed to load required device function %s\n", name);

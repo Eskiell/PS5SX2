@@ -132,6 +132,41 @@ namespace dyn_shaderc
 
 } // namespace dyn_shaderc
 
+#ifdef ORBIS_VULKAN
+// PS5: shaderc is linked, not loaded -- the port's glslang-backed implementation of
+// the calls below (coreorbis orbis-shims/ps5_shaderc.cpp).
+bool dyn_shaderc::Open()
+{
+	if (s_compiler)
+		return true;
+
+#define LOAD_FUNC(F) F = &::F;
+	SHADERC_FUNCTIONS(LOAD_FUNC)
+#undef LOAD_FUNC
+
+	s_compiler = shaderc_compiler_initialize();
+	if (!s_compiler)
+	{
+		ERROR_LOG("shaderc_compiler_initialize() failed");
+		Close();
+		return false;
+	}
+	return true;
+}
+
+void dyn_shaderc::Close()
+{
+	if (s_compiler)
+	{
+		shaderc_compiler_release(s_compiler);
+		s_compiler = nullptr;
+	}
+
+#define UNLOAD_FUNC(F) F = nullptr;
+	SHADERC_FUNCTIONS(UNLOAD_FUNC)
+#undef UNLOAD_FUNC
+}
+#else
 bool dyn_shaderc::Open()
 {
 	if (s_library.IsOpen())
@@ -188,6 +223,7 @@ void dyn_shaderc::Close()
 
 	s_library.Close();
 }
+#endif
 
 #undef SHADERC_FUNCTIONS
 #undef SHADERC_INIT_FUNCTIONS

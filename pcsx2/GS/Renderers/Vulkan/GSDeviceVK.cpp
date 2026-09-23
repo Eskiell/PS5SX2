@@ -182,6 +182,11 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
 	if (wi.type != WindowInfo::Type::Surfaceless && !SupportsExtension(VK_KHR_SURFACE_EXTENSION_NAME, true))
 		return false;
 
+#ifdef ORBIS_VULKAN
+	// PS5: the display surface (VKSwapChain.cpp, CreateOrbisDisplaySurface).
+	if (wi.type != WindowInfo::Type::Surfaceless && !SupportsExtension(VK_KHR_DISPLAY_EXTENSION_NAME, true))
+		return false;
+#endif
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
 	if (wi.type == WindowInfo::Type::Win32 && !SupportsExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, true))
 		return false;

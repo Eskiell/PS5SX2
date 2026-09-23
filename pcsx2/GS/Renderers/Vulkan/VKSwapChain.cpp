@@ -36,8 +36,113 @@ VKSwapChain::~VKSwapChain()
 	DestroySurface();
 }
 
+#ifdef ORBIS_VULKAN
+// PS5: no window system; the one display is VideoOut, driven through VK_KHR_display
+// as mihawk-99's vkQuake and RetroArch ports do. The driver reports one 3840x2160
+// mode and refuses a surface of any other extent, so the swapchain is that size and
+// the present pass scales the frame into it.
+static VkSurfaceKHR CreateOrbisDisplaySurface(VkInstance instance, VkPhysicalDevice physical_device)
+{
+	if (!vkGetPhysicalDeviceDisplayPropertiesKHR || !vkGetPhysicalDeviceDisplayPlanePropertiesKHR ||
+		!vkGetDisplayModePropertiesKHR || !vkCreateDisplayPlaneSurfaceKHR)
+	{
+		Console.Error("VK: the driver does not implement VK_KHR_display.");
+		return VK_NULL_HANDLE;
+	}
+
+	u32 display_count = 0;
+	if (vkGetPhysicalDeviceDisplayPropertiesKHR(physical_device, &display_count, nullptr) != VK_SUCCESS ||
+		display_count == 0)
+	{
+		Console.Error("VK: the device reports no display.");
+		return VK_NULL_HANDLE;
+	}
+	std::vector<VkDisplayPropertiesKHR> displays(display_count);
+	if (vkGetPhysicalDeviceDisplayPropertiesKHR(physical_device, &display_count, displays.data()) != VK_SUCCESS)
+		return VK_NULL_HANDLE;
+
+	u32 plane_count = 0;
+	if (vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physical_device, &plane_count, nullptr) != VK_SUCCESS ||
+		plane_count == 0)
+	{
+		Console.Error("VK: the device reports no display plane.");
+		return VK_NULL_HANDLE;
+	}
+	std::vector<VkDisplayPlanePropertiesKHR> planes(plane_count);
+	if (vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physical_device, &plane_count, planes.data()) != VK_SUCCESS)
+		return VK_NULL_HANDLE;
+
+	// The first display with a mode; the largest mode it offers (the console has one).
+	VkDisplayKHR chosen_display = VK_NULL_HANDLE;
+	VkDisplayModePropertiesKHR chosen_mode = {};
+	for (const VkDisplayPropertiesKHR& display : displays)
+	{
+		u32 mode_count = 0;
+		if (vkGetDisplayModePropertiesKHR(physical_device, display.display, &mode_count, nullptr) != VK_SUCCESS ||
+			mode_count == 0)
+			continue;
+		std::vector<VkDisplayModePropertiesKHR> modes(mode_count);
+		if (vkGetDisplayModePropertiesKHR(physical_device, display.display, &mode_count, modes.data()) != VK_SUCCESS)
+			continue;
+		for (const VkDisplayModePropertiesKHR& mode : modes)
+		{
+			const VkExtent2D& region = mode.parameters.visibleRegion;
+			if (chosen_display == VK_NULL_HANDLE ||
+				region.width * region.height >
+					chosen_mode.parameters.visibleRegion.width * chosen_mode.parameters.visibleRegion.height)
+			{
+				chosen_display = display.display;
+				chosen_mode = mode;
+			}
+		}
+		if (chosen_display != VK_NULL_HANDLE)
+			break;
+	}
+	if (chosen_display == VK_NULL_HANDLE)
+	{
+		Console.Error("VK: no display offers a mode.");
+		return VK_NULL_HANDLE;
+	}
+
+	// The plane that can drive that display, chosen by what it reports rather than by index.
+	u32 chosen_plane = UINT32_MAX;
+	for (u32 index = 0; index < plane_count; index++)
+	{
+		if (planes[index].currentDisplay == VK_NULL_HANDLE || planes[index].currentDisplay == chosen_display)
+		{
+			chosen_plane = index;
+			break;
+		}
+	}
+	if (chosen_plane == UINT32_MAX)
+	{
+		Console.Error("VK: no display plane can drive the display.");
+		return VK_NULL_HANDLE;
+	}
+
+	const VkDisplaySurfaceCreateInfoKHR create_info = {
+		VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR, nullptr, 0, chosen_mode.displayMode, chosen_plane,
+		planes[chosen_plane].currentStackIndex, VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR, 1.0f,
+		VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR, chosen_mode.parameters.visibleRegion};
+	VkSurfaceKHR surface;
+	const VkResult res = vkCreateDisplayPlaneSurfaceKHR(instance, &create_info, nullptr, &surface);
+	if (res != VK_SUCCESS)
+	{
+		LOG_VULKAN_ERROR(res, "vkCreateDisplayPlaneSurfaceKHR failed: ");
+		return VK_NULL_HANDLE;
+	}
+	Console.WriteLn("VK: display surface %ux%u on plane %u", chosen_mode.parameters.visibleRegion.width,
+		chosen_mode.parameters.visibleRegion.height, chosen_plane);
+	return surface;
+}
+#endif
+
 VkSurfaceKHR VKSwapChain::CreateVulkanSurface(VkInstance instance, VkPhysicalDevice physical_device, WindowInfo* wi)
 {
+#ifdef ORBIS_VULKAN
+	if (wi->type != WindowInfo::Type::Surfaceless)
+		return CreateOrbisDisplaySurface(instance, physical_device);
+#endif
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
 	if (wi->type == WindowInfo::Type::Win32)
 	{

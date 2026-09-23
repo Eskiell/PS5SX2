@@ -124,7 +124,12 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 		return true;
 	}
 
+#ifdef ORBIS_VULKAN
+	// PS5 Vulkan build: no GL device; the SW renderer's frames go through GSDeviceVK.
+	const RenderAPI new_api = (renderer == GSRendererType::SW) ? RenderAPI::Vulkan : GetAPIForRenderer(renderer);
+#else
 	const RenderAPI new_api = (renderer == GSRendererType::SW) ? RenderAPI::OpenGL : GetAPIForRenderer(renderer);
+#endif
 	switch (new_api)
 	{
 #ifdef _WIN32
