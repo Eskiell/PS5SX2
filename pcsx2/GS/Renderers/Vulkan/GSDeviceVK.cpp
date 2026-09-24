@@ -33,6 +33,41 @@
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #endif
 
+#ifdef ORBIS_VULKAN
+#include <chrono>
+// vk-285-36: where the GS thread waits on the Vulkan side, per second in boot.log's [vkwait] line
+// (main-boot's ticker): 0 a command buffer's fence before it is reused (ActivateCommandBuffer), 1 an
+// explicit wait after a submission (ExecuteCommandBuffer), 2 a fence counter (stream buffers, texture
+// copies: WaitForFenceCounter), 3 vkAcquireNextImageKHR (VKSwapChain.cpp), 4 vkQueueSubmit,
+// 5 vkQueuePresentKHR, 6 vkDeviceWaitIdle. Nanoseconds and calls, plain counters like main-boot's
+// [threads] ones: the GS thread is their one writer.
+unsigned long long g_orbis_vkw_ns[8], g_orbis_vkw_n[8];
+namespace
+{
+	struct OrbisVkWaitTimer
+	{
+		int kind;
+		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		explicit OrbisVkWaitTimer(int k)
+			: kind(k)
+		{
+		}
+		~OrbisVkWaitTimer()
+		{
+			g_orbis_vkw_ns[kind] += static_cast<unsigned long long>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			g_orbis_vkw_n[kind]++;
+		}
+	};
+} // namespace
+#define ORBIS_VKW(kind) OrbisVkWaitTimer orbis_vkw_timer_(kind)
+#else
+#define ORBIS_VKW(kind) \
+	do \
+	{ \
+	} while (0)
+#endif
+
 // Tweakables
 enum : u32
 {
@@ -1128,11 +1163,13 @@ void GSDeviceVK::WaitForFenceCounter(u64 fence_counter)
 	}
 
 	pxAssert(index != m_current_frame);
+	ORBIS_VKW(2);
 	WaitForCommandBufferCompletion(index);
 }
 
 void GSDeviceVK::WaitForGPUIdle()
 {
+	ORBIS_VKW(6);
 	vkDeviceWaitIdle(m_device);
 }
 
@@ -1556,7 +1593,10 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		submit_info.pSignalSemaphores = &m_spin_resources[m_current_frame].semaphore;
 	}
 
-	res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
+	{
+		ORBIS_VKW(4);
+		res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
+	}
 	if (res != VK_SUCCESS)
 	{
 		LOG_VULKAN_ERROR(res, "vkQueueSubmit failed: ");
@@ -1594,7 +1634,10 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 
 		present_swap_chain->ResetImageAcquireResult();
 
-		res = vkQueuePresentKHR(m_present_queue, &present_info);
+		{
+			ORBIS_VKW(5);
+			res = vkQueuePresentKHR(m_present_queue, &present_info);
+		}
 		if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
 		{
 			// VK_ERROR_OUT_OF_DATE_KHR is not fatal, just means we need to recreate our swap chain.
@@ -1674,7 +1717,10 @@ void GSDeviceVK::ActivateCommandBuffer(u32 index)
 
 	// Wait for the GPU to finish with all resources for this command buffer.
 	if (resources.fence_counter > m_completed_fence_counter)
+	{
+		ORBIS_VKW(0);
 		WaitForCommandBufferCompletion(index);
+	}
 
 	// Reset fence to unsignaled before starting.
 	VkResult res = vkResetFences(m_device, 1, &resources.fence);
@@ -1750,6 +1796,7 @@ void GSDeviceVK::ExecuteCommandBuffer(WaitType wait_for_completion)
 
 	if (wait_for_completion != WaitType::None)
 	{
+		ORBIS_VKW(1);
 		// Calibrate while we wait
 		if (m_wants_new_timestamp_calibration)
 			CalibrateSpinTimestamp();
