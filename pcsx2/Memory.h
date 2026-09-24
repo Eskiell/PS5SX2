@@ -56,11 +56,11 @@ namespace HostMemoryMap
 
 	// EE recompiler code cache area (64mb)
 	static constexpr u32 EErecOffset = 0x00000000;
-	static constexpr u32 EErecSize = 0x1800000;
+	static constexpr u32 EErecSize = 0x2800000; // vk-285-28: 40 MiB (was 24) of headroom; R&C uses 4-8
 
 	// IOP recompiler code cache area (32mb)
 	static constexpr u32 IOPrecOffset = EErecOffset + EErecSize;
-	static constexpr u32 IOPrecSize = 0x800000;
+	static constexpr u32 IOPrecSize = 0x400000; // vk-285-28: 4 MiB (was 8)
 
 	// newVif0 recompiler code cache area (8mb)
 	static constexpr u32 VIF0recOffset = IOPrecOffset + IOPrecSize;
@@ -84,7 +84,7 @@ namespace HostMemoryMap
 
 	// Software Renderer JIT buffer (64mb)
 	static constexpr u32 SWrecOffset = VIFUnpackRecOffset + VIFUnpackRecSize;
-	static constexpr u32 SWrecSize = 0x1400000;
+	static constexpr u32 SWrecSize = 0x800000; // vk-285-28: 8 MiB (was 20); the HW renderer's SwPrimRender only
 
 	// Overall size.
 	static constexpr u32 CodeSize = SWrecOffset + SWrecSize; // 305 mb
