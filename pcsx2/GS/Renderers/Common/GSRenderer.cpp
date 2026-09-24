@@ -253,6 +253,26 @@ static void OrbisPrintLoad()
 				vu1_size * mib, GSCodeReserve::GetMemoryUsed() * mib, flex * mib);
 			std::memcpy(s_rec_prev, rec, sizeof(rec));
 		}
+		{
+			// vk-285-31: memory card activity this second (MemoryCardFile.cpp), when there was any.
+			extern std::atomic<u32> g_orbis_mcd_reads, g_orbis_mcd_writes, g_orbis_mcd_erases, g_orbis_mcd_flush_kib;
+			extern std::atomic<unsigned long long> g_orbis_mcd_ticks;
+			extern std::atomic<int> g_orbis_mcd_cached;
+			static u32 s_mcd_prev[4] = {};
+			static unsigned long long s_mcd_ticks_prev = 0;
+			const u32 mcd[4] = {g_orbis_mcd_reads.load(std::memory_order_relaxed),
+				g_orbis_mcd_writes.load(std::memory_order_relaxed), g_orbis_mcd_erases.load(std::memory_order_relaxed),
+				g_orbis_mcd_flush_kib.load(std::memory_order_relaxed)};
+			const unsigned long long mcd_ticks = g_orbis_mcd_ticks.load(std::memory_order_relaxed);
+			if (std::memcmp(mcd, s_mcd_prev, sizeof(mcd)) != 0 || mcd_ticks != s_mcd_ticks_prev)
+			{
+				printf("[mcd] reads=%u writes=%u erases=%u written_back=%u KiB | %.1f ms | cached slots %#x\n",
+					mcd[0] - s_mcd_prev[0], mcd[1] - s_mcd_prev[1], mcd[2] - s_mcd_prev[2], mcd[3] - s_mcd_prev[3],
+					static_cast<double>(mcd_ticks - s_mcd_ticks_prev) * k, g_orbis_mcd_cached.load(std::memory_order_relaxed));
+				std::memcpy(s_mcd_prev, mcd, sizeof(mcd));
+				s_mcd_ticks_prev = mcd_ticks;
+			}
+		}
 #ifdef ORBIS_VULKAN
 		OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
 		OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line

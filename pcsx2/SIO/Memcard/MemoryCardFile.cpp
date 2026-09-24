@@ -26,6 +26,9 @@
 
 #include <map>
 
+#include <atomic>
+#include <unistd.h>
+
 static constexpr int MCD_SIZE = 1024 * 8 * 16; // Legacy PSX card default size
 
 static constexpr int MC2_MBSIZE = 1024 * 528 * 2; // Size of a single megabyte of card data
@@ -33,6 +36,23 @@ static constexpr int MC2_MBSIZE = 1024 * 528 * 2; // Size of a single megabyte o
 static constexpr int MC2_ERASE_SIZE = 528 * 16;
 
 static const char* s_folder_mem_card_id_file = "_pcsx2_superblock";
+
+// PS5 port (vk-285-31): memory card activity for the [mcd] line (GSRenderer.cpp's OrbisPrintLoad):
+// page reads, page writes, block erases, host time spent in them (TSC ticks) and KiB written back.
+// Each call used to seek and read/write the card file on /data, where one write costs ~0.7 ms, so a
+// game's autosave (hundreds of page writes, each read back to verify) held the EE thread for seconds.
+std::atomic<u32> g_orbis_mcd_reads{0}, g_orbis_mcd_writes{0}, g_orbis_mcd_erases{0}, g_orbis_mcd_flush_kib{0};
+std::atomic<unsigned long long> g_orbis_mcd_ticks{0};
+std::atomic<int> g_orbis_mcd_cached{0}; // a bit per slot whose image is in RAM
+
+namespace
+{
+	struct OrbisMcdTimer
+	{
+		const unsigned long long t0 = __builtin_ia32_rdtsc();
+		~OrbisMcdTimer() { g_orbis_mcd_ticks.fetch_add(__builtin_ia32_rdtsc() - t0, std::memory_order_relaxed); }
+	};
+} // namespace
 
 bool FileMcd_Open = false;
 
@@ -166,6 +186,18 @@ protected:
 	bool m_ispsx[8] = {};
 	u32 m_chkaddr = 0;
 
+	// PS5 port (vk-285-31): a PS2 card's image in RAM. Reads, writes and erases work on it; the
+	// erase blocks they touch are written back to the file in a few large writes once the card has
+	// been idle for a second (NextFrame runs once an emulated second, cdvdVsync -> sioNextFrame),
+	// every 5 s while it stays busy, and when the card closes. Formatted cards load at open, others
+	// on their first write. /data/PCSX2/mcd_nocache turns the cache off.
+	std::vector<u8> m_cache[8];
+	std::vector<u8> m_dirty[8]; // a flag per erase block
+	bool m_dirty_any[8] = {};
+	bool m_cache_ok[8] = {};
+	u32 m_idle_seconds[8] = {};
+	u32 m_dirty_seconds[8] = {};
+
 public:
 	FileMemoryCard();
 	~FileMemoryCard();
@@ -183,10 +215,14 @@ public:
 	s32 Save(uint slot, const u8* src, u32 adr, int size);
 	s32 EraseBlock(uint slot, u32 adr);
 	u64 GetCRC(uint slot);
+	void NextFrame(uint slot); // vk-285-31
 
 protected:
 	bool Seek(std::FILE* f, u32 adr);
 	bool Create(const char* mcdFile, uint sizeInMB);
+	bool LoadCache(uint slot); // vk-285-31
+	void FlushCache(uint slot, const char* why);
+	void MarkDirty(uint slot, u32 adr, u32 size);
 };
 
 uint FileMcd_GetMtapPort(uint slot)
@@ -339,8 +375,115 @@ void FileMemoryCard::Open()
 				if (read_result == 0)
 					Host::ReportErrorAsync("Memory Card Read Failed", "Error reading memory card.");
 			}
+
+			// vk-285-31: the RAM image (see the members).
+			m_cache_ok[slot] = !m_ispsx[slot] && access("/data/PCSX2/mcd_nocache", F_OK) != 0;
+			if (m_cache_ok[slot] && FileMcd_IsMemoryCardFormatted(m_file[slot]))
+				LoadCache(slot);
+			else
+				std::printf("[mcd] slot %d: %s\n", slot,
+					!m_cache_ok[slot] ? (m_ispsx[slot] ? "PS1 card, not cached" : "mcd_nocache: not cached") :
+										"unformatted, cached at its first write");
 		}
 	}
+}
+
+// vk-285-31: the whole card image into RAM.
+bool FileMemoryCard::LoadCache(uint slot)
+{
+	std::FILE* f = m_file[slot];
+	const s64 size = m_fileSize[slot];
+	if (!f || size <= 0 || size > (64 << 20))
+	{
+		m_cache_ok[slot] = false;
+		return false;
+	}
+	const unsigned long long t0 = __builtin_ia32_rdtsc();
+	const auto c0 = std::chrono::steady_clock::now();
+	std::vector<u8> image(static_cast<size_t>(size));
+	if (FileSystem::FSeek64(f, 0, SEEK_SET) != 0 || std::fread(image.data(), image.size(), 1, f) != 1)
+	{
+		std::printf("[mcd] slot %u: reading the card into RAM failed, not cached\n", slot);
+		m_cache_ok[slot] = false;
+		return false;
+	}
+	m_cache[slot] = std::move(image);
+	m_dirty[slot].assign((m_cache[slot].size() + MC2_ERASE_SIZE - 1) / MC2_ERASE_SIZE, 0);
+	m_dirty_any[slot] = false;
+	g_orbis_mcd_cached.fetch_or(1 << slot, std::memory_order_relaxed);
+	g_orbis_mcd_ticks.fetch_add(__builtin_ia32_rdtsc() - t0, std::memory_order_relaxed);
+	std::printf("[mcd] slot %u: %s in RAM (%lld bytes, read in %.1f ms)\n", slot,
+		std::string(Path::GetFileName(m_filenames[slot])).c_str(), static_cast<long long>(size),
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count());
+	return true;
+}
+
+void FileMemoryCard::MarkDirty(uint slot, u32 adr, u32 size)
+{
+	if (size == 0)
+		return;
+	const u32 first = adr / MC2_ERASE_SIZE, last = (adr + size - 1) / MC2_ERASE_SIZE;
+	for (u32 b = first; b <= last && b < m_dirty[slot].size(); b++)
+		m_dirty[slot][b] = 1;
+	if (!m_dirty_any[slot])
+		m_dirty_seconds[slot] = 0;
+	m_dirty_any[slot] = true;
+	m_idle_seconds[slot] = 0;
+}
+
+// Writes the dirty erase blocks back: one seek and one write per run of neighbouring blocks.
+void FileMemoryCard::FlushCache(uint slot, const char* why)
+{
+	if (!m_dirty_any[slot] || m_cache[slot].empty() || !m_file[slot])
+		return;
+	OrbisMcdTimer timer;
+	const auto c0 = std::chrono::steady_clock::now();
+	std::FILE* f = m_file[slot];
+	std::vector<u8>& dirty = m_dirty[slot];
+	const std::vector<u8>& image = m_cache[slot];
+	u32 blocks = 0, runs = 0;
+	size_t bytes = 0;
+	bool ok = true;
+	for (size_t b = 0; b < dirty.size();)
+	{
+		if (!dirty[b])
+		{
+			b++;
+			continue;
+		}
+		size_t e = b;
+		while (e < dirty.size() && dirty[e])
+			dirty[e++] = 0;
+		const size_t off = b * MC2_ERASE_SIZE;
+		const size_t len = std::min(e * MC2_ERASE_SIZE, image.size()) - off;
+		ok = ok && FileSystem::FSeek64(f, static_cast<s64>(off), SEEK_SET) == 0 && std::fwrite(&image[off], len, 1, f) == 1;
+		blocks += static_cast<u32>(e - b);
+		runs++;
+		bytes += len;
+		b = e;
+	}
+	ok = ok && std::fflush(f) == 0;
+	m_dirty_any[slot] = false;
+	g_orbis_mcd_flush_kib.fetch_add(static_cast<u32>(bytes >> 10), std::memory_order_relaxed);
+	std::printf("[mcd] slot %u: wrote back %u block(s) (%zu KiB) in %u write(s), %.1f ms (%s)%s\n", slot, blocks,
+		bytes >> 10, runs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count(), why,
+		ok ? "" : " -- WRITE FAILED");
+	if (!ok)
+		Host::ReportErrorAsync("Memory Card Write Failed", "Error writing the memory card file.");
+}
+
+// vk-285-31: once an emulated second (sioNextFrame). The first call after a write sees the second
+// the write happened in, so two calls without writes in between mean a whole idle second.
+void FileMemoryCard::NextFrame(uint slot)
+{
+	if (!m_dirty_any[slot])
+		return;
+	m_idle_seconds[slot]++;
+	m_dirty_seconds[slot]++;
+	if (m_idle_seconds[slot] >= 2)
+		FlushCache(slot, "idle");
+	else if (m_dirty_seconds[slot] >= 5)
+		FlushCache(slot, "busy");
 }
 
 void FileMemoryCard::Close()
@@ -349,6 +492,13 @@ void FileMemoryCard::Close()
 	{
 		if (!m_file[slot])
 			continue;
+
+		// vk-285-31: the RAM image's changes first.
+		FlushCache(slot, "close");
+		m_cache[slot] = {};
+		m_dirty[slot] = {};
+		m_cache_ok[slot] = false;
+		g_orbis_mcd_cached.fetch_and(~(1 << slot), std::memory_order_relaxed);
 
 		// Store checksum
 		if (!m_ispsx[slot] && FileSystem::FSeek64(m_file[slot], m_chkaddr, SEEK_SET) == 0)
@@ -432,6 +582,15 @@ s32 FileMemoryCard::Read(uint slot, u8* dest, u32 adr, int size)
 		memset(dest, 0, size);
 		return 1;
 	}
+	OrbisMcdTimer timer; // vk-285-31
+	g_orbis_mcd_reads.fetch_add(1, std::memory_order_relaxed);
+	if (!m_cache[slot].empty())
+	{
+		if (size < 0 || static_cast<size_t>(adr) + static_cast<size_t>(size) > m_cache[slot].size())
+			return 0;
+		std::memcpy(dest, &m_cache[slot][adr], size);
+		return 1;
+	}
 	if (!Seek(mcfp, adr))
 		return 0;
 	return std::fread(dest, size, 1, mcfp) == 1;
@@ -444,6 +603,35 @@ s32 FileMemoryCard::Save(uint slot, const u8* src, u32 adr, int size)
 	if (!mcfp)
 	{
 		DevCon.Error("(FileMcd) Ignoring attempted save/write to disabled slot.");
+		return 1;
+	}
+
+	// vk-285-31: on the RAM image (loaded now if this card waited for its first write).
+	OrbisMcdTimer timer;
+	g_orbis_mcd_writes.fetch_add(1, std::memory_order_relaxed);
+	if (m_cache[slot].empty() && m_cache_ok[slot])
+		LoadCache(slot);
+	if (!m_cache[slot].empty())
+	{
+		std::vector<u8>& image = m_cache[slot];
+		if (size < 0 || static_cast<size_t>(adr) + static_cast<size_t>(size) > image.size())
+			return 0;
+		if (static_cast<int>(m_currentdata.size()) < size)
+			m_currentdata.resize(size);
+		for (int i = 0; i < size; i++)
+		{
+			const u8 cur = image[adr + i];
+			if ((cur & src[i]) != src[i])
+				Console.Warning("(FileMcd) Warning: writing to uncleared data. (%d) [%08X]", slot, adr);
+			m_currentdata[i] = cur & src[i];
+		}
+		if (adr == m_chkaddr)
+			Console.Warning("(FileMcd) Warning: checksum sector overwritten. (%d)", slot);
+		const u64* pdata = reinterpret_cast<const u64*>(m_currentdata.data());
+		for (int i = 0; i < size / 8; i++)
+			m_chksum[slot] ^= pdata[i];
+		std::memcpy(&image[adr], m_currentdata.data(), size);
+		MarkDirty(slot, adr, static_cast<u32>(size));
 		return 1;
 	}
 
@@ -513,6 +701,20 @@ s32 FileMemoryCard::EraseBlock(uint slot, u32 adr)
 	if (!mcfp)
 	{
 		DevCon.Error("MemoryCard: Ignoring erase for disabled slot.");
+		return 1;
+	}
+
+	// vk-285-31: on the RAM image.
+	OrbisMcdTimer timer;
+	g_orbis_mcd_erases.fetch_add(1, std::memory_order_relaxed);
+	if (m_cache[slot].empty() && m_cache_ok[slot])
+		LoadCache(slot);
+	if (!m_cache[slot].empty())
+	{
+		if (static_cast<size_t>(adr) + MC2_ERASE_SIZE > m_cache[slot].size())
+			return 0;
+		std::memset(&m_cache[slot][adr], 0xff, MC2_ERASE_SIZE);
+		MarkDirty(slot, adr, MC2_ERASE_SIZE);
 		return 1;
 	}
 
@@ -802,9 +1004,9 @@ void FileMcd_NextFrame(uint port, uint slot)
 	const uint combinedSlot = FileMcd_ConvertToSlot(port, slot);
 	switch (EmuConfig.Mcd[combinedSlot].Type)
 	{
-		//case MemoryCardType::MemoryCard_File:
-		//	Mcd::impl.NextFrame( combinedSlot );
-		//	break;
+		case MemoryCardType::File: // vk-285-31: writes the RAM image back once the card is idle (once a second)
+			Mcd::impl.NextFrame(combinedSlot);
+			break;
 		case MemoryCardType::Folder:
 			Mcd::implFolder.NextFrame(combinedSlot);
 			break;
