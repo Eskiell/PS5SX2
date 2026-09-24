@@ -1212,7 +1212,7 @@ namespace
 		s32 r[4];
 		u64 extra;
 	};
-	constexpr u32 ORBIS_VK_TRACE_N = 8192; // a frame of R&C draws more than 2,000 times
+	constexpr u32 ORBIS_VK_TRACE_N = 16384; // a frame of R&C draws more than 2,000 times, plus a pipe entry per pass
 	OrbisVkTraceEntry s_orbis_trace[ORBIS_VK_TRACE_N];
 	u64 s_orbis_trace_seq = 0;
 	u32 s_orbis_submit = 0;
@@ -1305,6 +1305,11 @@ namespace
 						static_cast<unsigned long long>(e.ps_lo), e.nverts, e.nindices, e.a, e.aw, e.ah, e.af, e.b, e.bw,
 						e.bh, e.bf, e.c, e.cw, e.ch, e.cf, e.d, e.df, e.r[0], e.r[1], e.r[2], e.r[3],
 						static_cast<unsigned long long>(e.extra));
+				else if (e.kind == 8)
+					fprintf(f, "%llu s%u pipe ps=%016llx.%016llx fb=%u t0=%p t1=%p t2=%p pl=%llx\n",
+						static_cast<unsigned long long>(e.seq), e.submit, static_cast<unsigned long long>(e.ps_hi),
+						static_cast<unsigned long long>(e.ps_lo), e.flags, e.a, e.b, e.c,
+						static_cast<unsigned long long>(e.extra));
 				else
 					fprintf(f, "%llu s%u %s dst=%p %ux%u f%u src=%p %ux%u f%u rect=%d,%d,%d,%d x=%llx\n",
 						static_cast<unsigned long long>(e.seq), e.submit,
@@ -1317,6 +1322,20 @@ namespace
 			fsync(fileno(f));
 			fclose(f);
 		}
+	}
+
+	// vk-285-21: one entry per GPU pass (BindDrawPipeline), with the pixel shader selector the pass
+	// really uses, its feedback-loop flags and the TFX texture slots 0-2.
+	void OrbisVkTracePipe(u64 ps_lo, u64 ps_hi, u8 feedback, const void* t0, const void* t1, const void* t2, u64 pipeline)
+	{
+		OrbisVkTraceEntry& e = OrbisVkTraceNew(8);
+		e.ps_lo = ps_lo;
+		e.ps_hi = ps_hi;
+		e.flags = feedback;
+		e.a = t0;
+		e.b = t1;
+		e.c = t2;
+		e.extra = pipeline;
 	}
 
 	[[noreturn]] void OrbisVkHangExit(const char* where)
@@ -5490,6 +5509,10 @@ bool GSDeviceVK::BindDrawPipeline(const PipelineSelector& p)
 	VkPipeline pipeline = GetTFXPipeline(p);
 	if (pipeline == VK_NULL_HANDLE)
 		return false;
+#ifdef ORBIS_VULKAN
+	OrbisVkTracePipe(p.ps.key_lo, p.ps.key_hi, static_cast<u8>(p.feedback_loop_flags), m_tfx_textures[0], m_tfx_textures[1],
+		m_tfx_textures[2], reinterpret_cast<u64>(pipeline));
+#endif
 
 	SetPipeline(pipeline);
 
