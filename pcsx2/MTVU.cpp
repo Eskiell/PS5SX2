@@ -13,6 +13,8 @@
 VU_Thread vu1Thread;
 unsigned long long g_orbis_vu_idle_ticks, g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks; // eerec-281
 void OrbisCpuSample(int slot); // eerec-285 (GSRenderer.cpp)
+void OrbisVUProfStart(); // vk-285-29 (orbis_eeprof.cpp)
+std::atomic<int> g_orbis_vu_waiting{0}; // vk-285-29: the VU1 profiler skips the ring waits
 
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
@@ -136,9 +138,12 @@ void VU_Thread::ExecuteRingBuffer()
 	{
 		{
 			const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
+			g_orbis_vu_waiting.store(1, std::memory_order_relaxed); // vk-285-29
 			semaEvent.WaitForWork();
+			g_orbis_vu_waiting.store(0, std::memory_order_relaxed);
 			g_orbis_vu_idle_ticks += __builtin_ia32_rdtsc() - t0;
 			OrbisCpuSample(2); // eerec-285
+			OrbisVUProfStart(); // vk-285-29
 		}
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
