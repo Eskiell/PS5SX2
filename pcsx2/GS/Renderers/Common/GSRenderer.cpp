@@ -4,6 +4,8 @@
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiManager.h"
 #include "GS/Renderers/Common/GSRenderer.h"
+#include "GS/Renderers/Common/GSFunctionMap.h" // vk-285-28: GSCodeReserve (the [rec] line)
+extern "C" int sceKernelAvailableFlexibleMemorySize(unsigned long long* size); // vk-285-28
 #include "GS/GSCapture.h"
 #include "GS/GSDump.h"
 #include "GS/GSGL.h"
@@ -222,6 +224,35 @@ static void OrbisPrintLoad()
 			printf("%s%.0f", i ? "/" : "", static_cast<double>(g_orbis_sw_busy_ticks[i] - s_prev[10 + i]) * k);
 		OrbisPrintCpu(); // eerec-285
 		printf("\n");
+		{
+			// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
+			// rec_nocount switch.
+			extern std::atomic<u32> g_orbis_rec_compiles, g_orbis_rec_discards, g_orbis_rec_page_resets,
+				g_orbis_rec_full_resets, g_orbis_rec_faults;
+			extern std::atomic<int> g_orbis_rec_nocount;
+			static u32 s_rec_prev[5] = {};
+			const u32 rec[5] = {g_orbis_rec_compiles.load(std::memory_order_relaxed),
+				g_orbis_rec_discards.load(std::memory_order_relaxed), g_orbis_rec_page_resets.load(std::memory_order_relaxed),
+				g_orbis_rec_faults.load(std::memory_order_relaxed), g_orbis_rec_full_resets.load(std::memory_order_relaxed)};
+			g_orbis_rec_nocount.store(access("/data/PCSX2/rec_nocount", F_OK) == 0 ? 1 : 0, std::memory_order_relaxed);
+			// vk-285-28: and how full each code cache is (MiB used/size), and the flexible memory left.
+			extern size_t OrbisRecEEUsed(size_t* size);
+			extern size_t OrbisRecIOPUsed(size_t* size);
+			extern size_t OrbisMVUUsed(int vu, size_t* size);
+			size_t ee_size = 0, iop_size = 0, vu0_size = 0, vu1_size = 0;
+			const size_t ee_used = OrbisRecEEUsed(&ee_size), iop_used = OrbisRecIOPUsed(&iop_size);
+			const size_t vu0_used = OrbisMVUUsed(0, &vu0_size), vu1_used = OrbisMVUUsed(1, &vu1_size);
+			unsigned long long flex = 0;
+			sceKernelAvailableFlexibleMemorySize(&flex);
+			const double mib = 1.0 / 1048576.0;
+			printf("[rec] compiles=%u discards=%u page_resets=%u faults=%u full_resets=%u nocount=%d | MiB ee %.1f/%.0f "
+				   "iop %.1f/%.0f vu0 %.1f/%.0f vu1 %.1f/%.0f sw %.1f | flex free %.0f\n",
+				rec[0] - s_rec_prev[0], rec[1] - s_rec_prev[1], rec[2] - s_rec_prev[2], rec[3] - s_rec_prev[3],
+				rec[4] - s_rec_prev[4], g_orbis_rec_nocount.load(std::memory_order_relaxed), ee_used * mib,
+				ee_size * mib, iop_used * mib, iop_size * mib, vu0_used * mib, vu0_size * mib, vu1_used * mib,
+				vu1_size * mib, GSCodeReserve::GetMemoryUsed() * mib, flex * mib);
+			std::memcpy(s_rec_prev, rec, sizeof(rec));
+		}
 #ifdef ORBIS_VULKAN
 		OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
 		OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line
@@ -1136,6 +1167,216 @@ void GSRenderer::EndPresentFrame()
 	ImGuiManager::NewFrame();
 }
 
+// ---- vk-285-25: the frame capture ----
+// /data/PCSX2/framecap (content optional: "secs=20 every=2 x0=0.5 x1=1 y0=0 y1=1 half=1") records the
+// displayed frame -- the merge output, before the present's scaling -- for `secs` seconds, every `every`th
+// vsync, cropped to [x0,x1) x [y0,y1) of the frame (fractions) and halved on the GPU with half=1, into
+// /data/PCSX2/framecap.bin: "PS5FCAP1", u32 version 1, u32 header size 16, then per frame twelve u32
+// (magic 'FRM1', vsync, w, h, frame w, frame h, crop x0 y0 x1 y1, microseconds lo, hi) and w*h*3 bytes RGB,
+// rows top down. Frame N's copy is read at vsync N+1, by which time the GPU has normally finished it.
+namespace
+{
+	struct OrbisCap
+	{
+		FILE* f = nullptr;
+		int left = 0;
+		int every = 2;
+		int n = 0;
+		float x0 = 0.5f, x1 = 1.0f, y0 = 0.0f, y1 = 1.0f;
+		int half = 1;
+		unsigned frames = 0;
+		unsigned long long bytes = 0;
+		std::chrono::steady_clock::time_point t0;
+		GSTexture* rt = nullptr;
+		std::unique_ptr<GSDownloadTexture> dl;
+		bool pending = false;
+		u32 hdr[12] = {};
+		std::vector<u8> rgb;
+	};
+	OrbisCap s_orbis_cap;
+	unsigned s_orbis_cap_vsync = 0;
+} // namespace
+
+static void OrbisCapFinishPending()
+{
+	OrbisCap& c = s_orbis_cap;
+	if (!c.pending)
+		return;
+	c.pending = false;
+	const u32 w = c.hdr[2], h = c.hdr[3];
+	const GSVector4i rc(0, 0, static_cast<int>(w), static_cast<int>(h));
+	c.dl->Flush();
+	if (!c.dl->Map(rc))
+	{
+		printf("[framecap] map failed\n");
+		return;
+	}
+	const u8* const p = c.dl->GetMapPointer();
+	const u32 pitch = c.dl->GetMapPitch();
+	c.rgb.resize(static_cast<size_t>(w) * h * 3);
+	u8* o = c.rgb.data();
+	for (u32 y = 0; y < h; y++)
+	{
+		const u8* r = p + static_cast<size_t>(y) * pitch;
+		for (u32 x = 0; x < w; x++, r += 4, o += 3)
+		{
+			o[0] = r[0];
+			o[1] = r[1];
+			o[2] = r[2];
+		}
+	}
+	c.dl->Unmap();
+	fwrite(c.hdr, sizeof(c.hdr), 1, c.f);
+	fwrite(c.rgb.data(), 1, c.rgb.size(), c.f);
+	c.frames++;
+	c.bytes += sizeof(c.hdr) + c.rgb.size();
+}
+
+static void OrbisCapClose()
+{
+	OrbisCap& c = s_orbis_cap;
+	if (c.f)
+		OrbisCapFinishPending();
+	c.pending = false;
+	if (c.f)
+	{
+		fclose(c.f);
+		c.f = nullptr;
+		const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - c.t0).count();
+		printf("[framecap] done: %u frames, %.1f MB in %.1f s -> /data/PCSX2/framecap.bin\n", c.frames,
+			static_cast<double>(c.bytes) / 1048576.0, secs);
+		fflush(stdout);
+		OrbisOSDLabel("CAPTURE DONE");
+	}
+	if (c.rt)
+	{
+		g_gs_device->Recycle(c.rt);
+		c.rt = nullptr;
+	}
+	c.dl.reset();
+	std::vector<u8>().swap(c.rgb);
+	c.left = 0;
+}
+
+static void OrbisFrameCapture(GSTexture* current)
+{
+	OrbisCap& c = s_orbis_cap;
+	s_orbis_cap_vsync++;
+	if (c.f)
+		OrbisCapFinishPending();
+	if (!c.f)
+	{
+		if ((s_orbis_cap_vsync % 25) != 0 || access("/data/PCSX2/framecap", F_OK) != 0)
+			return;
+		char buf[256] = {};
+		if (FILE* pf = fopen("/data/PCSX2/framecap", "rb"))
+		{
+			const size_t n = fread(buf, 1, sizeof(buf) - 1, pf);
+			buf[n] = '\0';
+			fclose(pf);
+		}
+		unlink("/data/PCSX2/framecap");
+		float secs = 20.0f, every = 2.0f, half = 1.0f, x0 = 0.5f, x1 = 1.0f, y0 = 0.0f, y1 = 1.0f;
+		char* save = nullptr;
+		for (char* tok = strtok_r(buf, " \t\r\n,", &save); tok; tok = strtok_r(nullptr, " \t\r\n,", &save))
+		{
+			char key[16] = {};
+			float v = 0.0f;
+			if (sscanf(tok, "%15[a-z0-9]=%f", key, &v) != 2)
+				continue;
+			const std::string k(key);
+			if (k == "secs")
+				secs = v;
+			else if (k == "every")
+				every = v;
+			else if (k == "half")
+				half = v;
+			else if (k == "x0")
+				x0 = v;
+			else if (k == "x1")
+				x1 = v;
+			else if (k == "y0")
+				y0 = v;
+			else if (k == "y1")
+				y1 = v;
+		}
+		c.x0 = std::clamp(x0, 0.0f, 1.0f);
+		c.x1 = std::clamp(x1, 0.0f, 1.0f);
+		c.y0 = std::clamp(y0, 0.0f, 1.0f);
+		c.y1 = std::clamp(y1, 0.0f, 1.0f);
+		if (c.x1 <= c.x0 || c.y1 <= c.y0)
+		{
+			printf("[framecap] empty crop, not recording\n");
+			fflush(stdout);
+			return;
+		}
+		c.f = fopen("/data/PCSX2/framecap.bin", "wb");
+		if (!c.f)
+		{
+			printf("[framecap] cannot open /data/PCSX2/framecap.bin\n");
+			fflush(stdout);
+			return;
+		}
+		setvbuf(c.f, nullptr, _IOFBF, 4u << 20);
+		static const char magic[8] = {'P', 'S', '5', 'F', 'C', 'A', 'P', '1'};
+		const u32 ver[2] = {1, 16};
+		fwrite(magic, sizeof(magic), 1, c.f);
+		fwrite(ver, sizeof(ver), 1, c.f);
+		c.left = static_cast<int>(std::clamp(secs, 0.1f, 120.0f) * 50.0f + 0.5f);
+		c.every = std::clamp(static_cast<int>(every), 1, 50);
+		c.half = half != 0.0f ? 1 : 0;
+		c.n = 0;
+		c.frames = 0;
+		c.bytes = 16;
+		c.pending = false;
+		c.t0 = std::chrono::steady_clock::now();
+		printf("[framecap] armed: %d vsyncs, every %d, crop x %.3f-%.3f y %.3f-%.3f, %s\n", c.left, c.every,
+			static_cast<double>(c.x0), static_cast<double>(c.x1), static_cast<double>(c.y0), static_cast<double>(c.y1),
+			c.half ? "halved" : "full size");
+		fflush(stdout);
+		OrbisOSDLabel("CAPTURE");
+	}
+	if (c.left <= 0)
+	{
+		OrbisCapClose();
+		return;
+	}
+	c.left--;
+	if ((c.n++ % c.every) != 0 || !current)
+		return;
+	const int W = current->GetWidth(), H = current->GetHeight();
+	const int cx0 = std::clamp(static_cast<int>(c.x0 * W) & ~1, 0, W), cx1 = std::clamp(static_cast<int>(c.x1 * W) & ~1, 0, W);
+	const int cy0 = std::clamp(static_cast<int>(c.y0 * H) & ~1, 0, H), cy1 = std::clamp(static_cast<int>(c.y1 * H) & ~1, 0, H);
+	if (cx1 - cx0 < 2 || cy1 - cy0 < 2)
+		return;
+	const int w = (cx1 - cx0) >> c.half, h = (cy1 - cy0) >> c.half;
+	if (!c.rt || c.rt->GetWidth() != w || c.rt->GetHeight() != h)
+	{
+		if (c.rt)
+			g_gs_device->Recycle(c.rt);
+		c.rt = g_gs_device->CreateRenderTarget(w, h, GSTexture::Format::Color, false, false);
+		c.dl = g_gs_device->CreateDownloadTexture(static_cast<u32>(w), static_cast<u32>(h), GSTexture::Format::Color);
+		if (!c.rt || !c.dl)
+		{
+			printf("[framecap] no %dx%d target or download buffer\n", w, h);
+			OrbisCapClose();
+			return;
+		}
+	}
+	const GSVector4 sRect(static_cast<float>(cx0) / W, static_cast<float>(cy0) / H, static_cast<float>(cx1) / W,
+		static_cast<float>(cy1) / H);
+	g_gs_device->StretchRect(current, sRect, c.rt, GSVector4(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)),
+		ShaderConvert::COPY, c.half ? Biln : Nearest);
+	c.dl->CopyFromTexture(GSVector4i(0, 0, w, h), c.rt, GSVector4i(0, 0, w, h), 0, true);
+	c.pending = true;
+	const unsigned long long us = static_cast<unsigned long long>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - c.t0).count());
+	const u32 hdr[12] = {0x314D5246u, s_orbis_cap_vsync, static_cast<u32>(w), static_cast<u32>(h), static_cast<u32>(W),
+		static_cast<u32>(H), static_cast<u32>(cx0), static_cast<u32>(cy0), static_cast<u32>(cx1), static_cast<u32>(cy1),
+		static_cast<u32>(us), static_cast<u32>(us >> 32)};
+	std::memcpy(c.hdr, hdr, sizeof(hdr));
+}
+
 void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 {
 	// Orbis: Null renderer has no GSDevice; skip presentation/merge entirely.
@@ -1199,6 +1440,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	}
 
 	const bool blank_frame = !Merge(field);
+	OrbisFrameCapture(blank_frame ? nullptr : g_gs_device->GetCurrent()); // vk-285-25
 	{
 		static unsigned s_d = 0;
 		if (g_orbis_diag && (s_d++ % 250) == 7 && s_orbis_gl) // eerec-280

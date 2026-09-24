@@ -70,6 +70,12 @@ static BASEBLOCK* recROM2 = nullptr; // also here
 static BaseBlocks recBlocks;
 static u8* recPtr = nullptr;
 static u8* recPtrEnd = nullptr;
+// vk-285-28: how much of the IOP code cache is in use (GSRenderer.cpp, [rec] line).
+size_t OrbisRecIOPUsed(size_t* size)
+{
+	*size = HostMemoryMap::IOPrecSize;
+	return recPtr ? static_cast<size_t>(recPtr - SysMemory::GetIOPRec()) : 0;
+}
 u32 psxpc; // recompiler psxpc
 int psxbranch; // set for branch
 u32 g_iopCyclePenalty;

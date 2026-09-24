@@ -24,6 +24,7 @@
 #include "Host.h"
 #include "VMManager.h"
 
+#include <atomic>
 #include "common/BitUtils.h"
 #include "common/Error.h"
 
@@ -1545,8 +1546,11 @@ void mmap_MarkCountedRamPage(u32 paddr)
 // offset - offset of address relative to psM.
 // All recompiled blocks belonging to the page are cleared, and any new blocks recompiled
 // from code residing in this page will use manual protection.
+extern std::atomic<u32> g_orbis_rec_faults; // vk-285-27 (GSRenderer.cpp prints it)
+std::atomic<u32> g_orbis_rec_faults{0};
 static __fi void mmap_ClearCpuBlock(uint offset)
 {
+	g_orbis_rec_faults.fetch_add(1, std::memory_order_relaxed);
 	pxAssert(eeMem);
 
 	int rampage = offset >> __pageshift;

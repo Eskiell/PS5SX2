@@ -17,6 +17,7 @@
 #include "x86/iR5900.h"
 #include "x86/iR5900Analysis.h"
 
+#include <atomic>
 #include "common/AlignedMalloc.h"
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
@@ -52,6 +53,16 @@ using namespace x86Emitter;
 using namespace R5900;
 
 static bool eeRecNeedsReset = false;
+// vk-285-27: the EE recompiler's churn, printed once a second after the [load] line
+// (GSRenderer.cpp, OrbisPrintLoad): blocks compiled, manual blocks their integrity check discarded,
+// pages the counted-block logic reset, and whole-cache resets. /data/PCSX2/rec_nocount compiles
+// every manual block uncounted (memory_protect_recompiled_code); switching it resets the cache.
+std::atomic<u32> g_orbis_rec_compiles{0}, g_orbis_rec_discards{0}, g_orbis_rec_page_resets{0},
+	g_orbis_rec_full_resets{0};
+std::atomic<int> g_orbis_rec_nocount{0};
+static int s_orbis_rec_nocount = 0;
+// vk-285-28: how much of the EE code cache is in use (GSRenderer.cpp, [rec] line).
+size_t OrbisRecEEUsed(size_t* size);
 static bool eeCpuExecuting = false;
 static bool eeRecExitRequested = false;
 static bool g_resetEeScalingStats = false;
@@ -94,6 +105,11 @@ static BASEBLOCK* recROM2 = nullptr; // also here
 static BaseBlocks recBlocks;
 static u8* recPtr = nullptr;
 static u8* recPtrEnd = nullptr;
+size_t OrbisRecEEUsed(size_t* size)
+{
+	*size = HostMemoryMap::EErecSize;
+	return recPtr ? static_cast<size_t>(recPtr - SysMemory::GetEERec()) : 0;
+}
 EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
 
@@ -758,6 +774,7 @@ alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> 12];
 ////////////////////////////////////////////////////
 static void recResetRaw()
 {
+	g_orbis_rec_full_resets.fetch_add(1, std::memory_order_relaxed); // vk-285-27
 	Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
 
 	if (CHECK_EXTRAMEM != extraRam)
@@ -2278,6 +2295,7 @@ static void PreBlockCheck(u32 blockpc)
 //  less likely, self-modifying code)
 void dyna_block_discard(u32 start, u32 sz)
 {
+	g_orbis_rec_discards.fetch_add(1, std::memory_order_relaxed); // vk-285-27
 	eeRecPerfLog.Write(Color_StrongGray, "Clearing Manual Block @ 0x%08X  [size=%d]", start, sz * 4);
 	recClear(start, sz);
 }
@@ -2287,6 +2305,7 @@ void dyna_block_discard(u32 start, u32 sz)
 // and the block is re-assigned for write protection.
 void dyna_page_reset(u32 start, u32 sz)
 {
+	g_orbis_rec_page_resets.fetch_add(1, std::memory_order_relaxed); // vk-285-27
 	recClear(start & ~0xfffUL, 0x400);
 	manual_counter[start >> 12]++;
 	mmap_MarkCountedRamPage(start);
@@ -2353,7 +2372,11 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 
 			// (ideally, perhaps, manual_counter should be reset to 0 every few minutes?)
 
-			if (!contains_thread_stack && manual_counter[inpage_ptr >> 12] <= 3)
+			// vk-285-27: with rec_nocount every manual block is uncounted. The port checks every
+			// block's code before it runs (eerec-231), so a counted page's reset buys nothing: it
+			// clears and recompiles the page's blocks up to four times after every cache reset and
+			// write-protects the page, whose next data write faults and clears it again.
+			if (!s_orbis_rec_nocount && !contains_thread_stack && manual_counter[inpage_ptr >> 12] <= 3)
 			{
 				// Counted blocks add a weighted (by block size) value into manual_page each time they're
 				// run.  If the block gets run a lot, it resets and re-protects itself in the hope
@@ -2489,6 +2512,18 @@ static void recRecompile(const u32 startpc)
 	// if recPtr reached the mem limit reset whole mem
 	if (recPtr >= recPtrEnd)
 		eeRecNeedsReset = true;
+	// vk-285-27: a switch of rec_nocount recompiles everything under the new rule.
+	g_orbis_rec_compiles.fetch_add(1, std::memory_order_relaxed);
+	{
+		const int nocount = g_orbis_rec_nocount.load(std::memory_order_relaxed);
+		if (nocount != s_orbis_rec_nocount)
+		{
+			s_orbis_rec_nocount = nocount;
+			eeRecNeedsReset = true;
+			printf("[rec] manual blocks %s from now on (cache reset)\n", nocount ? "uncounted" : "counted");
+			fflush(stdout);
+		}
+	}
 
 	if (HWADDR(startpc) == VMManager::Internal::GetCurrentELFEntryPoint())
 		VMManager::Internal::EntryPointCompilingOnCPUThread();

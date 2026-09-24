@@ -495,3 +495,11 @@ void DumpVUState(u32 n, u32 pc)
 }
 
 #endif
+
+// vk-285-28: how much of each microVU code cache is in use (GSRenderer.cpp, [rec] line).
+size_t OrbisMVUUsed(int vu, size_t* size)
+{
+	const microVU& m = vu == 0 ? microVU0 : microVU1;
+	*size = static_cast<size_t>((uptr)m.prog.x86end - (uptr)m.prog.x86start);
+	return m.prog.x86ptr ? static_cast<size_t>((uptr)m.prog.x86ptr - (uptr)m.prog.x86start) : 0;
+}
