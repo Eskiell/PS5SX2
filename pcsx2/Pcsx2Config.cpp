@@ -21,6 +21,7 @@
 #include "USB/USB.h"
 
 #include "fmt/format.h"
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
 #include <KnownFolders.h>
@@ -1192,10 +1193,10 @@ bool Pcsx2Config::GSOptions::ShouldDump(u64 draw, int frame) const
 		if (frame != s_last_checked)
 		{
 			s_last_checked = frame;
-			if (access("/data/PCSX2/dumpnow", 0) == 0)
+			if (OrbisFlag("dumpnow"))
 			{
-				unlink("/data/PCSX2/dumpnow");
-				mkdir("/data/PCSX2/dump", 0777);
+				unlink(OrbisFlagPath("dumpnow").c_str());
+				mkdir(OrbisLogPath("dump").c_str(), 0777);
 				s_dump_frame = frame + 1;
 				std::printf("[dumpnow] armed for frame %d\n", s_dump_frame);
 				std::fflush(stdout);

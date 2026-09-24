@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Assertions.h"
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 extern "C" int orbis_reserve_range(void** addr, unsigned long long len);
 #include "common/BitUtils.h"
 #include "common/Console.h"
@@ -300,7 +301,7 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 	// Orbis: log EVERY fault at entry (before any handling). Lets us reconstruct
 	// primary->secondary chains when a handler forwards or mishandles.
 	{
-		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		FILE* f = fopen(g_orbis_pf_log, "a");
 		if (f)
 		{
 			void* epc = nullptr;
@@ -347,7 +348,7 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 	// held, so bail immediately to avoid a deadlock/fault-storm (kernel panic).
 	if (s_in_exception_handler)
 	{
-		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		FILE* f = fopen(g_orbis_pf_log, "a");
 		if (f)
 		{
 			fprintf(f, "[pf] sig=%d pc=%p addr=%p write=%d (recursive, bail)\n", sig, exception_pc, exception_address, is_write);
@@ -376,7 +377,7 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 
 	// We couldn't handle it. Pass it off to the crash dumper.
 	{
-		FILE* f = fopen("/data/PCSX2/pf.log", "a");
+		FILE* f = fopen(g_orbis_pf_log, "a");
 		if (f)
 		{
 			fprintf(f, "[pf] sig=%d pc=%p addr=%p write=%d\n", sig, exception_pc, exception_address, is_write);

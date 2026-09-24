@@ -10,6 +10,7 @@
 
 #include <fstream>
 #include <unistd.h>
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 
 // Orbis bring-up: use the C rasterizer until the native code cache is stable.
 
@@ -125,7 +126,7 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
 {
 	const GSScanlineGlobalData& global = data.global;
 
-	static const bool s_ps5_swjit = (access("/data/PCSX2/swjit", 0) == 0);
+	static const bool s_ps5_swjit = OrbisFlag("swjit"); // vk-285-33: flags/
 	if (s_ps5_swjit)
 	{
 	data.draw_scanline = m_ds_map[global.sel];

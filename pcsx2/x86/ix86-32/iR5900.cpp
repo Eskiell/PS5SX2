@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
 #include "Elfheader.h"
@@ -661,7 +662,7 @@ static void recError(u32 error)
 		if (!s_dumped)
 		{
 			s_dumped = true;
-			FILE* df = std::fopen("/data/PCSX2/eeram.bin", "wb");
+			FILE* df = std::fopen(OrbisLogPath("eeram.bin").c_str(), "wb");
 			if (df) { std::fwrite(eeMem->Main, 1, Ps2MemSize::MainRam, df); std::fclose(df); std::printf("[recerr] eeram dumped\n"); (fflush)(stdout); }
 		}
 	}

@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <unistd.h>
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 
 static constexpr int MCD_SIZE = 1024 * 8 * 16; // Legacy PSX card default size
 
@@ -377,7 +378,7 @@ void FileMemoryCard::Open()
 			}
 
 			// vk-285-31: the RAM image (see the members).
-			m_cache_ok[slot] = !m_ispsx[slot] && access("/data/PCSX2/mcd_nocache", F_OK) != 0;
+			m_cache_ok[slot] = !m_ispsx[slot] && !OrbisFlag("mcd_nocache");
 			if (m_cache_ok[slot] && FileMcd_IsMemoryCardFormatted(m_file[slot]))
 				LoadCache(slot);
 			else

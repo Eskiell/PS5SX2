@@ -71,6 +71,7 @@ int g_orbis_diag = 0; // eerec-280: periodic GL readback diagnostics (live.ini d
 int g_orbis_perf = 0; // eerec-280: perf OSD + [perf] klog line every second (live.ini perf=1)
 // ---- eerec-285: live gs.ini reload flags; CPU placement sampling and pinning ----
 #include <pthread.h>
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 std::atomic<int> g_orbis_gsini_reload{0}; // GS thread saw gs.ini change -> the CPU thread applies it
 std::atomic<int> g_orbis_live_reapply{0}; // the CPU thread applied gs.ini -> apply live.ini again
 std::atomic<int> g_orbis_pin_request{-1}; // live.ini pin= -> the CPU thread (OrbisApplyPinning)
@@ -234,7 +235,7 @@ static void OrbisPrintLoad()
 			const u32 rec[5] = {g_orbis_rec_compiles.load(std::memory_order_relaxed),
 				g_orbis_rec_discards.load(std::memory_order_relaxed), g_orbis_rec_page_resets.load(std::memory_order_relaxed),
 				g_orbis_rec_faults.load(std::memory_order_relaxed), g_orbis_rec_full_resets.load(std::memory_order_relaxed)};
-			g_orbis_rec_nocount.store(access("/data/PCSX2/rec_nocount", F_OK) == 0 ? 1 : 0, std::memory_order_relaxed);
+			g_orbis_rec_nocount.store(OrbisFlag("rec_nocount") ? 1 : 0, std::memory_order_relaxed);
 			// vk-285-28: and how full each code cache is (MiB used/size), and the flexible memory left.
 			extern size_t OrbisRecEEUsed(size_t* size);
 			extern size_t OrbisRecIOPUsed(size_t* size);
@@ -319,7 +320,7 @@ static bool OrbisVkPresharpShader()
 	if (s_ok < 0)
 	{
 		s_ok = 0;
-		if (FILE* f = fopen("/data/PCSX2/shaders/vulkan/shadeboost.glsl", "rb"))
+		if (FILE* f = fopen((EmuFolders::Resources + "/shaders/vulkan/shadeboost.glsl").c_str(), "rb"))
 		{
 			char buf[4096];
 			const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
@@ -385,7 +386,7 @@ static void OrbisLiveTune()
 				break;
 			}
 		}
-		s_orbis_fps_box = (access("/data/PCSX2/nofps", F_OK) != 0);
+		s_orbis_fps_box = !OrbisFlag("nofps");
 #ifdef ORBIS_VULKAN
 		// vk-285-12: on Vulkan the driver's queue submit waits for the GPU, so GPU time is
 		// GS-thread time. FSR starts as native pre-sharpen + EASU; the output RCAS (four more
@@ -417,6 +418,19 @@ static void OrbisLiveTune()
 			fclose(f);
 			g.assign(b, n);
 		}
+		// vk-285-32: and the game's own settings file (main-boot.cpp), so editing it applies live too.
+		extern const char* OrbisGameIniPath();
+		if (const char* gp = OrbisGameIniPath(); gp && *gp)
+		{
+			if (FILE* f = fopen(gp, "rb"))
+			{
+				char b[2048];
+				const size_t n = fread(b, 1, sizeof(b), f);
+				fclose(f);
+				g.append("\n#game\n");
+				g.append(b, n);
+			}
+		}
 		if (!s_gsini_init)
 		{
 			s_gsini_init = true;
@@ -433,7 +447,7 @@ static void OrbisLiveTune()
 			{
 				s_gsini_applied = g;
 				g_orbis_gsini_reload.store(1, std::memory_order_release);
-				printf("[gsini] gs.ini changed (%zu bytes): applying at the next vsync\n", g.size());
+				printf("[gsini] gs.ini or the game's settings changed (%zu bytes): applying at the next vsync\n", g.size());
 				fflush(stdout);
 			}
 			else
@@ -1286,16 +1300,16 @@ static void OrbisFrameCapture(GSTexture* current)
 		OrbisCapFinishPending();
 	if (!c.f)
 	{
-		if ((s_orbis_cap_vsync % 25) != 0 || access("/data/PCSX2/framecap", F_OK) != 0)
+		if ((s_orbis_cap_vsync % 25) != 0 || !OrbisFlag("framecap"))
 			return;
 		char buf[256] = {};
-		if (FILE* pf = fopen("/data/PCSX2/framecap", "rb"))
+		if (FILE* pf = fopen(OrbisFlagPath("framecap").c_str(), "rb"))
 		{
 			const size_t n = fread(buf, 1, sizeof(buf) - 1, pf);
 			buf[n] = '\0';
 			fclose(pf);
 		}
-		unlink("/data/PCSX2/framecap");
+		unlink(OrbisFlagPath("framecap").c_str());
 		float secs = 20.0f, every = 2.0f, half = 1.0f, x0 = 0.5f, x1 = 1.0f, y0 = 0.0f, y1 = 1.0f;
 		char* save = nullptr;
 		for (char* tok = strtok_r(buf, " \t\r\n,", &save); tok; tok = strtok_r(nullptr, " \t\r\n,", &save))
@@ -1330,7 +1344,7 @@ static void OrbisFrameCapture(GSTexture* current)
 			fflush(stdout);
 			return;
 		}
-		c.f = fopen("/data/PCSX2/framecap.bin", "wb");
+		c.f = fopen(OrbisLogPath("framecap.bin").c_str(), "wb");
 		if (!c.f)
 		{
 			printf("[framecap] cannot open /data/PCSX2/framecap.bin\n");

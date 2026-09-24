@@ -30,6 +30,7 @@
 #include <sstream>
 #ifdef ORBIS_VULKAN
 #include <unistd.h> // vk-285-14: fsync, _exit (GPU-hang forensics)
+#include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #endif
 
 // Tweakables
@@ -1344,7 +1345,7 @@ namespace
 		char header[160];
 		snprintf(header, sizeof(header), "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.", where,
 			hung);
-		OrbisVkTraceWrite("/data/PCSX2/vkhang.txt", header, hung);
+		OrbisVkTraceWrite(OrbisLogPath("vkhang.txt").c_str(), header, hung);
 		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote /data/PCSX2/vkhang.txt; closing the app\n",
 			where, hung);
 		fflush(stdout);
@@ -1570,13 +1571,13 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 	s_orbis_submit++;
 	// vk-285-18: `putdata vktrace` asks for the last submits' draws while the game runs. Every
 	// 64th submit (about once a second) checks for the flag file; the dump goes to vktrace.txt.
-	if ((s_orbis_submit & 63) == 0 && access("/data/PCSX2/vktrace", F_OK) == 0)
+	if ((s_orbis_submit & 63) == 0 && OrbisFlag("vktrace"))
 	{
-		unlink("/data/PCSX2/vktrace");
+		unlink(OrbisFlagPath("vktrace").c_str());
 		char header[96];
 		snprintf(header, sizeof(header), "on-demand trace at submit %u (submits %u and %u complete)", s_orbis_submit,
 			s_orbis_submit - 2, s_orbis_submit - 1);
-		OrbisVkTraceWrite("/data/PCSX2/vktrace.txt", header, s_orbis_submit);
+		OrbisVkTraceWrite(OrbisLogPath("vktrace.txt").c_str(), header, s_orbis_submit);
 		printf("[vkhw] wrote /data/PCSX2/vktrace.txt at submit %u\n", s_orbis_submit);
 		fflush(stdout);
 	}
