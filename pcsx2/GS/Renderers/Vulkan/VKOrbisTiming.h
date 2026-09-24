@@ -46,6 +46,22 @@ struct OrbisVkWaitTimer
 };
 #define ORBIS_VKW(kind) OrbisVkWaitTimer orbis_vkw_timer_(kind)
 
+// vk-285-39: GSDeviceVK::CopyRect's copies by kind -- counts and bytes, which main-boot prints as
+// the [copies] line: the ones made as a convert draw, and the image copies (the driver's CPU copy)
+// between render targets, from a render target into a texture, between depth buffers, from a depth
+// buffer into a texture, and every other pair.
+enum : int
+{
+	ORBIS_COPY_DRAW,
+	ORBIS_COPY_RT_RT,
+	ORBIS_COPY_RT_TEX,
+	ORBIS_COPY_DS_DS,
+	ORBIS_COPY_DS_TEX,
+	ORBIS_COPY_OTHER,
+	ORBIS_COPY_KINDS,
+};
+extern unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_COPY_KINDS];
+
 #else
 
 #define ORBIS_VKW(kind) \

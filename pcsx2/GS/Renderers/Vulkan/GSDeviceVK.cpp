@@ -39,6 +39,64 @@
 #ifdef ORBIS_VULKAN
 unsigned long long g_orbis_vkw_ns[ORBIS_VKW_KINDS], g_orbis_vkw_n[ORBIS_VKW_KINDS],
 	g_orbis_vkw_max_ns[ORBIS_VKW_KINDS];
+unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_COPY_KINDS];
+
+namespace
+{
+	// vk-285-39: the flag file vk_cputransfer (/data/PCSX2/flags) keeps every CopyRect the image
+	// copy it was, as the driver's own flag of that name keeps its clears on the CPU. Checked at
+	// most once a second.
+	bool OrbisCopiesAsImageCopies()
+	{
+		static std::chrono::steady_clock::time_point s_checked;
+		static bool s_on = false;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - s_checked >= std::chrono::seconds(1))
+		{
+			s_checked = now;
+			s_on = OrbisFlag("vk_cputransfer");
+		}
+		return s_on;
+	}
+
+	// vk-285-39: a copy the convert draw can make exactly: into a render target of the source's
+	// Color format (COPY) or a depth buffer of its DepthStencil format (DEPTH_COPY), the two pairs
+	// StretchRectAuto has a same-format shader for, from another texture.
+	bool OrbisCopyByDraw(const GSTextureVK* src, const GSTextureVK* dst)
+	{
+		if (src == dst || src->GetFormat() != dst->GetFormat() || OrbisCopiesAsImageCopies())
+			return false;
+		switch (dst->GetFormat())
+		{
+			case GSTexture::Format::Color:
+				return dst->IsRenderTarget();
+			case GSTexture::Format::DepthStencil:
+				return dst->IsDepthStencil();
+			default:
+				return false;
+		}
+	}
+
+	// The [copies] line's kinds (VKOrbisTiming.h).
+	int OrbisCopyKind(const GSTextureVK* src, const GSTextureVK* dst)
+	{
+		if (src == dst)
+			return ORBIS_COPY_OTHER;
+		if (src->IsRenderTarget())
+			return dst->IsRenderTarget() ? ORBIS_COPY_RT_RT : (dst->IsDepthStencil() ? ORBIS_COPY_OTHER : ORBIS_COPY_RT_TEX);
+		if (src->IsDepthStencil())
+			return dst->IsDepthStencil() ? ORBIS_COPY_DS_DS : (dst->IsRenderTarget() ? ORBIS_COPY_OTHER : ORBIS_COPY_DS_TEX);
+		return ORBIS_COPY_OTHER;
+	}
+
+	void OrbisCountCopy(int kind, const GSVector4i& r, const GSTextureVK* src)
+	{
+		const GSTexture::Format format = src->GetFormat();
+		const u32 texel_bytes = (format == GSTexture::Format::ColorHDR || format == GSTexture::Format::ColorClip) ? 8u : 4u;
+		g_orbis_copy_n[kind]++;
+		g_orbis_copy_bytes[kind] += static_cast<unsigned long long>(r.width()) * static_cast<unsigned long long>(r.height()) * texel_bytes;
+	}
+} // namespace
 #endif
 
 // Tweakables
@@ -3329,6 +3387,26 @@ void GSDeviceVK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 		// commit the clear to the source first, then do normal copy
 		sTexVK->CommitClear();
 	}
+
+#ifdef ORBIS_VULKAN
+	// vk-285-39: the PS5 driver runs vkCmdCopyImage on the CPU at a split, texel by texel through
+	// the tile map: tens of milliseconds for one 6x target, and GT4's menus make five or six a
+	// frame. A copy the convert draw can make exactly (OrbisCopyByDraw) is that draw instead: nearest
+	// sampling at the texel centres of an unscaled rectangle moves every texel unchanged, on the GPU.
+	// It comes before the destination's clear is committed: a cleared destination is cleared by the
+	// draw's own render pass (BeginRenderPassForStretchRect's load op), and DrawStretchRect counts the
+	// copy for the perfmon. Needs proper testing beyond GT4 and Castlevania.
+	if (OrbisCopyByDraw(sTexVK, dTexVK))
+	{
+		OrbisCountCopy(ORBIS_COPY_DRAW, r, sTexVK);
+		const GSVector4 src_rect = GSVector4(r) / GSVector4(sTexVK->GetSize()).xyxy();
+		const GSVector4 dst_draw(static_cast<float>(destX), static_cast<float>(destY),
+			static_cast<float>(destX + r.width()), static_cast<float>(destY + r.height()));
+		StretchRectAuto(sTexVK, src_rect, dTexVK, dst_draw, Nearest);
+		return;
+	}
+	OrbisCountCopy(OrbisCopyKind(sTexVK, dTexVK), r, sTexVK);
+#endif
 
 	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 

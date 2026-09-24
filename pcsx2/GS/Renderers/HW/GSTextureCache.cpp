@@ -47,6 +47,20 @@ __fi static constexpr bool PreferReusedLabelledTexture()
 }
 #endif
 
+#ifdef ORBIS_VULKAN
+// vk-285-39: the PS5 driver copies images on the CPU, texel by texel through the tile map, and only
+// renders into render targets and depth buffers. A texture the cache fills with a copy of a Color
+// render target or a DepthStencil depth buffer is therefore made one of those itself, so that
+// GSDeviceVK::CopyRect can make the copy a convert draw on the GPU.
+static void OrbisTargetCopyUsage(const GSTexture* target, GSTexture::Usage* usage)
+{
+	if (target->GetFormat() == GSTexture::Format::Color && target->IsRenderTarget())
+		*usage = GSTexture::RenderTarget;
+	else if (target->GetFormat() == GSTexture::Format::DepthStencil && target->IsDepthStencil())
+		*usage = GSTexture::DepthStencil;
+}
+#endif
+
 GSTextureCache::GSTextureCache()
 {
 	// In theory 4MB is enough but 9MB is safer for overflow (8MB
@@ -6143,6 +6157,13 @@ GSTextureCache::Source* GSTextureCache::CreateSource(const GIFRegTEX0& TEX0, con
 			// If we have a source larger than the target, we need to clear it, otherwise we'll read junk
 			const bool outside_target = ((x + w) > dst->m_texture->GetWidth() || (y + h) > dst->m_texture->GetHeight());
 			GSTexture::Usage usage = outside_target ? dst->m_texture->GetUsage() : GSTexture::Texture;
+#ifdef ORBIS_VULKAN
+			// vk-285-39: a copy of the target in a texture of the target's own kind, so the copy can be a
+			// convert draw (GSDeviceVK::CopyRect) rather than the PS5 driver's CPU image copy. A texture
+			// with mip levels stays one: the draw writes one level.
+			if (!outside_target && tlevels == 1)
+				OrbisTargetCopyUsage(dst->m_texture, &usage);
+#endif
 			GSTexture* sTex = dst->m_texture;
 			GSTexture* dTex = g_gs_device->FetchSurface(usage, w, h, outside_target ? 1 : tlevels, sTex->GetFormat(), true, PreferReusedLabelledTexture());
 			if (!dTex) [[unlikely]]
@@ -6453,6 +6474,11 @@ GSTextureCache::Source* GSTextureCache::CreateSource(const GIFRegTEX0& TEX0, con
 			// Don't be fooled by the name. 'dst' is the old target (hence the input)
 			// 'src' is the new texture cache entry (hence the output)
 			GSTexture::Usage usage = use_texture ? GSTexture::Texture : dst->m_texture->GetUsage();
+#ifdef ORBIS_VULKAN
+			// vk-285-39: as for the offset source above: the copy below is then a convert draw.
+			if (use_texture)
+				OrbisTargetCopyUsage(dst->m_texture, &usage);
+#endif
 			GSTexture* sTex = dst->m_texture;
 			GSTexture* dTex = g_gs_device->FetchSurface(usage, new_size, 1, sTex->GetFormat(), source_rect_empty || destX != 0 || destY != 0, PreferReusedLabelledTexture());
 			if (!dTex) [[unlikely]]

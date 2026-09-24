@@ -11162,7 +11162,13 @@ void GSRendererHW::EndHLEHardwareDraw(bool force_copy_on_hazard /* = false */)
 		{
 			// Have to copy texture. Assume the whole thing is read, in all the cases this is used, it is.
 			GSTexture* src = (config.tex == config.rt) ? config.rt : config.ds;
+#ifdef ORBIS_VULKAN
+			// vk-285-39: a copy of the target's own kind, so GSDeviceVK::CopyRect makes the copy a convert
+			// draw rather than the PS5 driver's CPU image copy.
+			copy = g_gs_device->CreateCompatible(src, false, true);
+#else
 			copy = g_gs_device->CreateTexture(src->GetWidth(), src->GetHeight(), 1, src->GetFormat(), true);
+#endif
 			if (!copy)
 			{
 				Console.Error("HW: Texture allocation failure in EndHLEHardwareDraw()");
