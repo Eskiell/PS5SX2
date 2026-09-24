@@ -6,6 +6,7 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
 #include "GS/Renderers/Vulkan/VKShaderCache.h"
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-38: [shaders]
 
 #include "Config.h"
 #include "ShaderCacheVersion.h"
@@ -268,6 +269,7 @@ std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileShaderToSPV(
 		return ret;
 
 	const GSShaderCompileIndicator::CompileTimer compile_timer;
+	ORBIS_VKW(8); // vk-285-38: the [shaders] line's GLSL time (VKOrbisTiming.h)
 
 	shaderc_compile_options_t options = dyn_shaderc::shaderc_compile_options_initialize();
 	pxAssertRel(options, "shaderc_compile_options_initialize() failed");

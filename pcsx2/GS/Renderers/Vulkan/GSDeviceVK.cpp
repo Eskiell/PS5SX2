@@ -33,39 +33,12 @@
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #endif
 
+// vk-285-36, vk-285-38: the GS thread's time in Vulkan calls, by kind (VKOrbisTiming.h), printed
+// by main-boot's ticker as [vkwait] and [shaders].
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h"
 #ifdef ORBIS_VULKAN
-#include <chrono>
-// vk-285-36: where the GS thread waits on the Vulkan side, per second in boot.log's [vkwait] line
-// (main-boot's ticker): 0 a command buffer's fence before it is reused (ActivateCommandBuffer), 1 an
-// explicit wait after a submission (ExecuteCommandBuffer), 2 a fence counter (stream buffers, texture
-// copies: WaitForFenceCounter), 3 vkAcquireNextImageKHR (VKSwapChain.cpp), 4 vkQueueSubmit,
-// 5 vkQueuePresentKHR, 6 vkDeviceWaitIdle. Nanoseconds and calls, plain counters like main-boot's
-// [threads] ones: the GS thread is their one writer.
-unsigned long long g_orbis_vkw_ns[8], g_orbis_vkw_n[8];
-namespace
-{
-	struct OrbisVkWaitTimer
-	{
-		int kind;
-		std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-		explicit OrbisVkWaitTimer(int k)
-			: kind(k)
-		{
-		}
-		~OrbisVkWaitTimer()
-		{
-			g_orbis_vkw_ns[kind] += static_cast<unsigned long long>(
-				std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-			g_orbis_vkw_n[kind]++;
-		}
-	};
-} // namespace
-#define ORBIS_VKW(kind) OrbisVkWaitTimer orbis_vkw_timer_(kind)
-#else
-#define ORBIS_VKW(kind) \
-	do \
-	{ \
-	} while (0)
+unsigned long long g_orbis_vkw_ns[ORBIS_VKW_KINDS], g_orbis_vkw_n[ORBIS_VKW_KINDS],
+	g_orbis_vkw_max_ns[ORBIS_VKW_KINDS];
 #endif
 
 // Tweakables

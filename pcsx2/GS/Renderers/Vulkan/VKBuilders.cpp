@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/Renderers/Vulkan/VKBuilders.h"
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-38: [shaders]
 #include "GS/GSShaderCompileIndicator.h"
 
 #include "common/Assertions.h"
@@ -281,6 +282,9 @@ VkPipeline Vulkan::GraphicsPipelineBuilder::Create(
 	VkDevice device, VkPipelineCache pipeline_cache, bool clear /* = true */)
 {
 	const GSShaderCompileIndicator::CompileTimer compile_timer;
+	// vk-285-38: the [shaders] line's pipeline time -- the driver's shader cache lookups, and its
+	// compiles and stores when the cache lacks a stage (VKOrbisTiming.h).
+	ORBIS_VKW(7);
 
 	VkPipeline pipeline;
 	VkResult res = vkCreateGraphicsPipelines(device, pipeline_cache, 1, &m_ci, nullptr, &pipeline);
@@ -592,6 +596,7 @@ VkPipeline Vulkan::ComputePipelineBuilder::Create(
 	VkDevice device, VkPipelineCache pipeline_cache /*= VK_NULL_HANDLE*/, bool clear /*= true*/)
 {
 	const GSShaderCompileIndicator::CompileTimer compile_timer;
+	ORBIS_VKW(7); // vk-285-38: as for graphics pipelines
 
 	VkPipeline pipeline;
 	VkResult res = vkCreateComputePipelines(device, pipeline_cache, 1, &m_ci, nullptr, &pipeline);

@@ -1,0 +1,56 @@
+// SPDX-FileCopyrightText: 2026 Spyros
+// SPDX-License-Identifier: GPL-3.0+
+
+#pragma once
+
+// PS5 port: the GS thread's time in Vulkan calls, by kind -- nanoseconds, calls and the longest
+// single call since main-boot's ticker last took it -- which the ticker prints once a second:
+// kinds 0-6 as [vkwait] (vk-285-36), kinds 7 and 8 as [shaders] (vk-285-38).
+//   0 a command buffer's fence before it is reused (ActivateCommandBuffer)
+//   1 an explicit wait after a submission (ExecuteCommandBuffer)
+//   2 a fence counter (stream buffers, texture copies: WaitForFenceCounter)
+//   3 vkAcquireNextImageKHR (VKSwapChain.cpp)
+//   4 vkQueueSubmit
+//   5 vkQueuePresentKHR
+//   6 vkDeviceWaitIdle
+//   7 vkCreateGraphicsPipelines and vkCreateComputePipelines (VKBuilders.cpp): the driver's shader
+//     cache lookups, plus its compiles and stores when the cache lacks a stage
+//   8 GLSL to SPIR-V (VKShaderCache::CompileShaderToSPV), when PCSX2's own SPIR-V cache lacks it
+// Plain counters: the GS thread is their one writer, and a torn read costs one log line.
+
+#ifdef ORBIS_VULKAN
+
+#include <chrono>
+
+inline constexpr int ORBIS_VKW_KINDS = 10;
+extern unsigned long long g_orbis_vkw_ns[ORBIS_VKW_KINDS], g_orbis_vkw_n[ORBIS_VKW_KINDS],
+	g_orbis_vkw_max_ns[ORBIS_VKW_KINDS];
+
+struct OrbisVkWaitTimer
+{
+	int kind;
+	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	explicit OrbisVkWaitTimer(int k)
+		: kind(k)
+	{
+	}
+	~OrbisVkWaitTimer()
+	{
+		const unsigned long long ns = static_cast<unsigned long long>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		g_orbis_vkw_ns[kind] += ns;
+		g_orbis_vkw_n[kind]++;
+		if (ns > g_orbis_vkw_max_ns[kind])
+			g_orbis_vkw_max_ns[kind] = ns;
+	}
+};
+#define ORBIS_VKW(kind) OrbisVkWaitTimer orbis_vkw_timer_(kind)
+
+#else
+
+#define ORBIS_VKW(kind) \
+	do \
+	{ \
+	} while (0)
+
+#endif

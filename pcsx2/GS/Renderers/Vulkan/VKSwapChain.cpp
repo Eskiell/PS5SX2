@@ -4,6 +4,7 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
 #include "GS/Renderers/Vulkan/VKSwapChain.h"
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-36: [vkwait]
 #include "VMManager.h"
 
 #include "common/Assertions.h"
@@ -12,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
@@ -663,18 +663,13 @@ VkResult VKSwapChain::AcquireNextImage()
 	// Use a different semaphore for each image.
 	m_current_semaphore = (m_current_semaphore + 1) % static_cast<u32>(m_semaphores.size());
 
-#ifdef ORBIS_VULKAN
-	// vk-285-36: the [vkwait] line's acquire time (GSDeviceVK.cpp, g_orbis_vkw_*).
-	extern unsigned long long g_orbis_vkw_ns[8], g_orbis_vkw_n[8];
-	const auto orbis_acquire_start = std::chrono::steady_clock::now();
-#endif
-	const VkResult res = vkAcquireNextImageKHR(GSDeviceVK::GetInstance()->GetDevice(), m_swap_chain, UINT64_MAX,
-		m_semaphores[m_current_semaphore].available_semaphore, VK_NULL_HANDLE, &m_current_image);
-#ifdef ORBIS_VULKAN
-	g_orbis_vkw_ns[3] += static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-		std::chrono::steady_clock::now() - orbis_acquire_start).count());
-	g_orbis_vkw_n[3]++;
-#endif
+	VkResult res;
+	{
+		// vk-285-36: the [vkwait] line's acquire time (VKOrbisTiming.h).
+		ORBIS_VKW(3);
+		res = vkAcquireNextImageKHR(GSDeviceVK::GetInstance()->GetDevice(), m_swap_chain, UINT64_MAX,
+			m_semaphores[m_current_semaphore].available_semaphore, VK_NULL_HANDLE, &m_current_image);
+	}
 	m_image_acquire_result = res;
 	return res;
 }
