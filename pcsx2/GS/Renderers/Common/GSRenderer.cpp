@@ -195,6 +195,7 @@ extern unsigned long long g_orbis_ee_vsyncq_ticks, g_orbis_vu_idle_ticks, g_orbi
 #ifdef ORBIS_VULKAN
 extern std::atomic<int> g_orbis_widescreen, g_orbis_ws_active; // vk-285-12 (pcsx2/OrbisWidescreen.cpp)
 void OrbisEEProfMark(); // vk-285-8 (the port's orbis_eeprof.cpp)
+void OrbisGSProfStart(); // vk-285-24: the same profiler on the GS thread (/data/PCSX2/gsprof)
 #endif
 // eerec-281: ms per second each thread spent waiting (TSC, calibrated against steady_clock every print)
 static void OrbisPrintLoad()
@@ -222,7 +223,8 @@ static void OrbisPrintLoad()
 		OrbisPrintCpu(); // eerec-285
 		printf("\n");
 #ifdef ORBIS_VULKAN
-		OrbisEEProfMark(); // vk-285-8: the EE profiler's sample count at this [load] line
+		OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
+		OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line
 #endif
 	}
 	for (int i = 0; i < 9; i++)
