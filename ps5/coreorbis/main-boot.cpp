@@ -411,7 +411,10 @@ static void orbis_apply_ini_file(MemorySettingsInterface& si, const char* path, 
     if (val == "true" || val == "false") si.SetBoolValue(sec.c_str(), key.c_str(), val == "true");
     else if (!val.empty() && (isdigit((unsigned char)val[0]) || val[0] == '-') && val.find_first_not_of("-0123456789") == std::string::npos)
       si.SetIntValue(sec.c_str(), key.c_str(), atoi(val.c_str()));
-    else if (!val.empty() && val.find_first_not_of("-0123456789.") == std::string::npos)
+    // vk-285-54: one dot at most, so an IP address (DEV9/Eth/DNS1=67.222.156.250) stays a string;
+    // as a float it became 67.222 and PCSX2 read no address.
+    else if (!val.empty() && val.find_first_not_of("-0123456789.") == std::string::npos &&
+             std::count(val.begin(), val.end(), '.') <= 1)
       si.SetFloatValue(sec.c_str(), key.c_str(), (float)atof(val.c_str()));
     else si.SetStringValue(sec.c_str(), key.c_str(), val.c_str());
     printf("[boot] %s %s/%s=%s\n", tag, sec.c_str(), key.c_str(), val.c_str());
