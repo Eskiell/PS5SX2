@@ -1,0 +1,128 @@
+// PS5 port frontend: the settings page's web server (vk-285-50). A small HTTP/1.1 server on the
+// LAN: a phone or PC opens the page the shelf's QR code points at, lists the games with their
+// covers and edits each game's settings file (settings/<image>.ini) or the shared gs.ini. The
+// running game picks the change up by itself: PCSX2's GS thread polls both files and applies them
+// at the next vsync (GSRenderer.cpp OrbisLiveTune -> main-boot.cpp orbis_reload_gs_ini_cpu).
+//
+// Plain BSD sockets, one thread, one request per connection; the same code runs on the PC in
+// fe_host for testing. Every /api/ request needs the access token, which the QR code carries.
+//
+// Copyright (C) 2026 Spyros
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include "fe_games.h"
+
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace fe
+{
+// A file served as it is (the page, its fonts and icons).
+struct WebAsset
+{
+	std::string path; // "/", "/fonts/roboto.ttf", ...
+	std::string type; // "text/html; charset=utf-8", ...
+	const uint8_t* data = nullptr;
+	size_t size = 0;
+};
+
+struct WebConfig
+{
+	std::vector<std::string> game_dirs; // the images: games/, then the top folder
+	std::string settings_dir;           // settings/<image stem>.ini
+	std::string gs_ini;                 // the settings every game shares
+	std::string patches_dir;            // <serial>_<crc>.pnach
+	std::string covers_dir;             // the user's covers: <serial|stem|title>.jpg/.png
+	std::string cache_dir;              // downloaded covers: <serial>.jpg
+	std::string token_path;             // the access token, made on first start
+	std::string build_tag;
+	uint16_t port = 8844;               // the first port tried; the next seven if it is taken
+	std::vector<WebAsset> assets;
+	// vk-285-51: the recommended settings (assets/presets.ini: "[@global]" and "[<serial>]"
+	// sections) that the page's Recommended button writes, and the log every change goes to.
+	std::string presets;
+	std::string change_log;             // "" for none
+};
+
+// vk-285-51: appends "<date time>  <line>" to the settings log (logs/settings.log), which keeps
+// what changed, when and from where, and what the app did next (app and game starts, live
+// applies, crashes). At 512 KiB it moves to <name>.1.log and starts again. Thread-safe.
+void AppendSettingsLog(const std::string& path, const std::string& line);
+
+// The settings log's clock: UTC -> the console's local time. Null means the C library's own
+// localtime (the PC harness); fe_ps5.cpp sets the PS5's.
+extern long long (*g_utc_to_local)(long long utc);
+
+class WebServer
+{
+public:
+	~WebServer();
+
+	bool Start(const WebConfig& cfg);
+	void Stop();
+
+	uint16_t Port() const { return m_port; }
+	const std::string& Token() const { return m_token; }
+
+	// The disc image PCSX2 runs ("" while the shelf is up).
+	void SetNowPlaying(const std::string& image_path);
+
+	// The QR code's address, "http://<ip>:<port>/?t=<token>", and the short "<ip>:<port>" shown
+	// under it. False (both empty) without a network.
+	bool Address(std::string& url, std::string& shown) const;
+
+private:
+	struct Request
+	{
+		std::string method, path, query, body, token;
+		std::string peer; // the client's address, for the settings log
+	};
+	struct Response
+	{
+		int status = 200;
+		std::string type = "application/json";
+		std::string body;
+		const uint8_t* data = nullptr; // a static asset instead of body
+		size_t size = 0;
+		std::string cache = "no-store";
+	};
+
+	void Run();
+	void Serve(int fd, const char* peer);
+	void Route(const Request& req, Response& res);
+	bool LoadToken();
+
+	const GameInfo* FindGame(const std::string& id, std::vector<GameInfo>& games);
+	std::vector<GameInfo> Games();
+
+	void ApiState(Response& res);
+	void ApiGames(Response& res);
+	void ApiCover(const Request& req, Response& res);
+	void ApiSettings(const Request& req, Response& res);
+	void ApiSave(const Request& req, Response& res);
+	void ApiRecommended(const Request& req, const GameInfo* g, const std::string& path, Response& res);
+	void Log(const Request& req, const std::string& what);
+
+	WebConfig m_cfg;
+	int m_listen = -1;
+	uint16_t m_port = 0;
+	std::string m_token;
+	std::thread m_thread;
+	std::atomic<bool> m_stop{false};
+
+	mutable std::mutex m_mutex; // the fields below
+	std::string m_now_playing;
+	std::vector<GameInfo> m_games;
+	double m_games_time = -1e9;
+};
+
+// The IPv4 address other devices reach this machine on: the one the default route uses, else the
+// one a private-range route uses; "" without a network.
+std::string LocalAddress();
+} // namespace fe

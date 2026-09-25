@@ -1,0 +1,6 @@
+# Build outputs (Makefile.vk, link-vk.sh)
+/build-vk/
+/coreorbis/obj-vk/
+/coreorbis/objects.txt
+/proto/native/build/
+__pycache__/

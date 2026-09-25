@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b22">
+<title>PS5SX2</title>
+<link rel="icon" href="data:,">
+<!--
+  PS5SX2's settings page (vk-285-50; Recommended button vk-285-51), served by the console itself
+  (frontend/fe_web.cpp).
+  Copyright (C) 2026 Spyros. SPDX-License-Identifier: GPL-3.0-or-later.
+  The Discord and X icons are Font Awesome Free 7.3.1 (CC BY 4.0, https://fontawesome.com);
+  the logos are their owners' trademarks and only point to the author's accounts.
+-->
+<style>
+@font-face { font-family: "Roboto"; src: url("/fonts/roboto.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+:root {
+  --bg-top: #08091a; --bg-mid: #0e0e28; --bg-bottom: #030307;
+  --house: 140, 107, 255;
+  --glow: 140, 107, 255;
+  --text: #ffffff; --dim: #b8b0d1; --faint: #8c87a8;
+  --card: rgba(255, 255, 255, 0.055); --card-line: rgba(255, 255, 255, 0.09);
+  --pill: rgba(255, 255, 255, 0.12);
+  --accent: rgb(186, 166, 255);
+  --ink: #120f29;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text); font-size: 16px; line-height: 1.35;
+  background: var(--bg-bottom);
+  overflow-x: hidden;
+}
+/* The shelf's background: a deep blue-violet gradient with a soft glow tinted by the picked cover. */
+.backdrop {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(60vmax 42vmax at 50% 30%, rgba(var(--glow), 0.34), rgba(var(--glow), 0.08) 45%, transparent 70%),
+    radial-gradient(40vmax 10vmax at 50% 64%, rgba(var(--glow), 0.10), transparent 70%),
+    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 42%, var(--bg-bottom) 100%);
+  transition: background 0.6s ease;
+}
+.wrap { max-width: 760px; margin: 0 auto; padding: max(18px, env(safe-area-inset-top)) 16px 40px; }
+
+header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.wordmark { font-size: 30px; font-weight: 700; letter-spacing: 0.3px; line-height: 1; }
+.wordmark span { color: var(--accent); }
+.handles { display: flex; gap: 16px; margin-top: 9px; color: var(--faint); font-size: 14px; flex-wrap: wrap; }
+.handle { display: inline-flex; align-items: center; gap: 6px; color: inherit; text-decoration: none;
+          background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+.handle:hover, .handle:focus-visible { color: var(--dim); outline: none; }
+.icon { width: 15px; height: 15px; display: inline-block; background-color: currentColor;
+        -webkit-mask: var(--src) center / contain no-repeat; mask: var(--src) center / contain no-repeat; }
+.icon.discord { --src: url("/icons/discord.svg"); width: 17px; }
+.icon.x { --src: url("/icons/x-twitter.svg"); width: 13px; }
+.clock { font-size: 22px; color: var(--dim); padding-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* Now playing */
+.now { margin-top: 22px; display: none; align-items: center; gap: 14px; padding: 12px; border-radius: 16px;
+       background: var(--card); border: 1px solid var(--card-line); }
+.now.show { display: flex; }
+.now img { width: 46px; height: 66px; object-fit: cover; border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
+.now .k { font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: rgb(var(--glow)); filter: brightness(1.5); }
+.now .t { font-size: 17px; font-weight: 700; margin-top: 2px; }
+.now .s { font-size: 13px; color: var(--dim); margin-top: 2px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #5cf2a0; margin-right: 6px;
+       box-shadow: 0 0 10px #5cf2a0; animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.45; } }
+
+/* The cover flow: the shelf's 58-degree turn, in CSS 3D. */
+.flow-wrap { position: relative; margin: 18px -16px 0; perspective: 900px; }
+.flow { display: flex; gap: 0; overflow-x: auto; scroll-snap-type: x mandatory; padding: 26px 0 56px;
+        scrollbar-width: none; -webkit-overflow-scrolling: touch; transform-style: preserve-3d; }
+.flow::-webkit-scrollbar { display: none; }
+.pad { flex: 0 0 calc(50% - 70px); }
+.case { flex: 0 0 140px; height: 200px; scroll-snap-align: center; position: relative; transform-style: preserve-3d;
+        cursor: pointer; transition: transform 0.08s linear; }
+.case .front { position: absolute; inset: 0; border-radius: 5px; overflow: hidden; background: #1c1a33;
+               box-shadow: 0 10px 26px rgba(0,0,0,0.55); -webkit-box-reflect: below 6px linear-gradient(transparent 62%, rgba(255,255,255,0.22)); }
+.case .front img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.case .ph { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 12px;
+            text-align: center; font-size: 13px; color: var(--dim);
+            background: linear-gradient(160deg, #2a2550, #141228); }
+.case .ph b { color: var(--text); font-size: 15px; margin-bottom: 6px; }
+.case.sel .front { outline: 2px solid rgba(255,255,255,0.85); outline-offset: 5px;
+                   box-shadow: 0 0 0 1px rgba(var(--glow),0.3), 0 0 26px rgba(var(--glow),0.55), 0 10px 26px rgba(0,0,0,0.55); }
+.case .live { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); font-size: 11px; white-space: nowrap;
+              padding: 3px 9px; border-radius: 99px; background: #5cf2a0; color: #0a2418; font-weight: 700; letter-spacing: 0.5px; }
+
+.gametitle { text-align: center; font-size: 24px; font-weight: 700; margin-top: -14px; }
+.gameinfo { text-align: center; color: var(--dim); font-size: 14px; margin-top: 6px; display: flex; gap: 8px;
+            justify-content: center; align-items: center; flex-wrap: wrap; }
+.pillb { background: var(--pill); border-radius: 99px; padding: 2px 10px; font-size: 12px; color: var(--text); font-weight: 700; }
+.all { display: block; margin: 16px auto 0; background: none; border: 1px solid var(--card-line); color: var(--dim);
+       border-radius: 99px; padding: 7px 16px; font: inherit; font-size: 14px; cursor: pointer; }
+.all.on { color: var(--text); border-color: rgba(255,255,255,0.5); }
+
+/* Settings */
+.sec { margin-top: 20px; }
+.sec h2 { font-size: 13px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--faint); font-weight: 700;
+          margin: 0 0 8px 4px; }
+.card { background: var(--card); border: 1px solid var(--card-line); border-radius: 18px; overflow: hidden; }
+.row { padding: 14px 14px 15px; border-top: 1px solid var(--card-line); }
+.row:first-child { border-top: 0; }
+.row .head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.row .label { font-size: 16px; }
+.row .from { font-size: 12px; color: var(--faint); white-space: nowrap; }
+.row .from button { background: none; border: 0; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 0 0 0 6px; }
+.row .hint { font-size: 13px; color: var(--faint); margin-top: 4px; }
+.tag { font-size: 11px; color: #ffcf7a; border: 1px solid rgba(255,207,122,0.4); border-radius: 99px; padding: 1px 7px;
+       margin-left: 6px; vertical-align: 1px; white-space: nowrap; display: inline-block; }
+/* One row, equal columns: --n is the number of choices. */
+.seg { display: grid; grid-template-columns: repeat(var(--n, 4), minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
+.seg button { min-width: 0; padding: 9px 2px; border-radius: 11px; border: 1px solid transparent; white-space: nowrap;
+              overflow: hidden; text-overflow: clip; background: rgba(255,255,255,0.07); color: var(--dim);
+              font: inherit; font-size: 14px; cursor: pointer; transition: background 0.15s, color 0.15s, box-shadow 0.15s; }
+.seg.many button { font-size: 13px; }
+/* The value this game sets: filled. One it inherits (all games or PCSX2's default): outlined. */
+.seg button.cur { background: rgba(255,255,255,0.92); color: var(--ink); font-weight: 700;
+                  box-shadow: 0 0 16px rgba(var(--glow),0.45); }
+.seg button.cur.inh { background: rgba(255,255,255,0.08); color: var(--text); border-color: rgba(255,255,255,0.6);
+                      box-shadow: none; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sw { position: relative; width: 50px; height: 30px; flex: 0 0 auto; border-radius: 99px; background: rgba(255,255,255,0.14);
+      border: 0; cursor: pointer; transition: background 0.2s; }
+.sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+             background: #fff; transition: transform 0.2s; box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
+.sw.on { background: rgb(var(--glow)); box-shadow: 0 0 14px rgba(var(--glow),0.6); }
+.sw.on.inh { background: rgba(var(--glow),0.45); box-shadow: none; }
+.sw.on::after { transform: translateX(20px); }
+.empty { padding: 14px; color: var(--faint); font-size: 14px; }
+/* Recommended settings (vk-285-51): what the port was tuned with, one tap (and a second to confirm) away. */
+.rec { margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 12px 12px 14px;
+       border-radius: 18px; background: linear-gradient(135deg, rgba(var(--glow),0.20), rgba(255,255,255,0.04));
+       border: 1px solid rgba(var(--glow),0.5); }
+.rec.ok { background: var(--card); border-color: var(--card-line); }
+.rec .rt { font-weight: 700; font-size: 15px; }
+.rec .rs { font-size: 13px; color: var(--dim); margin-top: 3px; }
+.recbtn { flex: 0 0 auto; border: 0; border-radius: 99px; padding: 9px 16px; font: inherit; font-size: 14px; font-weight: 700;
+          cursor: pointer; background: rgba(255,255,255,0.92); color: var(--ink); box-shadow: 0 0 16px rgba(var(--glow),0.45);
+          transition: background 0.15s; white-space: nowrap; }
+.recbtn.armed { background: #ffcf7a; box-shadow: 0 0 16px rgba(255,207,122,0.5); }
+.recbtn:disabled { background: none; color: #5cf2a0; box-shadow: none; cursor: default; padding: 9px 4px 9px 8px; }
+.file { text-align: center; color: var(--faint); font-size: 12px; margin-top: 12px; }
+.file button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
+
+footer { margin-top: 34px; color: var(--faint); font-size: 12px; text-align: center; line-height: 1.6; }
+footer a { color: var(--dim); }
+
+.toast { position: fixed; left: 50%; bottom: max(22px, env(safe-area-inset-bottom)); transform: translate(-50%, 30px);
+         opacity: 0; transition: 0.25s; background: rgba(20,18,44,0.96); border: 1px solid var(--card-line);
+         color: var(--text); padding: 10px 16px; border-radius: 99px; font-size: 14px; white-space: nowrap;
+         box-shadow: 0 8px 30px rgba(0,0,0,0.5), 0 0 20px rgba(var(--glow),0.25); pointer-events: none; z-index: 5; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.gate { display: none; text-align: center; padding: 18vh 20px 0; }
+.gate.show { display: block; }
+.gate .big { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+.gate .qr { width: 86px; height: 86px; margin: 0 auto 22px; border-radius: 14px; background:
+  conic-gradient(from 90deg at 30% 30%, #fff 25%, transparent 0) 0 0 / 28px 28px, rgba(255,255,255,0.08); opacity: 0.8; }
+.hide { display: none !important; }
+@media (min-width: 700px) {
+  .case { flex-basis: 170px; height: 242px; }
+  .pad { flex-basis: calc(50% - 85px); }
+  .wordmark { font-size: 36px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="backdrop" id="backdrop"></div>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="wordmark">PS5<span>SX2</span></div>
+      <div class="handles">
+        <button class="handle" id="discord" title="Copy the Discord username"><i class="icon discord"></i>sword.pdf</button>
+        <a class="handle" href="https://x.com/sword_pdf" target="_blank" rel="noopener"><i class="icon x"></i>@sword_pdf</a>
+      </div>
+    </div>
+    <div class="clock" id="clock"></div>
+  </header>
+
+  <div class="gate" id="gate">
+    <div class="qr"></div>
+    <div class="big">Scan the QR code on the TV</div>
+    <div style="color:var(--dim)">It's in the corner of the game shelf. This page needs the key it carries.</div>
+  </div>
+
+  <main id="main" class="hide">
+    <div class="now" id="now">
+      <img id="nowcover" alt="">
+      <div>
+        <div class="k"><span class="dot"></span>Now playing</div>
+        <div class="t" id="nowtitle"></div>
+        <div class="s">Changes to its settings apply live.</div>
+      </div>
+    </div>
+
+    <div class="flow-wrap"><div class="flow" id="flow"></div></div>
+    <div class="gametitle" id="gtitle"></div>
+    <div class="gameinfo" id="ginfo"></div>
+    <button class="all" id="allgames">Settings for all games</button>
+
+    <div id="settings"></div>
+    <div class="file" id="file"></div>
+  </main>
+
+  <footer>
+    <div><b style="color:var(--dim)">PS5SX2</b> · PCSX2 for jailbroken PS5 · by Spyros · <span id="build"></span></div>
+    <div>Based on PCSX2 (GPL-3.0-or-later). Not affiliated with or endorsed by the PCSX2 team or Sony Interactive Entertainment.</div>
+    <div>Icons: Font Awesome Free (CC BY 4.0). Covers: xlenore/ps2-covers.</div>
+  </footer>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+// ---- What the page offers. The keys are the port's ini keys (a bare key lives in EmuCore/GS);
+// "def" is PCSX2's own default, shown when neither the game nor gs.ini sets it.
+const GROUPS = [
+  { title: "Display", items: [
+    { key: "upscale_multiplier", label: "Resolution", type: "seg", def: "1", short: "%",
+      options: [["1","1x"],["2","2x"],["3","3x"],["4","4x"],["5","5x"],["6","6x"]],
+      hint: "Internal resolution. 6x is about 4K." },
+    { key: "AspectRatio", label: "Aspect ratio", type: "seg", def: "Auto 4:3/3:2", short: "Aspect %",
+      options: [["Auto 4:3/3:2","Auto"],["4:3","4:3"],["16:9","16:9"],["Stretch","Stretch"]] },
+    { key: "EmuCore/EnableWideScreenPatches", label: "Widescreen patches", type: "toggle", def: "false", short: "Widescreen %",
+      hint: "Uses the game's 16:9 patch when there is one." },
+    { key: "TVShader", label: "Display filter", type: "seg", def: "0", short: "%",
+      options: [["6","FSR"],["7","FSR soft"],["0","Classic"],["5","CRT"]] },
+  ]},
+  { title: "Graphics", items: [
+    { key: "filter", label: "Texture filtering", type: "seg", def: "2", short: "% filtering",
+      options: [["0","Nearest"],["2","PS2"],["1","Bilinear"],["3","Not sprites"]] },
+    { key: "MaxAnisotropy", label: "Anisotropic filtering", type: "seg", def: "0", short: "AF %",
+      options: [["0","Off"],["2","2x"],["4","4x"],["8","8x"],["16","16x"]] },
+    { key: "accurate_blending_unit", label: "Blending accuracy", type: "seg", def: "1", short: "Blending %",
+      options: [["0","Min"],["1","Basic"],["2","Med"],["3","High"]],
+      hint: "Higher fixes more effects and costs speed. Full and Max are left out for now: Max hung the GPU in Ratchet & Clank." },
+    { key: "hw_mipmap", label: "Mipmapping", type: "toggle", def: "true", short: "Mipmaps %" },
+  ]},
+  { title: "Performance", items: [
+    { key: "EmuCore/Speedhacks/EECycleRate", label: "EE cycle rate", type: "seg", def: "0", short: "EE %",
+      options: [["-3","50%"],["-2","60%"],["-1","75%"],["0","100%"],["1","130%"],["2","180%"],["3","300%"]],
+      hint: "Above 100% can smooth out slowdown the PS2 had; some games dislike it." },
+    { key: "EmuCore/Speedhacks/EECycleSkip", label: "EE cycle skip", type: "seg", def: "0", short: "Cycle skip %",
+      options: [["0","Off"],["1","Mild"],["2","Moderate"],["3","Max"]] },
+    { key: "EmuCore/Speedhacks/vuThread", label: "MTVU (VU1 on its own thread)", type: "toggle", def: "false", restart: true, short: "MTVU %" },
+  ]},
+];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let token = "";
+let games = [];
+let state = { mode: "menu", playing: null };
+let current = null;      // the game id shown, or "@global"
+let data = null;         // /api/settings for it
+let pending = new Map(); // key -> value | null (unset), sent after a short pause
+let saveTimer = 0;
+let recArmed = 0;        // the Recommended button's wait for its second tap
+
+// ---- The key from the QR code: kept in this browser for this address.
+(function () {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("t");
+  try {
+    if (t) { localStorage.setItem("ps5sx2.token", t); u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search); }
+    token = t || localStorage.getItem("ps5sx2.token") || "";
+  } catch (e) { token = t || ""; }
+})();
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, Object.assign({}, opts, { headers: Object.assign({ "X-Token": token }, opts.headers || {}) }));
+  if (r.status === 401) { showGate(); throw new Error("unauthorized"); }
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const cover = (id) => "/api/cover?id=" + encodeURIComponent(id) + "&t=" + encodeURIComponent(token);
+function showGate() { $("gate").classList.add("show"); $("main").classList.add("hide"); }
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+// ---- The clock, like the shelf's.
+function tick() { const d = new Date(); $("clock").textContent = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+tick(); setInterval(tick, 10000);
+
+// ---- The glow takes the picked cover's colour, mixed with the house violet as on the shelf.
+function glowFrom(img) {
+  try {
+    const c = document.createElement("canvas"); c.width = 24; c.height = 34;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0, 24, 34);
+    const px = g.getImageData(0, 0, 24, 34).data;
+    let r = 0, gr = 0, b = 0, w = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      const mx = Math.max(px[i], px[i + 1], px[i + 2]), mn = Math.min(px[i], px[i + 1], px[i + 2]);
+      const sat = mx ? (mx - mn) / mx : 0, weight = 0.15 + sat * sat * (mx / 255);
+      r += px[i] * weight; gr += px[i + 1] * weight; b += px[i + 2] * weight; w += weight;
+    }
+    r /= w; gr /= w; b /= w;
+    const m = Math.max(r, gr, b, 1), k = 255 / m; // full brightness, the hue kept
+    const mix = (a, h) => Math.round(a * k * 0.65 + h * 0.35);
+    setGlow(mix(r, 140) + ", " + mix(gr, 107) + ", " + mix(b, 255));
+  } catch (e) { setGlow("140, 107, 255"); }
+}
+function setGlow(v) { document.documentElement.style.setProperty("--glow", v); }
+
+// ---- The cover flow.
+function buildFlow() {
+  const flow = $("flow");
+  flow.innerHTML = '<div class="pad"></div>' + games.map((g, i) =>
+    '<div class="case" data-i="' + i + '"><div class="front">' +
+    (g.cover ? '<img loading="lazy" alt="" src="' + cover(g.id) + '">'
+             : '<div class="ph"><b>' + esc(g.title) + '</b>' + esc(g.serial) + '</div>') +
+    '</div>' + (g.playing ? '<div class="live">PLAYING</div>' : "") + '</div>').join("") + '<div class="pad"></div>';
+  flow.querySelectorAll(".case").forEach((el) => el.addEventListener("click", () => {
+    const i = +el.dataset.i;
+    if (current === games[i].id) return;
+    scrollToGame(i, true);
+  }));
+  flow.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
+}
+function caseCentre(el) { return el.offsetLeft + el.offsetWidth / 2; }
+function scrollToGame(i, smooth) {
+  const flow = $("flow"), el = flow.querySelectorAll(".case")[i];
+  if (el) flow.scrollTo({ left: caseCentre(el) - flow.clientWidth / 2, behavior: smooth ? "smooth" : "auto" });
+}
+let settleTimer = 0;
+function onScroll() {
+  const flow = $("flow"), mid = flow.scrollLeft + flow.clientWidth / 2;
+  let best = -1, bestD = 1e9;
+  flow.querySelectorAll(".case").forEach((el) => {
+    const w = el.offsetWidth, d = (caseCentre(el) - mid) / w, ad = Math.min(Math.abs(d), 3);
+    const e = Math.min(ad, 1) * Math.min(ad, 1) * (3 - 2 * Math.min(ad, 1)); // smoothstep, as Pose()
+    const s = d < 0 ? -1 : 1;
+    const turn = -s * 58 * e, z = -e * 70 - Math.max(ad - 1, 0) * 30, x = -s * e * w * 0.28;
+    el.style.transform = "translateX(" + x.toFixed(1) + "px) translateZ(" + z.toFixed(1) + "px) rotateY(" + turn.toFixed(1) + "deg)";
+    el.style.zIndex = String(100 - Math.round(ad * 10));
+    el.style.opacity = String(Math.max(0.35, 1 - Math.max(ad - 1, 0) * 0.25));
+    if (Math.abs(d) < bestD) { bestD = Math.abs(d); best = +el.dataset.i; }
+  });
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { if (best >= 0 && games[best] && current !== games[best].id) select(games[best].id); }, 140);
+}
+
+// ---- A game's settings.
+async function select(id) {
+  current = id;
+  pending.clear();
+  clearTimeout(recArmed); recArmed = 0;
+  $("allgames").classList.toggle("on", id === "@global");
+  document.querySelectorAll(".case").forEach((el) => el.classList.toggle("sel", games[+el.dataset.i] && games[+el.dataset.i].id === id));
+  const g = games.find((x) => x.id === id);
+  if (g) {
+    $("gtitle").textContent = g.title;
+    const bits = [g.serial, g.region, (g.size / 1e9).toFixed(1) + " GB"].filter(Boolean).map(esc);
+    $("ginfo").innerHTML = bits.join(" · ") + g.badges.map((b) => ' <span class="pillb">' + esc(b) + "</span>").join("");
+    const img = document.querySelector('.case.sel img');
+    if (img) { if (img.complete) glowFrom(img); else img.onload = () => glowFrom(img); } else setGlow("140, 107, 255");
+  } else {
+    $("gtitle").textContent = "All games";
+    $("ginfo").textContent = "gs.ini: the defaults every game starts from";
+    setGlow("140, 107, 255");
+  }
+  try {
+    data = await api("/api/settings?id=" + encodeURIComponent(id));
+    if (current === id) render();
+  } catch (e) { if (e.message !== "unauthorized") toast("Couldn't load the settings: " + e.message); }
+}
+
+function effective(item) {
+  const own = data.values[item.key];
+  if (own !== undefined) return { v: own, from: "own" };
+  if (data.id !== "@global" && data.global[item.key] !== undefined) return { v: data.global[item.key], from: "global" };
+  return { v: item.def, from: "default" };
+}
+const truthy = (v) => v === "true" || v === "1";
+function optLabel(item, v) {
+  if (item.type === "toggle") return truthy(v) ? "on" : "off";
+  const o = item.options.find((o) => o[0] === v || parseFloat(o[0]) === parseFloat(v));
+  return o ? o[1] : v;
+}
+
+// What the Recommended button sets, in a line: "6x · Widescreen on · EE 100% · MTVU off".
+function recSummary() {
+  const r = data.recommended;
+  if (!r.found && data.id !== "@global") return "Nothing tuned for this game yet: it follows the settings for all games.";
+  const bits = [];
+  for (const it of GROUPS.flatMap((g) => g.items)) {
+    const v = r.values[it.key];
+    if (v !== undefined && it.short) bits.push(it.short.replace("%", optLabel(it, v)));
+  }
+  for (const p of r.patches) bits.push(p + " patch");
+  return bits.length ? bits.join(" · ") : "Follows the settings for all games.";
+}
+
+function render() {
+  const isGlobal = data.id === "@global";
+  const playingHere = state.playing && state.playing.id === data.id;
+  let html = "";
+  const r = data.recommended;
+  if (r && (r.found || !isGlobal)) {
+    const inUse = data.is_recommended;
+    html += '<div class="rec' + (inUse ? " ok" : "") + '"><div><div class="rt">Recommended' + (isGlobal ? " for all games" : "") +
+      '</div><div class="rs">' + esc(recSummary()) + '</div></div><button id="recbtn" class="recbtn' + (recArmed ? " armed" : "") + '"' +
+      (inUse ? " disabled" : "") + ">" + (inUse ? "\u2713 In use" : recArmed ? "Tap again" : "Use") + "</button></div>";
+  }
+  for (const grp of GROUPS) {
+    html += '<div class="sec"><h2>' + esc(grp.title) + '</h2><div class="card">';
+    for (const it of grp.items) {
+      const eff = effective(it);
+      let from = "";
+      if (eff.from === "own" && !isGlobal) from = 'this game <button data-reset="' + esc(it.key) + '">reset</button>';
+      else if (eff.from === "own") from = 'set <button data-reset="' + esc(it.key) + '">reset</button>';
+      else if (eff.from === "global") from = "all games";
+      else from = "default";
+      const tag = it.restart ? '<span class="tag">next launch</span>' : "";
+      if (it.type === "toggle") {
+        html += '<div class="row"><div class="toggle"><div><div class="label">' + esc(it.label) + tag + '</div>' +
+          '<div class="from" style="margin-top:3px">' + from + '</div>' + (it.hint ? '<div class="hint">' + esc(it.hint) + "</div>" : "") +
+          '</div><button class="sw' + (truthy(eff.v) ? " on" : "") + (eff.from !== "own" ? " inh" : "") + '" data-key="' + esc(it.key) + '" data-val="' +
+          (truthy(eff.v) ? "false" : "true") + '" aria-label="' + esc(it.label) + '"></button></div></div>';
+      } else {
+        html += '<div class="row"><div class="head"><div class="label">' + esc(it.label) + tag + '</div><div class="from">' + from + '</div></div>';
+        if (it.hint) html += '<div class="hint">' + esc(it.hint) + "</div>";
+        html += '<div class="seg' + (it.options.length >= 6 ? " many" : "") + '" style="--n:' + it.options.length + '">' + it.options.map((o) => {
+          const cur = o[0] === eff.v || parseFloat(o[0]) === parseFloat(eff.v);
+          return '<button class="' + (cur ? (eff.from === "own" ? "cur" : "cur inh") : "") + '" data-key="' + esc(it.key) +
+                 '" data-val="' + esc(o[0]) + '">' + esc(o[1]) + "</button>";
+        }).join("") + "</div></div>";
+      }
+    }
+    html += "</div></div>";
+  }
+  if (!isGlobal) {
+    html += '<div class="sec"><h2>Patches</h2><div class="card">';
+    if (!data.patches.length) html += '<div class="empty">No patch file for ' + esc(data.serial || "this game") + " in patches/.</div>";
+    for (const p of data.patches) {
+      html += '<div class="row"><div class="toggle"><div><div class="label">' + esc(p.name) + "</div>" +
+        (p.description ? '<div class="hint">' + esc(p.description) + "</div>" : "") +
+        '<div class="hint" style="font-size:11px">' + esc(p.file) + '</div></div><button class="sw' + (p.enabled ? " on" : "") +
+        '" data-patch="' + esc(p.name) + '" data-on="' + (p.enabled ? "0" : "1") + '" aria-label="' + esc(p.name) + '"></button></div></div>';
+    }
+    html += "</div></div>";
+  }
+  $("settings").innerHTML = html;
+  $("file").innerHTML = esc(data.file) + (data.exists ? "" : " (made on the first change)") +
+    (playingHere ? " · applied live in the running game" : "");
+  $("settings").querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => change(b.dataset.key, b.dataset.val)));
+  $("settings").querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", () => change(b.dataset.reset, null)));
+  $("settings").querySelectorAll("[data-patch]").forEach((b) => b.addEventListener("click", () => patch(b.dataset.patch, b.dataset.on === "1")));
+  const rb = $("recbtn");
+  if (rb) rb.addEventListener("click", () => {
+    if (!recArmed) {
+      recArmed = setTimeout(() => { recArmed = 0; if (data) render(); }, 3500);
+      render();
+      toast(isGlobal ? "Tap again to replace the settings for all games" : "Tap again to replace this game's settings");
+      return;
+    }
+    clearTimeout(recArmed); recArmed = 0;
+    useRecommended();
+  });
+}
+
+// The whole file becomes the recommended one; the console keeps the old one beside it.
+async function useRecommended() {
+  const id = current, mtvu = data.recommended.values["EmuCore/Speedhacks/vuThread"] !== undefined;
+  pending.clear(); clearTimeout(saveTimer);
+  try {
+    const d = await api("/api/settings?id=" + encodeURIComponent(id), { method: "POST", body: "recommended\n", headers: { "Content-Type": "text/plain" } });
+    if (current === id) { data = d; render(); }
+    const live = state.playing && (id === "@global" || state.playing.id === id);
+    toast(live ? "Recommended settings on \u00b7 applying" + (mtvu ? ", MTVU at next launch" : " in the game") : "Recommended settings on");
+    refreshGames();
+  } catch (e) { if (e.message !== "unauthorized") toast("Not saved: " + e.message); }
+}
+
+// Changes show at once and go to the console after a short pause, so a few taps make one write.
+function change(key, value) {
+  if (value === null) delete data.values[key]; else data.values[key] = value;
+  pending.set(key, value);
+  render();
+  queueSave();
+}
+function patch(name, on) {
+  const p = data.patches.find((x) => x.name === name);
+  if (p) p.enabled = on;
+  pending.set("patch:" + name, on);
+  render();
+  queueSave();
+}
+function queueSave() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 350); }
+async function save() {
+  if (!pending.size) return;
+  const id = current, lines = [];
+  let restart = false;
+  for (const [k, v] of pending) {
+    if (k.startsWith("patch:")) lines.push((v ? "patch+ " : "patch- ") + k.slice(6));
+    else if (v === null) lines.push("unset " + k);
+    else lines.push("set " + k + "=" + v);
+    const it = GROUPS.flatMap((g) => g.items).find((x) => x.key === k);
+    if (it && it.restart) restart = true;
+  }
+  pending.clear();
+  try {
+    const d = await api("/api/settings?id=" + encodeURIComponent(id), { method: "POST", body: lines.join("\n") + "\n", headers: { "Content-Type": "text/plain" } });
+    if (current === id) { data = d; render(); }
+    const live = state.playing && (id === "@global" || state.playing.id === id);
+    toast(live ? (restart ? "Saved · the rest applies now, MTVU at next launch" : "Saved · applying in the game") : "Saved");
+    refreshGames();
+  } catch (e) { if (e.message !== "unauthorized") toast("Not saved: " + e.message); }
+}
+
+async function refreshGames() {
+  try {
+    const list = await api("/api/games");
+    list.forEach((g) => { const old = games.find((x) => x.id === g.id); if (old) Object.assign(old, g); });
+    if (current && current !== "@global") select(current);
+  } catch (e) {}
+}
+
+async function refreshState() {
+  try {
+    const s = await api("/api/state");
+    const changed = JSON.stringify(s.playing) !== JSON.stringify(state.playing);
+    state = s;
+    $("build").textContent = s.build;
+    if (s.playing) { $("now").classList.add("show"); $("nowtitle").textContent = s.playing.title; $("nowcover").src = cover(s.playing.id); }
+    else $("now").classList.remove("show");
+    if (changed && games.length) {
+      games = await api("/api/games");
+      buildFlow();
+      const i = s.playing ? games.findIndex((g) => g.id === s.playing.id) : -1;
+      if (i >= 0) { scrollToGame(i, false); select(games[i].id); }
+      else if (data) render();
+    }
+  } catch (e) {}
+}
+
+$("allgames").addEventListener("click", () => select(current === "@global" && games.length ? games[0].id : "@global"));
+// The clipboard API needs HTTPS, which a console on the LAN doesn't have; the old copy command works.
+$("discord").addEventListener("click", async () => {
+  let ok = false;
+  try { await navigator.clipboard.writeText("sword.pdf"); ok = true; } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = "sword.pdf"; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, 99);
+    try { ok = document.execCommand("copy"); } catch (e2) {}
+    ta.remove();
+  }
+  toast(ok ? "Copied sword.pdf" : "Discord: sword.pdf");
+});
+
+(async function start() {
+  if (!token) { showGate(); return; }
+  try {
+    const s = await api("/api/state");
+    state = s;
+    $("build").textContent = s.build;
+    games = await api("/api/games");
+  } catch (e) { if (e.message !== "unauthorized") toast("The console didn't answer"); return; }
+  $("main").classList.remove("hide");
+  buildFlow();
+  if (state.playing) { $("now").classList.add("show"); $("nowtitle").textContent = state.playing.title; $("nowcover").src = cover(state.playing.id); }
+  let i = state.playing ? games.findIndex((g) => g.id === state.playing.id) : 0;
+  if (i < 0) i = 0;
+  requestAnimationFrame(() => { scrollToGame(i, false); if (games[i]) select(games[i].id); else select("@global"); });
+  setInterval(refreshState, 5000);
+})();
+</script>
+</body>
+</html>

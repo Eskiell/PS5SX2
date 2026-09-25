@@ -1,0 +1,252 @@
+#include <cstdio>
+#include <cstring>
+#include <vector>
+// Orbis GS shims: HW skip-count tables live in the HW renderer (excluded).
+// Returning 0 = no skip/replacement (correct for Null/SW bring-up).
+#include "GS/Renderers/HW/GSHwHack.h"
+#include "GS/Renderers/HW/GSRendererHW.h"
+#include "GS/Renderers/HW/GSTextureReplacements.h"
+#include "GS/GSCapture.h"
+#include "GS/GSDump.h"
+#include "GS/GSPng.h"
+#include "GSDumpReplayer.h"
+#include "R5900.h"
+#include "common/Error.h"
+#include "common/Image.h"
+#include <string>
+
+RGBA8Image::RGBA8Image()
+{
+}
+RGBA8Image::RGBA8Image(RGBA8Image&& move)
+{
+  (void)move;
+}
+bool RGBA8Image::SaveToFile(const char* filename, u8 quality) const
+{
+  (void)filename;
+  (void)quality;
+  return false;
+}
+bool RGBA8Image::SaveToFile(const char* filename, std::FILE* fp, u8 quality) const
+{
+  (void)filename;
+  (void)fp;
+  (void)quality;
+  return false;
+}
+
+// Video capture needs ffmpeg (absent); bring-up never captures.
+bool GSCapture::IsCapturing()
+{
+  return false;
+}
+const Threading::ThreadHandle& GSCapture::GetEncoderThreadHandle()
+{
+  static const Threading::ThreadHandle handle;
+  return handle;
+}
+void GSCapture::DeliverAudioPacket(const float* frames)
+{
+  (void)frames;
+}
+void GSCapture::EndCapture()
+{
+}
+bool GSCapture::IsCapturingVideo()
+{
+  return false;
+}
+GSVector2i GSCapture::GetSize()
+{
+  return GSVector2i(0);
+}
+std::string GSCapture::GetNextCaptureFileName()
+{
+  return std::string();
+}
+void GSCapture::Flush()
+{
+}
+bool GSCapture::DeliverVideoFrame(GSTexture* stex)
+{
+  (void)stex;
+  return false;
+}
+bool GSCapture::BeginCapture(float fps, GSVector2i recommendedResolution, float aspect, std::string filename)
+{
+  (void)fps;
+  (void)recommendedResolution;
+  (void)aspect;
+  (void)filename;
+  return false;
+}
+
+// GS dumps need zlib/lzma/zstd (absent); bring-up never dumps.
+bool GSDumpBase::VSync(int field, bool last, const GSPrivRegSet* regs)
+{
+  (void)field;
+  (void)last;
+  (void)regs;
+  return false;
+}
+std::unique_ptr<GSDumpBase> GSDumpBase::CreateUncompressedDump(const std::string& fn, const std::string& serial,
+  unsigned int crc, unsigned int screenshot_width, unsigned int screenshot_height, const unsigned int* screenshot_pixels,
+  const freezeData& fd, const GSPrivRegSet* regs)
+{
+  (void)fn;
+  (void)serial;
+  (void)crc;
+  (void)screenshot_width;
+  (void)screenshot_height;
+  (void)screenshot_pixels;
+  (void)fd;
+  (void)regs;
+  return nullptr;
+}
+std::unique_ptr<GSDumpBase> GSDumpBase::CreateXzDump(const std::string& fn, const std::string& serial,
+  unsigned int crc, unsigned int screenshot_width, unsigned int screenshot_height, const unsigned int* screenshot_pixels,
+  const freezeData& fd, const GSPrivRegSet* regs)
+{
+  (void)fn;
+  (void)serial;
+  (void)crc;
+  (void)screenshot_width;
+  (void)screenshot_height;
+  (void)screenshot_pixels;
+  (void)fd;
+  (void)regs;
+  return nullptr;
+}
+std::unique_ptr<GSDumpBase> GSDumpBase::CreateZstDump(const std::string& fn, const std::string& serial,
+  unsigned int crc, unsigned int screenshot_width, unsigned int screenshot_height, const unsigned int* screenshot_pixels,
+  const freezeData& fd, const GSPrivRegSet* regs)
+{
+  (void)fn;
+  (void)serial;
+  (void)crc;
+  (void)screenshot_width;
+  (void)screenshot_height;
+  (void)screenshot_pixels;
+  (void)fd;
+  (void)regs;
+  return nullptr;
+}
+
+// Never constructed (Null renderer selected); satisfies the factory switch.
+void GSDumpBase::Transfer(int index, const u8* mem, size_t size)
+{
+  (void)index;
+  (void)mem;
+  (void)size;
+}
+
+// Orbis: libpng is absent, so the PNG/DDS replacement-texture loaders are not
+// built. Replacement loading is disabled by default; report "no loader".
+GSTextureReplacements::ReplacementTextureLoader GSTextureReplacements::GetLoader(const std::string_view filename)
+{
+  (void)filename;
+  return nullptr;
+}
+bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)
+{
+  (void)filename;
+  (void)width;
+  (void)height;
+  (void)buffer;
+  (void)pitch;
+  return false;
+}
+
+void GSDumpReplayer::RenderUI()
+{
+}bool GSDumpReplayer::IsRunner()
+{
+  return false;
+}
+void GSDumpBase::ReadFIFO(u32 size)
+{
+  (void)size;
+}
+
+namespace GSPng
+{
+// eerec-262: no libpng here -> write an uncompressed 32-bit BMP (BGRA, top-down) so HW dumps work.
+bool Save(GSPng::Format fmt, const std::string& file, const u8* image, int w, int h, int pitch, int compression, bool rb_swapped)
+{
+  (void)compression;
+  if (!image || w <= 0 || h <= 0)
+    return false;
+  const bool r8 = (fmt == GSPng::R8I_PNG || fmt == GSPng::R8I_PNG);
+  std::string fn = file;
+  if (fn.size() > 4 && fn.compare(fn.size() - 4, 4, ".png") == 0)
+    fn.replace(fn.size() - 4, 4, ".bmp");
+  FILE* f = std::fopen(fn.c_str(), "wb");
+  if (!f)
+    return false;
+  const u32 img = static_cast<u32>(w) * static_cast<u32>(h) * 4u;
+  u8 hdr[54] = {};
+  const u32 fsz = 54 + img, off = 54, dib = 40;
+  const s32 nh = -h;
+  hdr[0] = 'B'; hdr[1] = 'M';
+  std::memcpy(hdr + 2, &fsz, 4); std::memcpy(hdr + 10, &off, 4); std::memcpy(hdr + 14, &dib, 4);
+  std::memcpy(hdr + 18, &w, 4); std::memcpy(hdr + 22, &nh, 4);
+  hdr[26] = 1; hdr[28] = 32; std::memcpy(hdr + 34, &img, 4);
+  std::fwrite(hdr, 1, 54, f);
+  std::vector<u8> row(static_cast<size_t>(w) * 4);
+  for (int y = 0; y < h; y++)
+  {
+    const u8* src = image + static_cast<size_t>(y) * pitch;
+    for (int x = 0; x < w; x++)
+    {
+      if (r8)
+      {
+        row[x * 4 + 0] = row[x * 4 + 1] = row[x * 4 + 2] = src[x];
+        row[x * 4 + 3] = 255;
+      }
+      else
+      {
+        const u8 r = rb_swapped ? src[x * 4 + 2] : src[x * 4 + 0];
+        const u8 b = rb_swapped ? src[x * 4 + 0] : src[x * 4 + 2];
+        row[x * 4 + 0] = b; row[x * 4 + 1] = src[x * 4 + 1]; row[x * 4 + 2] = r; row[x * 4 + 3] = src[x * 4 + 3];
+      }
+    }
+    std::fwrite(row.data(), 1, row.size(), f);
+  }
+  std::fclose(f);
+  return true;
+}
+} // namespace GSPng
+
+// GS dump replay is dev-only (needs lzma); bring-up never replays.
+namespace GSDumpReplayer
+{
+bool IsReplayingDump()
+{
+  return false;
+}
+bool Initialize(const char* filename, Error* error)
+{
+  (void)filename;
+  Error::SetString(error, "GS dumps unsupported on Orbis");
+  return false;
+}
+std::string GetDumpSerial()
+{
+  return std::string();
+}
+u32 GetDumpCRC()
+{
+  return 0;
+}
+void Shutdown()
+{
+}
+bool ChangeDump(const char* filename)
+{
+  (void)filename;
+  return false;
+}
+} // namespace GSDumpReplayer
+
+R5900cpu GSDumpReplayerCpu{};
