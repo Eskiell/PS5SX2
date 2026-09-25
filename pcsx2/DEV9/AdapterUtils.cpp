@@ -215,12 +215,74 @@ bool AdapterUtils::GetAdapter(const std::string& name, Adapter* adapter, Adapter
 
 	return false;
 }
+#ifdef __PROSPERO__
+// PS5 port: the address the console's own traffic leaves from. A UDP connect() sends nothing; it
+// only picks the route, and getsockname() then names the local address on it.
+static std::optional<IP_Address> ProsperoOutboundIP()
+{
+	const char* const targets[] = {"1.1.1.1", "192.168.1.1", "192.168.0.1", "10.0.0.1", "172.16.0.1"};
+	for (const char* target : targets)
+	{
+		const int s = socket(AF_INET, SOCK_DGRAM, 0);
+		if (s < 0)
+			return std::nullopt;
+		sockaddr_in to = {};
+		to.sin_family = AF_INET;
+		to.sin_port = htons(53);
+		inet_pton(AF_INET, target, &to.sin_addr);
+		sockaddr_in me = {};
+		socklen_t len = sizeof(me);
+		const bool ok = connect(s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0 &&
+						getsockname(s, reinterpret_cast<sockaddr*>(&me), &len) == 0 && me.sin_addr.s_addr != 0;
+		close(s);
+		if (ok)
+			return std::bit_cast<IP_Address>(me.sin_addr);
+	}
+	return std::nullopt;
+}
+#endif
+
 bool AdapterUtils::GetAdapterAuto(Adapter* adapter, AdapterBuffer* buffer)
 {
 	std::unique_ptr<ifaddrs, IfAdaptersDeleter> adapterInfo;
 	ifaddrs* pAdapter = GetAllAdapters(&adapterInfo);
 	if (pAdapter == nullptr)
 		return false;
+
+#ifdef __PROSPERO__
+	// PS5 port: the console has no working if_nameindex(), so GetGateways() finds no gateway for any
+	// adapter and the search below always failed ("Auto Selection Failed"). Take the adapter that holds
+	// the console's outbound address instead, or else the first one that is up with an IPv4 address.
+	// The socket adapter overrides the PS2's address, netmask and gateway anyway
+	// (SocketAdapter::GetAdapterOptions). Needs proper testing on other firmware and with Wi-Fi.
+	{
+		const std::optional<IP_Address> outbound = ProsperoOutboundIP();
+		ifaddrs* pick = nullptr;
+		for (ifaddrs* p = pAdapter; p != nullptr; p = p->ifa_next)
+		{
+			if ((p->ifa_flags & IFF_LOOPBACK) != 0 || (p->ifa_flags & IFF_UP) == 0)
+				continue;
+			const std::optional<IP_Address> ip = GetAdapterIP(p);
+			if (!ip.has_value())
+				continue;
+			if (outbound.has_value() && ip.value() == outbound.value())
+			{
+				pick = p;
+				break;
+			}
+			if (pick == nullptr)
+				pick = p;
+		}
+		if (pick == nullptr)
+			return false;
+		const IP_Address ip = GetAdapterIP(pick).value();
+		Console.WriteLn("DEV9: Socket: using adapter %s (%u.%u.%u.%u%s)", pick->ifa_name, ip.bytes[0], ip.bytes[1],
+			ip.bytes[2], ip.bytes[3], (outbound.has_value() && ip == outbound.value()) ? ", the outbound address" : "");
+		*adapter = *pick;
+		buffer->swap(adapterInfo);
+		return true;
+	}
+#endif
 
 	do
 	{
