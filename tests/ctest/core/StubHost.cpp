@@ -222,9 +222,11 @@ void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool def
 }
 
 // eerec-282: savestate requests from the pad thread (1 = save slot 1, 2 = load slot 1), run here at
-// vsync on the CPU thread as PCSX2's hotkeys run through RunOnCPUThread.
+// vsync on the CPU thread as PCSX2's hotkeys run through RunOnCPUThread. vk-285-48: 3 = back to the
+// menu (the port's main-boot.cpp stops the VM and re-executes the app into its frontend).
 std::atomic<int> g_orbis_state_request{0};
 void OrbisOSDLabel(const char* text);
+void OrbisBackToMenuCpu();
 
 extern std::atomic<int> g_orbis_gsini_reload, g_orbis_pin_request; // eerec-285 (GSRenderer.cpp)
 void orbis_reload_gs_ini_cpu(); // eerec-285 (main-boot.cpp)
@@ -268,6 +270,8 @@ void Host::PumpMessagesOnCPUThread()
 		}
 		std::fflush(stdout);
 	}
+	else if (req == 3)
+		OrbisBackToMenuCpu();
 }
 
 s32 Host::Internal::GetTranslatedStringImpl(
