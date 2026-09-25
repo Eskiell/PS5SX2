@@ -3,6 +3,14 @@
 
 //#version 420 // Keep it for editor detection
 
+// ORBIS_PRESHARP (PS5 port, vk-285-12): the ShadeBoost pass is repurposed as a
+// native-resolution sharpen (cross unsharp mask) that runs before the upscale, as in the
+// port's GL shadeboost.glsl (eerec-278). The eboot enables ShadeBoost on Vulkan only when
+// this file carries the ORBIS_PRESHARP marker, so the stock shader never desaturates.
+// Strength = params.z = ShadeBoost_Saturation / 50 (e.g. 25 -> 0.5). 0 = passthrough.
+// params.xy = 1 / texture size, set by the eboot (GSDevice::ShadeBoost): the PS5 shader
+// compiler has no image queries, so textureSize() is not available.
+
 #ifdef VERTEX_SHADER
 
 layout(location = 0) in vec4 a_pos;
@@ -18,15 +26,6 @@ void main()
 
 #endif
 
-/*
-** Contrast, saturation, brightness
-** Code of this function is from TGM's shader pack
-** http://irrlicht.sourceforge.net/phpBB2/viewtopic.php?t=21057
-** TGM's author comment about the license (included in the previous link)
-** "do with it, what you want! its total free!
-** (but would be nice, if you say that you used my shaders  :wink: ) but not necessary"
-*/
-
 #ifdef FRAGMENT_SHADER
 
 layout(push_constant) uniform cb0
@@ -38,40 +37,23 @@ layout(set = 0, binding = 0) uniform sampler2D samp0;
 layout(location = 0) in vec2 v_tex;
 layout(location = 0) out vec4 o_col0;
 
-// For all settings: 1.0 = 100% 0.5=50% 1.5 = 150%
-vec4 ContrastSaturationBrightness(vec4 color)
+vec3 sb_load(ivec2 p, ivec2 hi, vec2 rcp_size)
 {
-    float brt = params.x;
-    float con = params.y;
-    float sat = params.z;
-    float gam = params.w;
-
-    // Increase or decrease these values to adjust r, g and b color channels separately
-    const float AvgLumR = 0.5;
-    const float AvgLumG = 0.5;
-    const float AvgLumB = 0.5;
-
-    const vec3 LumCoeff = vec3(0.2125, 0.7154, 0.0721);
-
-    vec3 AvgLumin = vec3(AvgLumR, AvgLumG, AvgLumB);
-    vec3 brtColor = color.rgb * brt;
-    float dot_intensity = dot(brtColor, LumCoeff);
-    vec3 intensity = vec3(dot_intensity, dot_intensity, dot_intensity);
-    vec3 satColor = mix(intensity, brtColor, sat);
-    vec3 conColor = mix(AvgLumin, satColor, con);
-
-    vec3 csb = conColor;
-    csb = pow(csb, vec3(1.0 / gam));
-    color.rgb = csb;
-    return color;
+	return textureLod(samp0, (vec2(clamp(p, ivec2(0), hi)) + 0.5) * rcp_size, 0.0).rgb;
 }
-
 
 void main()
 {
-    vec4 c = texture(samp0, v_tex);
-    o_col0 = ContrastSaturationBrightness(c);
+	vec2 rcp_size = params.xy;
+	ivec2 sz = ivec2(round(1.0 / max(rcp_size, vec2(1.0e-6))));
+	ivec2 hi = sz - ivec2(1);
+	ivec2 p = clamp(ivec2(v_tex * vec2(sz)), ivec2(0), hi);
+	vec4 c = textureLod(samp0, (vec2(p) + 0.5) * rcp_size, 0.0);
+	vec3 nb = sb_load(p + ivec2(-1, 0), hi, rcp_size) + sb_load(p + ivec2(1, 0), hi, rcp_size) +
+	          sb_load(p + ivec2(0, -1), hi, rcp_size) + sb_load(p + ivec2(0, 1), hi, rcp_size);
+	float k = clamp(params.z, 0.0, 2.0);
+	vec3 s = c.rgb + k * (c.rgb - 0.25 * nb);
+	o_col0 = vec4(clamp(s, 0.0, 1.0), c.a);
 }
-
 
 #endif

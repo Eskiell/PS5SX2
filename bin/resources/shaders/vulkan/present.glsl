@@ -29,6 +29,8 @@ layout(push_constant) uniform cb10
 	vec2 u_source_resolution;
 	vec2 u_rcp_source_resolution; // 1 / u_source_resolution
 	float u_time;
+	float u_orbis_sharp; // PS5 port (vk-285-12): DisplayConstantBuffer TimeAndPad.y, RCAS amount
+	float u_orbis_split; // TimeAndPad.z, split-screen x in target pixels (0 = off)
 };
 
 layout(location = 0) in vec2 v_tex;
@@ -106,7 +108,23 @@ void ps_filter_complex() // triangular
 }
 #endif
 
-#ifdef ps_filter_lottes
+// PS5 port: the Lottes CRT shader compiles to ~11.8 KiB of pixel code, more than the
+// vk-285-12 driver's stage workspace took (~8 KiB, see FSR_RCAS); with ORBIS_LOTTES 0 the
+// CRT mode is a light scanline pass over the source lines instead.
+#ifndef ORBIS_LOTTES
+#define ORBIS_LOTTES 1
+#endif
+#if defined(ps_filter_lottes) && !ORBIS_LOTTES
+void ps_filter_lottes()
+{
+	vec3 c = sample_c(v_tex).rgb;
+	float line = fract(v_tex.y * u_source_resolution.y) - 0.5; // -0.5..0.5 across a source line
+	float w = 0.70 + 0.30 * cos(line * 6.2831853); // bright at the line centre
+	o_col0 = vec4(c * w, 1.0);
+}
+#endif
+
+#if defined(ps_filter_lottes) && ORBIS_LOTTES
 
 #define MaskingType 4                      //[1|2|3|4] The type of CRT shadow masking used. 1: compressed TV style, 2: Aperture-grille, 3: Stretched VGA style, 4: VGA style.
 #define ScanBrightness -8.00               //[-16.0 to 1.0] The overall brightness of the scanline effect. Lower for darker, higher for brighter.
@@ -403,43 +421,229 @@ void ps_filter_lottes()
 
 #endif
 
+#if defined(ps_4x_rgss) || defined(ps_automagical_supersampling)
+// PS5 port (vk-285-12): edge-adaptive upscaler for the software renderer's frame,
+// ported from the port's GL present shader (eerec-278).
+// Slot 6 (TVShader=6, was 4xRGSS): FSR1-style EASU upscale (plus RCAS sharpening when
+//   FSR_RCAS is 1 and u_orbis_sharp > 0: four more EASU evaluations per pixel).
+// Slot 7 (TVShader=7, was automagical): EASU upscale only.
+//
+// With FSR_RCAS the pixel shader compiles to ~12.6 KiB (EASU alone is ~2.8 KiB). The
+// vk-285-12 driver fitted only ~8 KiB of pixel code in a pipeline's stage workspace
+// ("shaders of 25216 bytes do not fit before the linked context"); the vk-285-13 driver
+// places the linked context after bigger code. RCAS itself runs only when u_orbis_sharp
+// is above zero (live.ini sharp=), so the default costs one uniform branch.
+#ifndef FSR_RCAS
+#define FSR_RCAS 1
+#endif
+// Algorithm after AMD FidelityFX Super Resolution 1.0 (MIT licensed); rewritten without
+// textureGather, with exact reciprocals and NaN guards.
+//
+// u_orbis_sharp: RCAS amount 0..1 (1 = strongest, 0 = off)
+// u_orbis_split: split-screen x in target pixels (left of it: plain bilinear), 0 = off
+
+ivec2 fsr_lo = ivec2(0);
+ivec2 fsr_hi = ivec2(0);
+
+// Exact texel read via a sample at the texel centre (same sampling path as ps_copy).
+vec3 fsr_load(ivec2 p)
+{
+	return textureLod(samp0, (vec2(clamp(p, fsr_lo, fsr_hi)) + 0.5) * u_rcp_source_resolution, 0.0).rgb;
+}
+
+// Luma times 2 (FSR's cheap approximation).
+float fsr_luma(vec3 c)
+{
+	return c.b * 0.5 + (c.r * 0.5 + c.g);
+}
+
+// Accumulate direction and length for one of the 4 bilinear corners.
+//    a
+//  b c d
+//    e
+void fsr_easu_set(inout vec2 dir, inout float len, float w, float lA, float lB, float lC, float lD, float lE)
+{
+	float dc = lD - lC;
+	float cb = lC - lB;
+	float lenX = 1.0 / max(max(abs(dc), abs(cb)), 1.0 / 65536.0);
+	float dirX = lD - lB;
+	dir.x += dirX * w;
+	lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+	len += lenX * lenX * w;
+
+	float ec = lE - lC;
+	float ca = lC - lA;
+	float lenY = 1.0 / max(max(abs(ec), abs(ca)), 1.0 / 65536.0);
+	float dirY = lE - lA;
+	dir.y += dirY * w;
+	lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+	len += lenY * lenY * w;
+}
+
+void fsr_easu_tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len2, float lob, float clp, vec3 c)
+{
+	vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.y * dir.x - off.x * dir.y);
+	v *= len2;
+	float d2 = min(dot(v, v), clp);
+	// Lanczos-2 approximation: (25/16 * (2/5 * x^2 - 1)^2 - (25/16 - 1)) * (lob * x^2 - 1)^2
+	float wB = 0.4 * d2 - 1.0;
+	float wA = lob * d2 - 1.0;
+	wB *= wB;
+	wA *= wA;
+	wB = 1.5625 * wB - 0.5625;
+	float w = wB * wA;
+	aC += c * w;
+	aW += w;
+}
+
+// pos = source position in texels (texel i covers [i, i+1)).
+vec3 fsr_easu(vec2 pos)
+{
+	vec2 pp = pos - 0.5;
+	vec2 fp = floor(pp);
+	pp -= fp;
+	ivec2 p = ivec2(fp);
+
+	//    b c
+	//  e f g h
+	//  i j k l
+	//    n o
+	vec3 b = fsr_load(p + ivec2(0, -1));
+	vec3 c = fsr_load(p + ivec2(1, -1));
+	vec3 e = fsr_load(p + ivec2(-1, 0));
+	vec3 f = fsr_load(p);
+	vec3 g = fsr_load(p + ivec2(1, 0));
+	vec3 h = fsr_load(p + ivec2(2, 0));
+	vec3 i = fsr_load(p + ivec2(-1, 1));
+	vec3 j = fsr_load(p + ivec2(0, 1));
+	vec3 k = fsr_load(p + ivec2(1, 1));
+	vec3 l = fsr_load(p + ivec2(2, 1));
+	vec3 n = fsr_load(p + ivec2(0, 2));
+	vec3 o = fsr_load(p + ivec2(1, 2));
+
+	float bL = fsr_luma(b), cL = fsr_luma(c), eL = fsr_luma(e), fL = fsr_luma(f);
+	float gL = fsr_luma(g), hL = fsr_luma(h), iL = fsr_luma(i), jL = fsr_luma(j);
+	float kL = fsr_luma(k), lL = fsr_luma(l), nL = fsr_luma(n), oL = fsr_luma(o);
+
+	vec2 dir = vec2(0.0);
+	float len = 0.0;
+	fsr_easu_set(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
+	fsr_easu_set(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
+	fsr_easu_set(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);
+	fsr_easu_set(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);
+
+	// Normalize direction; flat areas fall back to horizontal.
+	float dirR = dir.x * dir.x + dir.y * dir.y;
+	bool zro = dirR < (1.0 / 32768.0);
+	dirR = zro ? 1.0 : inversesqrt(dirR);
+	dir.x = zro ? 1.0 : dir.x;
+	dir *= dirR;
+
+	// Edge amount {0..2} -> {0..1}, shaped.
+	len = len * 0.5;
+	len *= len;
+	// Stretch kernel from 1.0 (axis aligned) to sqrt(2) (diagonal).
+	float stretch = (dir.x * dir.x + dir.y * dir.y) / max(abs(dir.x), abs(dir.y));
+	vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+	// Negative lobe strength and clipping window grow with edge amount.
+	float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+	float clp = 1.0 / lob;
+
+	vec3 mn4 = min(min(f, g), min(j, k));
+	vec3 mx4 = max(max(f, g), max(j, k));
+
+	vec3 aC = vec3(0.0);
+	float aW = 0.0;
+	fsr_easu_tap(aC, aW, vec2( 0.0, -1.0) - pp, dir, len2, lob, clp, b);
+	fsr_easu_tap(aC, aW, vec2( 1.0, -1.0) - pp, dir, len2, lob, clp, c);
+	fsr_easu_tap(aC, aW, vec2(-1.0,  1.0) - pp, dir, len2, lob, clp, i);
+	fsr_easu_tap(aC, aW, vec2( 0.0,  1.0) - pp, dir, len2, lob, clp, j);
+	fsr_easu_tap(aC, aW, vec2( 0.0,  0.0) - pp, dir, len2, lob, clp, f);
+	fsr_easu_tap(aC, aW, vec2(-1.0,  0.0) - pp, dir, len2, lob, clp, e);
+	fsr_easu_tap(aC, aW, vec2( 1.0,  1.0) - pp, dir, len2, lob, clp, k);
+	fsr_easu_tap(aC, aW, vec2( 2.0,  1.0) - pp, dir, len2, lob, clp, l);
+	fsr_easu_tap(aC, aW, vec2( 2.0,  0.0) - pp, dir, len2, lob, clp, h);
+	fsr_easu_tap(aC, aW, vec2( 1.0,  0.0) - pp, dir, len2, lob, clp, g);
+	fsr_easu_tap(aC, aW, vec2( 1.0,  2.0) - pp, dir, len2, lob, clp, o);
+	fsr_easu_tap(aC, aW, vec2( 0.0,  2.0) - pp, dir, len2, lob, clp, n);
+
+	// Normalize and de-ring (clamp to the 4 nearest texels).
+	vec3 res = (aW > 1.0e-5) ? aC / aW : f;
+	return min(mx4, max(mn4, res));
+}
+
+#if FSR_RCAS
+// Robust contrast-adaptive sharpening on the upscaled neighbourhood.
+//    b
+//  d e f
+//    h
+vec3 fsr_rcas(vec3 b, vec3 d, vec3 e, vec3 f, vec3 h, float con)
+{
+	vec3 mn4 = min(min(b, d), min(f, h));
+	vec3 mx4 = max(max(b, d), max(f, h));
+	vec3 hitMin = min(mn4, e) / max(4.0 * mx4, vec3(1.0e-5));
+	vec3 hitMax = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3(-1.0e-5));
+	vec3 lobeRGB = max(-hitMin, hitMax);
+	float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * con;
+	return (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
+}
+#endif
+
+vec3 fsr_present(bool sharpen)
+{
+	vec4 r = u_source_rect * u_source_resolution.xyxy;
+	fsr_lo = ivec2(floor(r.xy));
+	fsr_hi = max(ivec2(ceil(r.zw)) - ivec2(1), fsr_lo);
+
+	vec2 pos = v_tex * u_source_resolution;
+	vec3 e = fsr_easu(pos);
+#if FSR_RCAS
+	float con = clamp(u_orbis_sharp, 0.0, 1.0);
+	if (!sharpen || con <= 0.0)
+		return e;
+
+	// Source texels per output pixel.
+	vec2 st = u_source_size / max(u_target_size, vec2(1.0));
+	vec3 b = fsr_easu(pos - vec2(0.0, st.y));
+	vec3 h = fsr_easu(pos + vec2(0.0, st.y));
+	vec3 d = fsr_easu(pos - vec2(st.x, 0.0));
+	vec3 f = fsr_easu(pos + vec2(st.x, 0.0));
+	return clamp(fsr_rcas(b, d, e, f, h, con), 0.0, 1.0);
+#else
+	return e;
+#endif
+}
+
+// Split-screen comparison: plain bilinear left of u_orbis_split, white divider.
+bool fsr_split_left(out vec3 c)
+{
+	float split = u_orbis_split;
+	c = vec3(1.0);
+	if (split <= 0.0 || gl_FragCoord.x > split + 1.0)
+		return false;
+	if (gl_FragCoord.x < split - 1.0)
+		c = sample_c(v_tex).rgb;
+	return true;
+}
+#endif
+
 #ifdef ps_4x_rgss
 void ps_4x_rgss()
 {
-	vec2 dxy = vec2(dFdx(v_tex.x), dFdy(v_tex.y));
-	vec3 color = vec3(0);
-
-	float s = 1.0/8.0;
-	float l = 3.0/8.0;
-
-	color += sample_c(v_tex + vec2( s, l) * dxy).rgb;
-	color += sample_c(v_tex + vec2( l,-s) * dxy).rgb;
-	color += sample_c(v_tex + vec2(-s,-l) * dxy).rgb;
-	color += sample_c(v_tex + vec2(-l, s) * dxy).rgb;
-
-	o_col0 = vec4(color * 0.25,1);
+	vec3 c;
+	if (!fsr_split_left(c))
+		c = fsr_present(true);
+	o_col0 = vec4(c, 1.0);
 }
 #endif
 
 #ifdef ps_automagical_supersampling
 void ps_automagical_supersampling()
 {
-	vec2 ratio = (u_source_size / u_target_size) * 0.5;
-	vec2 steps = floor(ratio);
-	vec3 col = sample_c(v_tex).rgb;
-	float div = 1;
-
-	for (float y = 0; y < steps.y; y++)
-	{
-		for (float x = 0; x < steps.x; x++)
-		{
-			vec2 offset = vec2(x,y) - ratio * 0.5;
-			col += sample_c(v_tex + offset * u_rcp_source_resolution * 2.0).rgb;
-			div++;
-		}
-	}
-
-	o_col0 = vec4(col / div, 1);
+	vec3 c;
+	if (!fsr_split_left(c))
+		c = fsr_present(false);
+	o_col0 = vec4(c, 1.0);
 }
 #endif
 
