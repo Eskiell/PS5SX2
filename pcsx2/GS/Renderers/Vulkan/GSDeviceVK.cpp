@@ -37,6 +37,10 @@
 // by main-boot's ticker as [vkwait] and [shaders].
 #include "GS/Renderers/Vulkan/VKOrbisTiming.h"
 #ifdef ORBIS_VULKAN
+// vk-285-51: the port's settings log (frontend/fe_ps5.cpp), for the GPU-hang exit. Weak: tools have none.
+extern "C" void orbis_event_log(const char* line) __attribute__((weak));
+#endif
+#ifdef ORBIS_VULKAN
 unsigned long long g_orbis_vkw_ns[ORBIS_VKW_KINDS], g_orbis_vkw_n[ORBIS_VKW_KINDS],
 	g_orbis_vkw_max_ns[ORBIS_VKW_KINDS];
 unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_COPY_KINDS];
@@ -1413,11 +1417,20 @@ namespace
 		char header[160];
 		snprintf(header, sizeof(header), "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.", where,
 			hung);
-		OrbisVkTraceWrite(OrbisLogPath("vkhang.txt").c_str(), header, hung);
-		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote /data/PCSX2/vkhang.txt; closing the app\n",
-			where, hung);
+		// vk-285-51: the previous hang's dump is kept as vkhang.1.txt, and the hang goes in the
+		// settings log (frontend/fe_ps5.cpp), next to the settings changes that may have caused it.
+		const std::string path = OrbisLogPath("vkhang.txt");
+		std::rename(path.c_str(), OrbisLogPath("vkhang.1.txt").c_str());
+		OrbisVkTraceWrite(path.c_str(), header, hung);
+		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote %s; closing the app\n", where, hung, path.c_str());
 		fflush(stdout);
 		fflush(stderr);
+		if (orbis_event_log)
+		{
+			char line[200];
+			snprintf(line, sizeof(line), "GPU hang (VK_ERROR_DEVICE_LOST in %s); the app closed itself. The dump is logs/vkhang.txt", where);
+			orbis_event_log(line);
+		}
 		_exit(3);
 	}
 } // namespace
