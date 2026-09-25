@@ -1,6 +1,6 @@
 # PS5SX2: the PS5 layer
 
-PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on the PS5HB_Vulkan driver, linked into the app. It is developed on a PS5 Pro with firmware 11.40 and etaHEN.
+PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on the PS5HB_Vulkan driver, linked into the app. It is developed on a PS5 Pro with firmware 11.40. The console runs the PS5SX2 Helper payload, which jailbreaks the app and mounts /data into its sandbox.
 
 ## Layout
 
