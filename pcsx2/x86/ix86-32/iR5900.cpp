@@ -840,24 +840,12 @@ static void recResetRaw()
 		fflush(stdout);
 		}
 	}
-	{
-		// Survey: what does the dispatcher's SIB recLUT read ACTUALLY address?
-		// (x86-64 SIB disp32-only is RIP-relative; verify base + sample slots.)
-		const u8* t = (const u8*)SysMemory::GetEERec();
-		for (int o = 0; o < 0x300 - 8; o++)
-		{
-			if (t[o] == 0x48 && t[o+1] == 0x8b && t[o+2] == 0x0c && t[o+3] == 0xc5)
-			{
-				s32 d = (s32)((u32)t[o+4] | ((u32)t[o+5] << 8) | ((u32)t[o+6] << 16) | ((u32)t[o+7] << 24));
-				uptr base = (uptr)(t + o + 8) + (sptr)d;
-				uptr v0 = *(uptr*)(base + 0xbfc0u * 8);
-				uptr v1 = *(uptr*)(base + 0x9fc4u * 8);
-				printf("[dbg] sibprobe: off=%03x sib_base=%p [bfc0]=%p [9fc4]=%p\n",
-					o, (void*)base, (void*)v0, (void*)v1);
-			}
-		}
-		fflush(stdout);
-	}
+	// Orbis (vk-285-70): the "sibprobe" survey that stood here is gone. It
+	// took the dispatcher's SIB disp32 (an absolute address: no base register)
+	// as RIP-relative and read memory at the address that made, which a
+	// tester's console on firmware 12.00 had unmapped: signal 11 in recResetRaw
+	// at a game's first start (fault 0x6926c89da, TMNT, 2026-09-26). It only
+	// printed, so nothing else changes (needs proper testing on 12.00).
 	}
 	vtlb_DynGenDispatchers();
 	printf("[dbg] recreset: vtlb done\n");
