@@ -53,6 +53,7 @@ bool g_orbis_sw_on_gl = false;
 std::atomic<int> g_orbis_filter_cycle{0};
 extern std::atomic<int> g_orbis_state_request; // eerec-282 (StubHost.cpp)
 void OrbisKbdMouseStart(); // vk-285-72 (orbis-shims/ProsperoKbdMouse.cpp)
+void OrbisNotifyTest(bool next); // vk-285-73 (orbis-shims/ProsperoNotify.cpp)
 // vk-285-48: back to the menu. The pad thread asks with request 3: since vk-285-49 on a touchpad
 // click with L1+R1 held (48 used L3+R3 + D-pad Left). StubHost's PumpMessagesOnCPUThread then calls
 // OrbisBackToMenuCpu() at vsync on the CPU thread, which stops the VM; main() writes the memory
@@ -245,17 +246,21 @@ static void *orbis_pad_thread(void *)
     {
       // eerec-282: L3+R3 held: D-pad Up = save state slot 1, D-pad Down = load it. Releasing L3+R3 after
       // ~0.4 s without using the D-pad cycles the present filter (eerec-278 fired while held).
+      // vk-285-73: D-pad Right = the notification test's next variant, Left = the same one again
+      // (orbis-shims/ProsperoNotify.cpp; it only queues, the sends happen on its own thread).
       {
         static unsigned combo = 0;
         static bool used = false;
         static uint32_t prev_dpad = 0;
-        const uint32_t dpad = d.buttons & 0x50u; // Up 0x10, Down 0x40
+        const uint32_t dpad = d.buttons & 0xF0u; // Up 0x10, Right 0x20, Down 0x40, Left 0x80
         if ((d.buttons & 0x6u) == 0x6u)
         {
           combo++;
           const uint32_t pressed = dpad & ~prev_dpad;
           if (pressed & 0x10u) { g_orbis_state_request.store(1, std::memory_order_release); used = true; }
           if (pressed & 0x40u) { g_orbis_state_request.store(2, std::memory_order_release); used = true; }
+          if (pressed & 0x20u) { OrbisNotifyTest(true); used = true; }
+          if (pressed & 0x80u) { OrbisNotifyTest(false); used = true; }
         }
         else
         {
