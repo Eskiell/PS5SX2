@@ -69,5 +69,6 @@ extern "C" void orbis_event_log(const char* line);
 
 // Shows the shelf and returns the picked image's path. *ran is false when the frontend could not
 // start (no Vulkan display, say): the caller then shows the plain list instead. With no images the
-// result is empty; with one, or the nomenu rule applied by the caller, it returns at once.
+// result is empty. One image opens the shelf too (vk-285-69, for its QR code); the caller's nomenu
+// flag skips the shelf.
 std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* build_tag, bool* ran);

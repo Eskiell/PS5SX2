@@ -929,12 +929,8 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	for (size_t i = 0; i < games.size(); i++)
 		if (games[i].file == last)
 			preselect = static_cast<int>(i);
-	if (games.size() == 1)
-	{
-		*ran = true;
-		WriteLastGame(paths.top_dir, games[0].file);
-		return games[0].path;
-	}
+	// vk-285-69: one game opens the shelf too, not the game straight away: the shelf's QR code is how
+	// testers reach the settings page and its Download logs (Spyros, 2026-09-26).
 
 	int32_t user = -1;
 	(void)sceUserServiceInitialize(nullptr);

@@ -523,8 +523,13 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		hx += 56.0f * k;
 	};
 	hint(icon::Cross, nullptr, "Play");
-	hint(icon::DpadLeftRight, nullptr, "Browse");
-	hint("#L1", "#R1", "Jump");
+	// vk-285-69: the shelf opens with one game too (its QR code leads to the settings page and the
+	// logs); browsing needs two.
+	if (n > 1)
+	{
+		hint(icon::DpadLeftRight, nullptr, "Browse");
+		hint("#L1", "#R1", "Jump");
+	}
 
 	std::string status = m_covers ? m_covers->Status() : std::string();
 	if (status.empty() && n > 0)
