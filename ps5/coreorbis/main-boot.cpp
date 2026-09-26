@@ -52,6 +52,7 @@ bool g_orbis_sw_on_gl = false;
 // eerec-278: bumped by the pad thread when L3+R3 are held ~0.4 s (cycles the present filter).
 std::atomic<int> g_orbis_filter_cycle{0};
 extern std::atomic<int> g_orbis_state_request; // eerec-282 (StubHost.cpp)
+void OrbisKbdMouseStart(); // vk-285-72 (orbis-shims/ProsperoKbdMouse.cpp)
 // vk-285-48: back to the menu. The pad thread asks with request 3: since vk-285-49 on a touchpad
 // click with L1+R1 held (48 used L3+R3 + D-pad Left). StubHost's PumpMessagesOnCPUThread then calls
 // OrbisBackToMenuCpu() at vsync on the CPU thread, which stops the VM; main() writes the memory
@@ -709,7 +710,23 @@ static std::string orbis_console_survey()
   const unsigned long long hz = sceKernelGetCpuFrequency();
   const int cpumode = sceKernelGetCpumode();
   printf("[console] CPU: %llu Hz, cpumode %d\n", hz, cpumode);
-  snprintf(buf, sizeof(buf), " \xC2\xB7 CPU %.2f GHz, mode %d", static_cast<double>(hz) / 1e9, cpumode);
+  if (hz != 0)
+    snprintf(buf, sizeof(buf), " \xC2\xB7 CPU %.2f GHz, mode %d", static_cast<double>(hz) / 1e9, cpumode);
+  else
+  {
+    // vk-285-72: some consoles answer 0 here (every 12.00 one in the test reports, and some at 8.40
+    // and 10.01), which the header showed as "CPU 0.00 GHz". The kernel's own clock numbers go to
+    // boot.log for comparison; the header leaves the clock out rather than show a wrong one.
+    unsigned long long tsc = 0;
+    size_t len = sizeof(tsc);
+    const int tsc_rc = sysctlbyname("machdep.tsc_freq", &tsc, &len, nullptr, 0);
+    int clockrate = 0;
+    len = sizeof(clockrate);
+    const int rate_rc = sysctlbyname("hw.clockrate", &clockrate, &len, nullptr, 0);
+    printf("[console] CPU clock not reported; machdep.tsc_freq rc=%d %llu Hz, hw.clockrate rc=%d %d MHz\n", tsc_rc,
+           tsc_rc == 0 ? tsc : 0ULL, rate_rc, rate_rc == 0 ? clockrate : 0);
+    snprintf(buf, sizeof(buf), " \xC2\xB7 CPU mode %d", cpumode);
+  }
   info += buf;
   {
     char model[128] = {};
@@ -893,6 +910,12 @@ static void orbis_vk_environment()
   // third of R&C's frames ~15.7 ms late (vk-285-61's GPU trace: ~4.3 ms of GPU work, then the wait
   // for the display); with two images every late start cost a vblank, with three it has slack.
   if (orbis_flag("vk_renderer") && orbis_flag("vk_triple")) setenv("PS5VK_SWAPCHAIN_IMAGES", "3", 0);
+  // vk-285-72: texture uploads as GPU copies in the frame (CP DMA) instead of CPU copies at a
+  // submission split. PCSX2 records an update of a texture the frame already drew with into the
+  // frame's own command buffer; each such split was a step, and on a tester's original PS5 at 8.40
+  // every step waited about a vblank (Gran Turismo 4: 2.4-3 steps a frame, 25-29 ms). The live flag
+  // file vk_cpuupload puts the uploads back on the CPU while a game runs.
+  if (orbis_flag("vk_renderer")) setenv("PS5VK_GPU_UPLOAD", "1", 0);
 }
 #endif
 
@@ -1237,6 +1260,16 @@ int main()
   s_base_si.SetIntValue("EmuCore/GS", "Renderer", (s32)((g_use_gl_renderer && !g_sw_renderer) ? ORBIS_GPU_RENDERER : GSRendererType::SW));
   s_base_si.SetIntValue("EmuCore/GS", "extrathreads", g_sw_renderer ? 4 : 2); // eerec-285: PCSX2's key; "SWExtraThreads" never applied
   s_base_si.SetStringValue("EmuCore", "Filename", s_game_path.c_str()); // vk-285-30: the selector's pick
+  // vk-285-72: a USB keyboard on the PS2's USB port 1 and a USB mouse on port 2, fed from the PS5's own
+  // (orbis-shims/ProsperoKbdMouse.cpp), for the games that take them (Half-Life, Unreal Tournament, the
+  // online games' chat). The flag file nousbkbm leaves both ports empty; a game's settings file can set
+  // USB1/Type or USB2/Type itself (None to take one off).
+  if (!orbis_flag("nousbkbm"))
+  {
+    s_base_si.SetStringValue("USB1", "Type", "hidkbd");
+    s_base_si.SetStringValue("USB2", "Type", "hidmouse");
+  }
+  printf("[boot] USB keyboard and mouse %s\n", orbis_flag("nousbkbm") ? "off (flag nousbkbm)" : "on ports 1 and 2");
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
 
@@ -1452,6 +1485,9 @@ int main()
     if (pthread_create(&pad_thread, nullptr, orbis_pad_thread, nullptr) == 0)
       pthread_detach(pad_thread);
   }
+  // vk-285-72: the PS5's USB keyboard and mouse, read for the PS2's (orbis-shims/ProsperoKbdMouse.cpp).
+  if (!orbis_flag("nousbkbm"))
+    OrbisKbdMouseStart();
   orbis_prof_start();
   // Benchmark raw memory reads + arithmetic (isolates interpreter slowness).
   {

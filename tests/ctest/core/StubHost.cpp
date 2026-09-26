@@ -236,9 +236,11 @@ void OrbisApplyPinning(int mode);
 void OrbisEEProfStart(); // vk-285-8 (the port's orbis_eeprof.cpp): once, on this thread
 void OrbisWidescreenTick(); // vk-285-12 (pcsx2/OrbisWidescreen.cpp)
 #endif
+void OrbisKbdMousePump(); // vk-285-72 (the port's ProsperoKbdMouse.cpp)
 void Host::PumpMessagesOnCPUThread()
 {
 	OrbisCpuSample(0); // eerec-285: EE thread
+	OrbisKbdMousePump(); // vk-285-72: the PS5's USB keyboard and mouse into the PS2's USB HID devices
 #ifdef ORBIS_VULKAN
 	OrbisEEProfStart();
 	OrbisWidescreenTick();
@@ -343,13 +345,60 @@ int Host::LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs)
 	return lhs.size() > rhs.size() ? 1 : lhs.size() < rhs.size() ? -1 : 0;
 }
 
+// PS5 port (vk-285-72): the host's key codes are USB HID usages (page 7), which is what the console's
+// keyboard library reports (the port's ProsperoKbdMouse.cpp). The names are the ones the USB HID keyboard
+// device asks for (USB/usb-hid/usb-hid.cpp, s_qkeycode_names), so a key the console reports reaches the
+// PS2's keyboard as the same key. Consumer-page keys (media, browser) have no usage here.
+namespace
+{
+	struct OrbisHostKey
+	{
+		const char* name;
+		u32 usage;
+	};
+	constexpr OrbisHostKey s_orbis_host_keys[] = {
+		{"A", 0x04}, {"B", 0x05}, {"C", 0x06}, {"D", 0x07}, {"E", 0x08}, {"F", 0x09}, {"G", 0x0a}, {"H", 0x0b},
+		{"I", 0x0c}, {"J", 0x0d}, {"K", 0x0e}, {"L", 0x0f}, {"M", 0x10}, {"N", 0x11}, {"O", 0x12}, {"P", 0x13},
+		{"Q", 0x14}, {"R", 0x15}, {"S", 0x16}, {"T", 0x17}, {"U", 0x18}, {"V", 0x19}, {"W", 0x1a}, {"X", 0x1b},
+		{"Y", 0x1c}, {"Z", 0x1d}, {"1", 0x1e}, {"2", 0x1f}, {"3", 0x20}, {"4", 0x21}, {"5", 0x22}, {"6", 0x23},
+		{"7", 0x24}, {"8", 0x25}, {"9", 0x26}, {"0", 0x27}, {"Return", 0x28}, {"Escape", 0x29},
+		{"Backspace", 0x2a}, {"Tab", 0x2b}, {"Space", 0x2c}, {"Minus", 0x2d}, {"Equal", 0x2e},
+		{"BracketLeft", 0x2f}, {"BracketRight", 0x30}, {"Backslash", 0x31}, {"Semicolon", 0x33},
+		{"Apostrophe", 0x34}, {"Agrave", 0x35}, {"Comma", 0x36}, {"Period", 0x37}, {"Slash", 0x38},
+		{"Caps_lock", 0x39}, {"F1", 0x3a}, {"F2", 0x3b}, {"F3", 0x3c}, {"F4", 0x3d}, {"F5", 0x3e}, {"F6", 0x3f},
+		{"F7", 0x40}, {"F8", 0x41}, {"F9", 0x42}, {"F10", 0x43}, {"F11", 0x44}, {"F12", 0x45}, {"Print", 0x46},
+		{"Scroll_lock", 0x47}, {"Pause", 0x48}, {"Insert", 0x49}, {"Home", 0x4a}, {"PageUp", 0x4b},
+		{"Delete", 0x4c}, {"End", 0x4d}, {"PageDown", 0x4e}, {"Right", 0x4f}, {"Left", 0x50}, {"Down", 0x51},
+		{"Up", 0x52}, {"Num_lock", 0x53}, {"NumpadSlash", 0x54}, {"NumpadAsterisk", 0x55},
+		{"NumpadMinus", 0x56}, {"NumpadPlus", 0x57}, {"NumpadReturn", 0x58}, {"Numpad1", 0x59},
+		{"Numpad2", 0x5a}, {"Numpad3", 0x5b}, {"Numpad4", 0x5c}, {"Numpad5", 0x5d}, {"Numpad6", 0x5e},
+		{"Numpad7", 0x5f}, {"Numpad8", 0x60}, {"Numpad9", 0x61}, {"Numpad0", 0x62}, {"NumpadPeriod", 0x63},
+		{"Less", 0x64}, {"Compose", 0x65}, {"Power", 0x66}, {"NumpadEqual", 0x67}, {"Help", 0x75},
+		{"Menu", 0x76}, {"Front", 0x77}, {"Stop", 0x78}, {"Again", 0x79}, {"Undo", 0x7a}, {"Cut", 0x7b},
+		{"Copy", 0x7c}, {"Paste", 0x7d}, {"Find", 0x7e}, {"AudioMute", 0x7f}, {"VolumeUp", 0x80},
+		{"VolumeDown", 0x81}, {"NumpadComma", 0x85}, {"Ro", 0x87}, {"KatakanaHiragana", 0x88}, {"Yen", 0x89},
+		{"Henkan", 0x8a}, {"Muhenkan", 0x8b}, {"Hiragana", 0x93}, {"Sysrq", 0x9a}, {"Control", 0xe0},
+		{"Shift", 0xe1}, {"Alt", 0xe2}, {"Meta", 0xe3}, {"Control_r", 0xe4}, {"Shift_r", 0xe5}, {"Alt_r", 0xe6},
+	};
+} // namespace
+
 std::optional<u32> InputManager::ConvertHostKeyboardStringToCode(const std::string_view str)
 {
+	for (const OrbisHostKey& key : s_orbis_host_keys)
+	{
+		if (str == key.name)
+			return key.usage;
+	}
 	return std::nullopt;
 }
 
 std::optional<std::string> InputManager::ConvertHostKeyboardCodeToString(u32 code)
 {
+	for (const OrbisHostKey& key : s_orbis_host_keys)
+	{
+		if (code == key.usage)
+			return std::string(key.name);
+	}
 	return std::nullopt;
 }
 

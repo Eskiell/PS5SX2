@@ -202,8 +202,28 @@ extern std::atomic<int> g_orbis_widescreen, g_orbis_ws_active; // vk-285-12 (pcs
 void OrbisEEProfMark(); // vk-285-8 (the port's orbis_eeprof.cpp)
 void OrbisGSProfStart(); // vk-285-24: the same profiler on the GS thread (/data/PCSX2/gsprof)
 #endif
-// eerec-281: ms per second each thread spent waiting (TSC, calibrated against steady_clock every print)
-static void OrbisPrintLoad()
+// vk-285-72: the EE, GS and VU threads' loads over the last second, in percent, from the [load] line's
+// wait counters (1000 ms less the ms each thread waited). The perf line in settings.log, the [perf] line
+// and the FPS box showed PerformanceMetrics' per-thread CPU times, and on the console those gave EE, GS
+// and VU one and the same number every time (probably no per-thread CPU clock behind
+// pthread_getcpuclockid there; not checked). Valid once OrbisMeasureLoad has measured a second.
+static float s_orbis_load_ee = 0.0f, s_orbis_load_gs = 0.0f, s_orbis_load_vu = 0.0f;
+static bool s_orbis_load_valid = false;
+
+// eerec-281: ms per second each thread spent waiting (TSC, calibrated against steady_clock every second).
+// vk-285-72: measured once a second on the GS thread whether or not the [load] line prints.
+struct OrbisLoadMeasure
+{
+	bool measured = false;
+	double k = 0.0; // ms of the second per TSC tick
+	double v[10] = {};
+	double ee_wait = 0.0;
+	double sw_busy[16] = {};
+	u32 nsw = 0;
+};
+static OrbisLoadMeasure s_orbis_load_measure;
+
+static void OrbisMeasureLoad()
 {
 	static unsigned long long s_tsc = 0, s_prev[26] = {};
 	static auto s_t = std::chrono::steady_clock::now();
@@ -213,80 +233,97 @@ static void OrbisPrintLoad()
 	const unsigned long long cur[10] = {g_orbis_ee_waitgs_ticks, g_orbis_ee_stall_ticks, g_orbis_ee_vsyncq_ticks,
 		g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks, g_orbis_ee_throttle_ticks, g_orbis_gs_idle_ticks,
 		g_orbis_gs_swsync_ticks, g_orbis_vu_idle_ticks, 0};
-	const u32 nsw = std::min<u32>(PerformanceMetrics::GetGSSWThreadCount(), 16);
-	if (s_tsc != 0 && sec > 0.2)
+	OrbisLoadMeasure& m = s_orbis_load_measure;
+	m.nsw = std::min<u32>(PerformanceMetrics::GetGSSWThreadCount(), 16);
+	m.measured = s_tsc != 0 && sec > 0.2;
+	if (m.measured)
 	{
-		const double k = 1000.0 / static_cast<double>(tsc - s_tsc); // ms of each second per TSC tick
-		double v[10];
+		m.k = 1000.0 / static_cast<double>(tsc - s_tsc);
 		for (int i = 0; i < 9; i++)
-			v[i] = static_cast<double>(cur[i] - s_prev[i]) * k;
-		const double ee_wait = v[0] + v[1] + v[2] + v[3] + v[4] + v[5];
-		printf("[load] ms/s ee: busy=%.0f waitgs=%.0f ringfull=%.0f vsyncq=%.0f waitvu=%.0f vuring=%.0f throttle=%.0f | gs: busy=%.0f swsync=%.0f | vu: busy=%.0f | sw busy=",
-			1000.0 - ee_wait, v[0], v[1], v[2], v[3], v[4], v[5], 1000.0 - v[6], v[7], 1000.0 - v[8]);
-		for (u32 i = 0; i < nsw; i++)
-			printf("%s%.0f", i ? "/" : "", static_cast<double>(g_orbis_sw_busy_ticks[i] - s_prev[10 + i]) * k);
-		OrbisPrintCpu(); // eerec-285
-		printf("\n");
-		{
-			// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
-			// rec_nocount switch.
-			extern std::atomic<u32> g_orbis_rec_compiles, g_orbis_rec_discards, g_orbis_rec_page_resets,
-				g_orbis_rec_full_resets, g_orbis_rec_faults;
-			extern std::atomic<int> g_orbis_rec_nocount;
-			static u32 s_rec_prev[5] = {};
-			const u32 rec[5] = {g_orbis_rec_compiles.load(std::memory_order_relaxed),
-				g_orbis_rec_discards.load(std::memory_order_relaxed), g_orbis_rec_page_resets.load(std::memory_order_relaxed),
-				g_orbis_rec_faults.load(std::memory_order_relaxed), g_orbis_rec_full_resets.load(std::memory_order_relaxed)};
-			g_orbis_rec_nocount.store(OrbisFlag("rec_nocount") ? 1 : 0, std::memory_order_relaxed);
-			// vk-285-28: and how full each code cache is (MiB used/size), and the flexible memory left.
-			extern size_t OrbisRecEEUsed(size_t* size);
-			extern size_t OrbisRecIOPUsed(size_t* size);
-			extern size_t OrbisMVUUsed(int vu, size_t* size);
-			size_t ee_size = 0, iop_size = 0, vu0_size = 0, vu1_size = 0;
-			const size_t ee_used = OrbisRecEEUsed(&ee_size), iop_used = OrbisRecIOPUsed(&iop_size);
-			const size_t vu0_used = OrbisMVUUsed(0, &vu0_size), vu1_used = OrbisMVUUsed(1, &vu1_size);
-			unsigned long long flex = 0;
-			sceKernelAvailableFlexibleMemorySize(&flex);
-			const double mib = 1.0 / 1048576.0;
-			printf("[rec] compiles=%u discards=%u page_resets=%u faults=%u full_resets=%u nocount=%d | MiB ee %.1f/%.0f "
-				   "iop %.1f/%.0f vu0 %.1f/%.0f vu1 %.1f/%.0f sw %.1f | flex free %.0f\n",
-				rec[0] - s_rec_prev[0], rec[1] - s_rec_prev[1], rec[2] - s_rec_prev[2], rec[3] - s_rec_prev[3],
-				rec[4] - s_rec_prev[4], g_orbis_rec_nocount.load(std::memory_order_relaxed), ee_used * mib,
-				ee_size * mib, iop_used * mib, iop_size * mib, vu0_used * mib, vu0_size * mib, vu1_used * mib,
-				vu1_size * mib, GSCodeReserve::GetMemoryUsed() * mib, flex * mib);
-			std::memcpy(s_rec_prev, rec, sizeof(rec));
-		}
-		{
-			// vk-285-31: memory card activity this second (MemoryCardFile.cpp), when there was any.
-			extern std::atomic<u32> g_orbis_mcd_reads, g_orbis_mcd_writes, g_orbis_mcd_erases, g_orbis_mcd_flush_kib;
-			extern std::atomic<unsigned long long> g_orbis_mcd_ticks;
-			extern std::atomic<int> g_orbis_mcd_cached;
-			static u32 s_mcd_prev[4] = {};
-			static unsigned long long s_mcd_ticks_prev = 0;
-			const u32 mcd[4] = {g_orbis_mcd_reads.load(std::memory_order_relaxed),
-				g_orbis_mcd_writes.load(std::memory_order_relaxed), g_orbis_mcd_erases.load(std::memory_order_relaxed),
-				g_orbis_mcd_flush_kib.load(std::memory_order_relaxed)};
-			const unsigned long long mcd_ticks = g_orbis_mcd_ticks.load(std::memory_order_relaxed);
-			if (std::memcmp(mcd, s_mcd_prev, sizeof(mcd)) != 0 || mcd_ticks != s_mcd_ticks_prev)
-			{
-				printf("[mcd] reads=%u writes=%u erases=%u written_back=%u KiB | %.1f ms | cached slots %#x\n",
-					mcd[0] - s_mcd_prev[0], mcd[1] - s_mcd_prev[1], mcd[2] - s_mcd_prev[2], mcd[3] - s_mcd_prev[3],
-					static_cast<double>(mcd_ticks - s_mcd_ticks_prev) * k, g_orbis_mcd_cached.load(std::memory_order_relaxed));
-				std::memcpy(s_mcd_prev, mcd, sizeof(mcd));
-				s_mcd_ticks_prev = mcd_ticks;
-			}
-		}
-#ifdef ORBIS_VULKAN
-		OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
-		OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line
-#endif
+			m.v[i] = static_cast<double>(cur[i] - s_prev[i]) * m.k;
+		m.ee_wait = m.v[0] + m.v[1] + m.v[2] + m.v[3] + m.v[4] + m.v[5];
+		for (u32 i = 0; i < m.nsw; i++)
+			m.sw_busy[i] = static_cast<double>(g_orbis_sw_busy_ticks[i] - s_prev[10 + i]) * m.k;
+		const auto percent = [](double busy_ms) { return static_cast<float>(std::clamp(busy_ms / 10.0, 0.0, 100.0)); };
+		s_orbis_load_ee = percent(1000.0 - m.ee_wait);
+		s_orbis_load_gs = percent(1000.0 - m.v[6]);
+		s_orbis_load_vu = THREAD_VU1 ? percent(1000.0 - m.v[8]) : 0.0f;
+		s_orbis_load_valid = true;
 	}
 	for (int i = 0; i < 9; i++)
 		s_prev[i] = cur[i];
-	for (u32 i = 0; i < nsw; i++)
+	for (u32 i = 0; i < m.nsw; i++)
 		s_prev[10 + i] = g_orbis_sw_busy_ticks[i];
 	s_tsc = tsc;
 	s_t = now;
+}
+
+// The [load] line of the second OrbisMeasureLoad last measured, and the [rec]/[mcd] lines after it.
+static void OrbisPrintLoad()
+{
+	const OrbisLoadMeasure& m = s_orbis_load_measure;
+	if (!m.measured)
+		return;
+	const double* const v = m.v;
+	printf("[load] ms/s ee: busy=%.0f waitgs=%.0f ringfull=%.0f vsyncq=%.0f waitvu=%.0f vuring=%.0f throttle=%.0f | gs: busy=%.0f swsync=%.0f | vu: busy=%.0f | sw busy=",
+		1000.0 - m.ee_wait, v[0], v[1], v[2], v[3], v[4], v[5], 1000.0 - v[6], v[7], 1000.0 - v[8]);
+	for (u32 i = 0; i < m.nsw; i++)
+		printf("%s%.0f", i ? "/" : "", m.sw_busy[i]);
+	OrbisPrintCpu(); // eerec-285
+	printf("\n");
+	{
+		// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
+		// rec_nocount switch.
+		extern std::atomic<u32> g_orbis_rec_compiles, g_orbis_rec_discards, g_orbis_rec_page_resets,
+			g_orbis_rec_full_resets, g_orbis_rec_faults;
+		extern std::atomic<int> g_orbis_rec_nocount;
+		static u32 s_rec_prev[5] = {};
+		const u32 rec[5] = {g_orbis_rec_compiles.load(std::memory_order_relaxed),
+			g_orbis_rec_discards.load(std::memory_order_relaxed), g_orbis_rec_page_resets.load(std::memory_order_relaxed),
+			g_orbis_rec_faults.load(std::memory_order_relaxed), g_orbis_rec_full_resets.load(std::memory_order_relaxed)};
+		g_orbis_rec_nocount.store(OrbisFlag("rec_nocount") ? 1 : 0, std::memory_order_relaxed);
+		// vk-285-28: and how full each code cache is (MiB used/size), and the flexible memory left.
+		extern size_t OrbisRecEEUsed(size_t* size);
+		extern size_t OrbisRecIOPUsed(size_t* size);
+		extern size_t OrbisMVUUsed(int vu, size_t* size);
+		size_t ee_size = 0, iop_size = 0, vu0_size = 0, vu1_size = 0;
+		const size_t ee_used = OrbisRecEEUsed(&ee_size), iop_used = OrbisRecIOPUsed(&iop_size);
+		const size_t vu0_used = OrbisMVUUsed(0, &vu0_size), vu1_used = OrbisMVUUsed(1, &vu1_size);
+		unsigned long long flex = 0;
+		sceKernelAvailableFlexibleMemorySize(&flex);
+		const double mib = 1.0 / 1048576.0;
+		printf("[rec] compiles=%u discards=%u page_resets=%u faults=%u full_resets=%u nocount=%d | MiB ee %.1f/%.0f "
+			   "iop %.1f/%.0f vu0 %.1f/%.0f vu1 %.1f/%.0f sw %.1f | flex free %.0f\n",
+			rec[0] - s_rec_prev[0], rec[1] - s_rec_prev[1], rec[2] - s_rec_prev[2], rec[3] - s_rec_prev[3],
+			rec[4] - s_rec_prev[4], g_orbis_rec_nocount.load(std::memory_order_relaxed), ee_used * mib,
+			ee_size * mib, iop_used * mib, iop_size * mib, vu0_used * mib, vu0_size * mib, vu1_used * mib,
+			vu1_size * mib, GSCodeReserve::GetMemoryUsed() * mib, flex * mib);
+		std::memcpy(s_rec_prev, rec, sizeof(rec));
+	}
+	{
+		// vk-285-31: memory card activity this second (MemoryCardFile.cpp), when there was any.
+		extern std::atomic<u32> g_orbis_mcd_reads, g_orbis_mcd_writes, g_orbis_mcd_erases, g_orbis_mcd_flush_kib;
+		extern std::atomic<unsigned long long> g_orbis_mcd_ticks;
+		extern std::atomic<int> g_orbis_mcd_cached;
+		static u32 s_mcd_prev[4] = {};
+		static unsigned long long s_mcd_ticks_prev = 0;
+		const u32 mcd[4] = {g_orbis_mcd_reads.load(std::memory_order_relaxed),
+			g_orbis_mcd_writes.load(std::memory_order_relaxed), g_orbis_mcd_erases.load(std::memory_order_relaxed),
+			g_orbis_mcd_flush_kib.load(std::memory_order_relaxed)};
+		const unsigned long long mcd_ticks = g_orbis_mcd_ticks.load(std::memory_order_relaxed);
+		if (std::memcmp(mcd, s_mcd_prev, sizeof(mcd)) != 0 || mcd_ticks != s_mcd_ticks_prev)
+		{
+			printf("[mcd] reads=%u writes=%u erases=%u written_back=%u KiB | %.1f ms | cached slots %#x\n",
+				mcd[0] - s_mcd_prev[0], mcd[1] - s_mcd_prev[1], mcd[2] - s_mcd_prev[2], mcd[3] - s_mcd_prev[3],
+				static_cast<double>(mcd_ticks - s_mcd_ticks_prev) * m.k, g_orbis_mcd_cached.load(std::memory_order_relaxed));
+			std::memcpy(s_mcd_prev, mcd, sizeof(mcd));
+			s_mcd_ticks_prev = mcd_ticks;
+		}
+	}
+#ifdef ORBIS_VULKAN
+	OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
+	OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line
+#endif
 }
 void OrbisDiagTexture(const char* tag, GSTexture* t);
 
@@ -619,13 +656,18 @@ static void OrbisGLOSD()
 	if (dt >= 1.0)
 	{
 		s_fps = static_cast<unsigned>(static_cast<double>(s_count) / dt + 0.5);
-		OrbisPerfMinute(s_fps, PerformanceMetrics::GetSpeed(), PerformanceMetrics::GetCPUThreadUsage(),
-			PerformanceMetrics::GetGSThreadUsage(), PerformanceMetrics::GetVUThreadUsage()); // test build 1
-		if (g_orbis_perf || g_orbis_test_build > 0) // eerec-280; test build 1: always in testing builds
+		// vk-285-72: the loads come from the [load] line's counters (s_orbis_load_*), measured first; the
+		// line itself still prints after [perf].
+		const bool print = g_orbis_perf || g_orbis_test_build > 0; // eerec-280; test build 1: always in testing builds
+		OrbisMeasureLoad();
+		const float ee = s_orbis_load_valid ? s_orbis_load_ee : static_cast<float>(PerformanceMetrics::GetCPUThreadUsage());
+		const float gs = s_orbis_load_valid ? s_orbis_load_gs : PerformanceMetrics::GetGSThreadUsage();
+		const float vu = s_orbis_load_valid ? s_orbis_load_vu : PerformanceMetrics::GetVUThreadUsage();
+		OrbisPerfMinute(s_fps, PerformanceMetrics::GetSpeed(), ee, gs, vu); // test build 1
+		if (print)
 		{
 			printf("[perf] fps=%u vfreq=%.2f speed=%.0f ee=%.0f gs=%.0f vu=%.0f ft=%.1f/%.1f/%.1f sw=", s_fps,
-				GetVerticalFrequency(), PerformanceMetrics::GetSpeed(), PerformanceMetrics::GetCPUThreadUsage(),
-				PerformanceMetrics::GetGSThreadUsage(), PerformanceMetrics::GetVUThreadUsage(),
+				GetVerticalFrequency(), PerformanceMetrics::GetSpeed(), ee, gs, vu,
 				PerformanceMetrics::GetMinimumFrameTime(), PerformanceMetrics::GetAverageFrameTime(),
 				PerformanceMetrics::GetMaximumFrameTime());
 			for (u32 i = 0; i < PerformanceMetrics::GetGSSWThreadCount(); i++)
@@ -648,11 +690,11 @@ static void OrbisGLOSD()
 		s_orbis_label_frames--;
 		snprintf(text, sizeof(text), "%s", s_orbis_modes[s_orbis_mode].name);
 	}
-	else if (s_orbis_fps_box && g_orbis_perf) // eerec-280
+	else if (s_orbis_fps_box && g_orbis_perf) // eerec-280; vk-285-72: the [load] line's loads
 		snprintf(text, sizeof(text), "%u FPS EE%u GS%u VU%u", s_fps,
-			static_cast<unsigned>(PerformanceMetrics::GetCPUThreadUsage() + 0.5),
-			static_cast<unsigned>(PerformanceMetrics::GetGSThreadUsage() + 0.5f),
-			static_cast<unsigned>(PerformanceMetrics::GetVUThreadUsage() + 0.5f));
+			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_ee : PerformanceMetrics::GetCPUThreadUsage()) + 0.5),
+			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_gs : PerformanceMetrics::GetGSThreadUsage()) + 0.5f),
+			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_vu : PerformanceMetrics::GetVUThreadUsage()) + 0.5f));
 	else if (s_orbis_fps_box)
 		snprintf(text, sizeof(text), "FPS %u", s_fps);
 	else
