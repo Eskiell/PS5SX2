@@ -96,6 +96,12 @@ public:
 	static constexpr float kSpread = 8.0f;    // field distance (pixels) that spans half the range
 };
 
+// Test build 1 (vk-285-55): the testing builds' watermark over the game: `line1` big (bold) and
+// `line2` under it, white with a soft shadow at the opacities given, sized for a 2160-line screen.
+// RGBA8 pixels with R in the low byte and straight alpha, `w` x `h`.
+void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, float alpha1, float alpha2,
+	std::vector<uint32_t>& rgba, int& w, int& h);
+
 // PromptFont's PlayStation glyphs (as PCSX2's IconsPromptFont.h names them).
 namespace icon
 {

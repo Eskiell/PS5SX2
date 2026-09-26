@@ -359,4 +359,86 @@ void Fonts::Raster(const char* utf8, float px, std::vector<uint8_t>& alpha, int&
 		prev = cp;
 	}
 }
+
+// Test build 1 (vk-285-55): see fe_text.h.
+void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, float alpha1, float alpha2,
+	std::vector<uint32_t>& rgba, int& w, int& h)
+{
+	// The text in white; bold made by thickening Roboto Regular's coverage (a small max filter).
+	struct Line
+	{
+		std::vector<uint8_t> a;
+		int w = 0, h = 0, base = 0;
+	};
+	auto raster = [&](const char* text, float px, int bold) {
+		Line l;
+		if (!text || !*text)
+			return l;
+		fonts.Raster(text, px, l.a, l.w, l.h, l.base);
+		if (bold > 0)
+		{
+			// Grow the image by `bold` on each side, then spread each row and column by `bold`.
+			const int W = l.w + 2 * bold, H = l.h + 2 * bold;
+			std::vector<uint8_t> g(static_cast<size_t>(W) * H, 0), t(g.size(), 0);
+			for (int y = 0; y < l.h; y++)
+				std::memcpy(&g[static_cast<size_t>(y + bold) * W + bold], &l.a[static_cast<size_t>(y) * l.w], static_cast<size_t>(l.w));
+			for (int y = 0; y < H; y++)
+				for (int x = 0; x < W; x++)
+				{
+					uint8_t m = 0;
+					for (int dx = -bold; dx <= bold; dx++)
+						if (x + dx >= 0 && x + dx < W)
+							m = std::max(m, g[static_cast<size_t>(y) * W + x + dx]);
+					t[static_cast<size_t>(y) * W + x] = m;
+				}
+			for (int y = 0; y < H; y++)
+				for (int x = 0; x < W; x++)
+				{
+					uint8_t m = 0;
+					for (int dy = -bold; dy <= bold; dy++)
+						if (y + dy >= 0 && y + dy < H)
+							m = std::max(m, t[static_cast<size_t>(y + dy) * W + x]);
+					g[static_cast<size_t>(y) * W + x] = m;
+				}
+			l.a.swap(g);
+			l.w = W;
+			l.h = H;
+			l.base += bold;
+		}
+		return l;
+	};
+	const Line a = raster(line1, 300.0f, 5), b = raster(line2, 76.0f, 1);
+	const int shadow = 5, gap = 18, pad = 12;
+	w = std::max(a.w, b.w) + 2 * pad + shadow;
+	h = a.h + (b.h ? gap + b.h : 0) + 2 * pad + shadow;
+	// Coverage of the text and of its shadow, then straight-alpha RGBA: white text over black shadow.
+	std::vector<float> text(static_cast<size_t>(w) * h, 0.0f), shade(text.size(), 0.0f);
+	auto put = [&](const Line& l, int ox, int oy, float alpha) {
+		for (int y = 0; y < l.h; y++)
+			for (int x = 0; x < l.w; x++)
+			{
+				const float c = l.a[static_cast<size_t>(y) * l.w + x] / 255.0f * alpha;
+				if (c <= 0.0f)
+					continue;
+				float& t0 = text[static_cast<size_t>(oy + y) * w + ox + x];
+				t0 = std::max(t0, c);
+				float& s0 = shade[static_cast<size_t>(oy + y + shadow) * w + ox + x + shadow];
+				s0 = std::max(s0, c * 0.6f);
+			}
+	};
+	put(a, pad + (w - 2 * pad - shadow - a.w) / 2, pad, alpha1);
+	if (b.h)
+		put(b, pad + (w - 2 * pad - shadow - b.w) / 2, pad + a.h + gap, alpha2);
+	rgba.assign(static_cast<size_t>(w) * h, 0u);
+	for (size_t i = 0; i < rgba.size(); i++)
+	{
+		const float t = text[i], s = shade[i];
+		const float out_a = t + s * (1.0f - t);
+		if (out_a <= 0.0f)
+			continue;
+		const uint32_t v = static_cast<uint32_t>(std::lround(255.0f * t / out_a)); // white over black
+		const uint32_t a8 = static_cast<uint32_t>(std::lround(255.0f * std::min(out_a, 1.0f)));
+		rgba[i] = (a8 << 24) | (v << 16) | (v << 8) | v;
+	}
+}
 } // namespace fe

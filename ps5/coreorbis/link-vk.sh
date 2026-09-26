@@ -41,6 +41,9 @@ VK=${PS5_VULKAN_DIR:?set PS5_VULKAN_DIR to a built Swordpdf/PS5HB_Vulkan checkou
 GLSLANG=${GLSLANG_BUILD:-$PS5SX2_DEPS/glslang/build-ps5}
 OUT=${VK_OUT:-$port/build-vk}
 TAG=${ORBIS_BUILD_TAG:-vk-285-1}
+# Test build 1 (vk-285-55): ORBIS_TEST_BUILD=N makes testing build N (the TESTING watermark on the
+# shelf and over the game, "Test build N" in the logs and on the settings page); 0 or unset, a normal one.
+TEST_BUILD=${ORBIS_TEST_BUILD:-0}
 LLD=${LLD:-ld.lld-18}
 OBJCOPY=${OBJCOPY:-llvm-objcopy-18}
 NM=${NM:-llvm-nm-18}
@@ -69,7 +72,7 @@ mkdir -p "$OUT/build/obj" "$OUT/app/sce_sys" "$OUT/app/sce_module" "$OUT/app/ass
 sh "$NATIVE/tooling/prospero-clang18" \
   -std=c++20 -O2 -march=znver2 -msse4.1 -mavx2 -D_M_X86=1 -D__POSIX__=1 \
   -DOVERRIDE_HOST_PAGE_SIZE=0x4000 -DOVERRIDE_HOST_CACHE_LINE_SIZE=64 \
-  -DORBIS_VULKAN=1 -DORBIS_BUILD_TAG="\"$TAG\"" \
+  -DORBIS_VULKAN=1 -DORBIS_BUILD_TAG="\"$TAG\"" -DORBIS_TEST_BUILD="$TEST_BUILD" \
   -DORBIS_DRIVER_REV="\"$DRIVER_REV\"" -DORBIS_PCSX2_REV="\"$PCSX2_REV\"" \
   -Wno-macro-redefined -Wno-unused-function -include common/Threading.h \
   -I"$here/include-orbis" -I"$PCSX2" -I"$PCSX2/pcsx2" \
@@ -90,7 +93,7 @@ for item in app_crt app_cpp_runtime; do
     -ffunction-sections -fdata-sections \
     -c "$NATIVE/tooling/native/$item.cpp" -o "$OUT/build/obj/$item.o"
 done
-echo "[link-vk] main-boot ($TAG) and crt objects OK"
+echo "[link-vk] main-boot ($TAG, test build $TEST_BUILD) and crt objects OK"
 
 # 2. The port's objects: exactly Makefile.vk's list, in its order.
 make -C "$here" -f Makefile.vk -s objects.txt PCSX2="$PCSX2" RYML="$RYML" PS5_PAYLOAD_SDK="$SDK"

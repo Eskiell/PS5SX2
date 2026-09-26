@@ -27,6 +27,8 @@ struct AppConfig
 	std::string build_tag;   // shown small in the corner
 	int preselect = 0;       // the game selected at start
 	SoundSink* sound = nullptr; // told about steps and the launch (may be null)
+	int test_build = 0;          // test build 1 (vk-285-55): > 0 draws TESTING and build_label mid-screen
+	std::string build_label;     // "Test build 1 · vk-285-55"
 };
 
 class App

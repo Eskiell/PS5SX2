@@ -637,6 +637,97 @@ static void sys_notify(const char* msg)
 #endif
 #endif
 
+// Test build 1 (vk-285-55): link-vk.sh's ORBIS_TEST_BUILD=N makes testing build N. It says so on
+// the shelf and over the game (the TESTING watermark), in the logs and on the settings page, which
+// also offers the logs as one file for the testers' Discord. 0: a normal build.
+#ifndef ORBIS_TEST_BUILD
+#define ORBIS_TEST_BUILD 0
+#endif
+extern "C" int g_orbis_test_build = ORBIS_TEST_BUILD;
+// The in-game watermark (GSRenderer.cpp OrbisWatermark), made once the game is picked.
+std::vector<uint32_t> g_orbis_watermark;
+int g_orbis_watermark_w = 0, g_orbis_watermark_h = 0;
+
+// "Test build 1 · vk-285-55", or the plain tag.
+static std::string orbis_build_label()
+{
+  if (g_orbis_test_build <= 0)
+    return ORBIS_BUILD_TAG;
+  return "Test build " + std::to_string(g_orbis_test_build) + " \xC2\xB7 " ORBIS_BUILD_TAG;
+}
+
+// Test build 1: what the console is, for the logs. Only calls every app may make; the SoC id
+// call gets a pointer too, so it works whichever of the two forms it has (the value comes back
+// either as the result or through the pointer).
+extern "C" {
+int sceKernelGetProsperoSystemSwVersion(void* version);
+unsigned long long sceKernelGetCpuFrequency(void);
+int sceKernelGetMainSocId(unsigned int* id);
+int sceKernelGetCpumode(void);
+int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, const void* newp, size_t newlen);
+}
+static std::string s_console_info; // "firmware 11.40 · SoC ... · CPU ..." (one line)
+
+static std::string orbis_console_survey()
+{
+  std::string info;
+  // The firmware: {size_t size = 0x28; char text[0x1C]; uint32 version}, as on the PS4. The buffer
+  // is bigger than that in case the console's structure is.
+  alignas(8) unsigned char sw[256] = {};
+  *reinterpret_cast<unsigned long long*>(sw) = 0x28;
+  const int sw_rc = sceKernelGetProsperoSystemSwVersion(sw);
+  char fw_text[0x1D] = {};
+  memcpy(fw_text, sw + 8, 0x1C);
+  unsigned int fw_ver = 0;
+  memcpy(&fw_ver, sw + 0x24, 4);
+  printf("[console] firmware: rc=%#x text=\"%s\" version=%#x\n", (unsigned)sw_rc, fw_text, fw_ver);
+  char buf[160];
+  if (sw_rc == 0 && fw_text[0])
+  {
+    // "11.40", from "11.400.001" or similar.
+    std::string t = fw_text;
+    const size_t dot = t.find('.');
+    if (dot != std::string::npos && t.size() >= dot + 3)
+      t = t.substr(0, dot + 3);
+    while (t.size() > 1 && t[0] == '0' && t[1] != '.')
+      t.erase(0, 1);
+    info += "firmware " + t;
+  }
+  else
+  {
+    snprintf(buf, sizeof(buf), "firmware ? (rc %#x)", (unsigned)sw_rc);
+    info += buf;
+  }
+  unsigned int soc_out = 0;
+  const int soc_rc = sceKernelGetMainSocId(&soc_out);
+  printf("[console] main SoC id: result=%#x out=%#x\n", (unsigned)soc_rc, soc_out);
+  snprintf(buf, sizeof(buf), " \xC2\xB7 SoC %#x/%#x", (unsigned)soc_rc, soc_out);
+  info += buf;
+  const unsigned long long hz = sceKernelGetCpuFrequency();
+  const int cpumode = sceKernelGetCpumode();
+  printf("[console] CPU: %llu Hz, cpumode %d\n", hz, cpumode);
+  snprintf(buf, sizeof(buf), " \xC2\xB7 CPU %.2f GHz, mode %d", static_cast<double>(hz) / 1e9, cpumode);
+  info += buf;
+  {
+    char model[128] = {};
+    size_t len = sizeof(model) - 1;
+    if (sysctlbyname("hw.model", model, &len, nullptr, 0) == 0 && model[0])
+    {
+      printf("[console] hw.model: %s\n", model);
+      info += std::string(" (") + model + ")";
+    }
+    else
+      printf("[console] hw.model: unavailable (errno %d)\n", errno);
+    int sdk = 0;
+    len = sizeof(sdk);
+    if (sysctlbyname("kern.sdk_version", &sdk, &len, nullptr, 0) == 0)
+      printf("[console] kern.sdk_version: %#x\n", (unsigned)sdk);
+  }
+  printf("[console] %s\n", info.c_str());
+  fflush(stdout);
+  return info;
+}
+
 // vk-285-48: at vsync on the CPU thread (StubHost.cpp, request 3): stop the VM. Execute returns at
 // the next event test and main() takes it from there (orbis_back_to_menu).
 void OrbisBackToMenuCpu()
@@ -683,10 +774,36 @@ static void orbis_back_to_menu()
 }
 
 #ifdef ORBIS_VULKAN
+// Test build 1 (vk-285-55): the USB folders games are listed from, looked up before the jailbreak
+// (for the cover prefetch; the sandbox may not show the drives yet) and again after it.
+static std::vector<std::string> s_usb_dirs;
+static void orbis_scan_usb(const char* when)
+{
+  s_usb_dirs = orbis_usb_game_dirs(when);
+}
+
+// Test build 1: the logs report's first lines (the settings page's Download logs).
+static std::string orbis_report_header()
+{
+  std::string h = "Build: " + orbis_build_label();
+#if defined(ORBIS_DRIVER_REV) && defined(ORBIS_PCSX2_REV)
+  h += " (sources: driver " ORBIS_DRIVER_REV ", pcsx2 " ORBIS_PCSX2_REV ")";
+#endif
+  h += "\nConsole: " + (s_console_info.empty() ? std::string("not surveyed yet") : s_console_info) + "\n";
+  return h;
+}
+
 // The frontend's folders (vk-285-44: used twice, for the cover prefetch and for the shelf).
 static OrbisFrontendPaths orbis_frontend_paths(bool allow_download)
 {
   OrbisFrontendPaths fe;
+  // Test build 1 (vk-285-55): USB drives, the testing label and the logs download.
+  fe.usb_dirs = s_usb_dirs;
+  fe.usb_list = OrbisDir("cache") + "/usb-games.txt";
+  fe.test_build = g_orbis_test_build;
+  fe.build_label = orbis_build_label();
+  fe.logs_dir = OrbisDir("logs");
+  fe.report_header = orbis_report_header();
   fe.games_dir = OrbisDir("games");
   fe.top_dir = "/data/PCSX2";
   fe.settings_dir = "/data/PCSX2/settings";
@@ -805,10 +922,12 @@ int main()
   fprintf(stderr, "[boot] stderr-ok\n");
   printf("[boot] main=%p\n", (void*)&main);
   printf("[boot] build=" ORBIS_BUILD_TAG "\n");
+  if (g_orbis_test_build > 0)
+    printf("[boot] testing build: %s\n", orbis_build_label().c_str()); // test build 1 (vk-285-55)
 #ifdef ORBIS_VULKAN
   orbis_event_log_init(OrbisLogPath("settings.log")); // vk-285-51
 #endif
-  orbis_eventf("app start: %s (pid %d)", ORBIS_BUILD_TAG, (int)getpid());
+  orbis_eventf("app start: %s (pid %d)", orbis_build_label().c_str(), (int)getpid());
   {
     // vk-285-51: the crash printer (orbis-shims/ProsperoCrash.cpp) from the start, so the shelf and
     // the settings page's thread are covered too; it was installed only just before PCSX2 started.
@@ -856,7 +975,7 @@ int main()
 
   // On-screen debug overlay (VideoOut canvas, separate thread).
   ps5::debug::set_line(1, "main started");
-  sys_notify("PS5SX2: starting"); // vk-285-50: the new name
+  sys_notify(g_orbis_test_build > 0 ? "PS5SX2 (testing build): starting" : "PS5SX2: starting"); // vk-285-50: the new name
   // vk-285-44: only the cover downloads run before the HEN jailbreak. HTTPS from the frontend
   // failed after it (vk-285-41/42: the handshake to raw.githubusercontent.com hung, or ended in
   // 0x8095F00C, "unknown CA") and worked before it (vk-285-43, and the user's Twiso, which fetches
@@ -868,6 +987,7 @@ int main()
   bool frontend_ran = false;
 #ifdef ORBIS_VULKAN
   orbis_log_flag_access("before the jailbreak");
+  orbis_scan_usb("before the jailbreak"); // test build 1: whether the sandbox shows USB drives yet
   if (!orbis_flag("nofrontend") && !orbis_flag("nomenu") && !orbis_flag("nocoverdl"))
     orbis_frontend_prefetch_covers(orbis_frontend_paths(true), 30.0, sys_notify);
 #endif
@@ -885,6 +1005,9 @@ int main()
 #ifdef ORBIS_VULKAN
   orbis_log_flag_access("after the jailbreak");
 #endif
+  // Test build 1 (vk-285-55): what the console is, in boot.log and the settings log.
+  s_console_info = orbis_console_survey();
+  orbis_eventf("console: %s", s_console_info.c_str());
   // geteuid() may keep reporting 1 even with working creds; the JIT page
   // probe is the ground truth for privilege on this firmware.
   if (orbis_probe_jit())
@@ -990,8 +1113,9 @@ int main()
   // with the nofrontend flag.
   // vk-285-50: the settings page (frontend/fe_web.cpp) for phones and PCs, before the shelf that
   // shows its QR code; it keeps running in the game. The nowebui flag leaves it off.
+  orbis_scan_usb("after the jailbreak"); // test build 1: games on USB drives
   if (!orbis_flag("nowebui"))
-    orbis_web_start(orbis_frontend_paths(false), ORBIS_BUILD_TAG);
+    orbis_web_start(orbis_frontend_paths(false), orbis_build_label().c_str());
   if (!orbis_flag("nofrontend") && !orbis_flag("nomenu"))
     s_game_path = orbis_frontend_run(orbis_frontend_paths(false), ORBIS_BUILD_TAG, &frontend_ran);
 #endif
@@ -1018,9 +1142,26 @@ int main()
   printf("[boot] game: %s\n[boot] game settings: %s (%s)\n", s_game_path.c_str(), s_game_ini_path.c_str(),
     access(s_game_ini_path.c_str(), F_OK) == 0 ? "found" : "none");
   fflush(stdout);
-  orbis_eventf("game start: %s | its settings: %s | all games (gs.ini): %s", // vk-285-51
-    s_game_path.substr(s_game_path.rfind('/') + 1).c_str(), orbis_ini_summary(s_game_ini_path).c_str(),
-    orbis_ini_summary("/data/PCSX2/gs.ini").c_str());
+  {
+    // Test build 1 (vk-285-55): where the image is, when it isn't in games/ (a USB drive, say).
+    const std::string dir = s_game_path.substr(0, s_game_path.rfind('/'));
+    const std::string from = dir == OrbisDir("games") ? std::string() : " (from " + dir + ")";
+    orbis_eventf("game start: %s%s | its settings: %s | all games (gs.ini): %s", // vk-285-51
+      s_game_path.substr(s_game_path.rfind('/') + 1).c_str(), from.c_str(), orbis_ini_summary(s_game_ini_path).c_str(),
+      orbis_ini_summary("/data/PCSX2/gs.ini").c_str());
+  }
+#ifdef ORBIS_VULKAN
+  if (g_orbis_test_build > 0)
+  {
+    // Test build 1 (vk-285-55): the watermark over the game (GSRenderer.cpp OrbisWatermark):
+    // TESTING and the build, faint, in the middle of the screen.
+    const std::string label = orbis_build_label();
+    const bool wm = orbis_frontend_watermark("TESTING", label.c_str(), 0.20f, 0.45f, g_orbis_watermark,
+      g_orbis_watermark_w, g_orbis_watermark_h);
+    printf("[boot] testing watermark: %s (%dx%d)\n", wm ? "ready" : "no font", g_orbis_watermark_w, g_orbis_watermark_h);
+    fflush(stdout);
+  }
+#endif
 
   g_orbis_sw_on_gl = g_sw_renderer && orbis_flag("swgl");
   // SW path: CPU GSDeviceOrbis + debug overlay presents, unless swgl (GSDeviceOGL presents the SW frames).

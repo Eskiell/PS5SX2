@@ -37,6 +37,8 @@ extern "C" int sceKernelAvailableFlexibleMemorySize(unsigned long long* size); /
 #include <cstring>
 #include <string>
 #include <unistd.h>
+#include <cmath>  // test build 1 (vk-285-55)
+#include <vector>
 
 static void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename);
 
@@ -532,6 +534,78 @@ static void OrbisLiveTune()
 	OrbisApplyMode(mode >= 0 ? mode : s_orbis_mode, mode >= 0);
 }
 
+// Test build 1 (vk-285-55): main-boot.cpp's build number (0: not a testing build) and the watermark
+// it rasterized once the game was picked; the settings log's writer (frontend/fe_ps5.cpp).
+extern "C" int g_orbis_test_build;
+extern std::vector<u32> g_orbis_watermark;
+extern int g_orbis_watermark_w, g_orbis_watermark_h;
+extern "C" void orbis_event_log(const char* line) __attribute__((weak));
+
+// Test build 1: once a minute, the minute's frame rate, speed and thread loads on one line of the
+// settings log (logs/settings.log), so a report shows how a game ran without reading the per-second
+// [perf] lines. Fed once a second from OrbisGLOSD.
+static void OrbisPerfMinute(unsigned fps, float speed, float ee, float gs, float vu)
+{
+	static unsigned s_n = 0, s_min = ~0u, s_max = 0, s_slow = 0;
+	static double s_fps = 0, s_speed = 0, s_ee = 0, s_gs = 0, s_vu = 0;
+	s_n++;
+	s_fps += fps;
+	s_speed += speed;
+	s_ee += ee;
+	s_gs += gs;
+	s_vu += vu;
+	s_min = std::min(s_min, fps);
+	s_max = std::max(s_max, fps);
+	s_slow += speed < 95.0f ? 1 : 0;
+	if (s_n < 60)
+		return;
+	if (orbis_event_log)
+	{
+		char line[256];
+		snprintf(line, sizeof(line),
+			"perf, last %u s: %.1f fps (min %u, max %u), speed %.0f%%, below 95%% for %u s; EE %.0f%% GS %.0f%% VU %.0f%%; %dx",
+			s_n, s_fps / s_n, s_min, s_max, s_speed / s_n, s_slow, s_ee / s_n, s_gs / s_n, s_vu / s_n,
+			static_cast<int>(GSConfig.UpscaleMultiplier));
+		orbis_event_log(line);
+	}
+	s_n = s_slow = s_max = 0;
+	s_min = ~0u;
+	s_fps = s_speed = s_ee = s_gs = s_vu = 0;
+}
+
+#ifdef ORBIS_VULKAN
+void OrbisVkPresentBlend(GSTexture* tex, const GSVector4& sRect, const GSVector4& dRect); // GSDeviceVK.cpp
+
+// Test build 1: the TESTING watermark in the middle of the game's picture, faint (its opacity is in
+// the image), sized for the display's height. The texture is made once per GS device.
+static void OrbisWatermark()
+{
+	if (g_orbis_test_build <= 0 || g_orbis_watermark.empty() || !g_gs_device ||
+		g_gs_device->GetRenderAPI() != RenderAPI::Vulkan)
+		return;
+	static GSTexture* s_tex = nullptr;
+	static GSDevice* s_dev = nullptr;
+	const int w = g_orbis_watermark_w, h = g_orbis_watermark_h;
+	if (s_dev != g_gs_device.get())
+	{
+		s_dev = g_gs_device.get();
+		s_tex = s_dev->CreateTexture(w, h, 1, GSTexture::Format::Color);
+		if (s_tex)
+			s_tex->Update(GSVector4i(0, 0, w, h), g_orbis_watermark.data(), w * 4);
+		printf("[present] testing watermark %dx%d: %s\n", w, h, s_tex ? "on" : "no texture");
+		fflush(stdout);
+	}
+	if (!s_tex)
+		return;
+	const float ww = static_cast<float>(g_gs_device->GetWindowWidth());
+	const float wh = static_cast<float>(g_gs_device->GetWindowHeight());
+	const float k = wh / 2160.0f;
+	const float dw = static_cast<float>(w) * k, dh = static_cast<float>(h) * k;
+	const float x0 = std::floor((ww - dw) * 0.5f), y0 = std::floor((wh - dh) * 0.5f);
+	OrbisVkPresentBlend(s_tex, GSVector4(0.0f, 0.0f, 1.0f, 1.0f), GSVector4(x0, y0, x0 + dw, y0 + dh));
+}
+#endif
+
 static void OrbisGLOSD()
 {
 	if (!s_orbis_gl || !g_gs_device)
@@ -545,7 +619,9 @@ static void OrbisGLOSD()
 	if (dt >= 1.0)
 	{
 		s_fps = static_cast<unsigned>(static_cast<double>(s_count) / dt + 0.5);
-		if (g_orbis_perf) // eerec-280
+		OrbisPerfMinute(s_fps, PerformanceMetrics::GetSpeed(), PerformanceMetrics::GetCPUThreadUsage(),
+			PerformanceMetrics::GetGSThreadUsage(), PerformanceMetrics::GetVUThreadUsage()); // test build 1
+		if (g_orbis_perf || g_orbis_test_build > 0) // eerec-280; test build 1: always in testing builds
 		{
 			printf("[perf] fps=%u vfreq=%.2f speed=%.0f ee=%.0f gs=%.0f vu=%.0f ft=%.1f/%.1f/%.1f sw=", s_fps,
 				GetVerticalFrequency(), PerformanceMetrics::GetSpeed(), PerformanceMetrics::GetCPUThreadUsage(),
@@ -1566,6 +1642,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 					s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
 			}
 
+#ifdef ORBIS_VULKAN
+			OrbisWatermark(); // test build 1 (vk-285-55): under the FPS box
+#endif
 			OrbisGLOSD(); // eerec-278
 			if (s_orbis_gl && g_orbis_diag) // eerec-280
 				OrbisSampleWindow(); // eerec-279 (every 120th call)

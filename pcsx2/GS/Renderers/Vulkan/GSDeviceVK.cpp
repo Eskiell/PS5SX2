@@ -3471,6 +3471,9 @@ void GSDeviceVK::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, const GS
 
 #ifdef ORBIS_VULKAN
 extern float g_orbis_present_param[4]; // GSRenderer.cpp (live.ini): x = FSR sharpening 0..1, y = split x in pixels
+// Test build 1 (vk-285-55): the COPY present shader alpha-blended, for the testing watermark. A file
+// static, not a member, so GSDeviceVK's layout (compiled into many objects) stays as it was.
+static VkPipeline s_orbis_present_blend = VK_NULL_HANDLE;
 #endif
 
 void GSDeviceVK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
@@ -3489,6 +3492,27 @@ void GSDeviceVK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	DoStretchRect(static_cast<GSTextureVK*>(sTex), sRect, static_cast<GSTextureVK*>(dTex), dRect,
 		m_present[static_cast<int>(shader)], filter, true);
 }
+
+#ifdef ORBIS_VULKAN
+void GSDeviceVK::OrbisPresentBlend(GSTexture* sTex, const GSVector4& sRect, const GSVector4& dRect)
+{
+	if (s_orbis_present_blend == VK_NULL_HANDLE || !sTex)
+		return;
+	DisplayConstantBuffer cb;
+	cb.SetSource(sRect, sTex->GetSize());
+	cb.SetTarget(dRect, GSVector2i(GetWindowWidth(), GetWindowHeight()));
+	cb.SetTime(0.0f);
+	SetUtilityPushConstants(&cb, sizeof(cb));
+	DoStretchRect(static_cast<GSTextureVK*>(sTex), sRect, nullptr, dRect, s_orbis_present_blend, Biln, true);
+}
+
+// For GSRenderer.cpp, which doesn't include this header.
+void OrbisVkPresentBlend(GSTexture* tex, const GSVector4& sRect, const GSVector4& dRect)
+{
+	if (GSDeviceVK* dev = GSDeviceVK::GetInstance())
+		dev->OrbisPresentBlend(tex, sRect, dRect);
+}
+#endif
 
 void GSDeviceVK::DrawMultiStretchRects(
 	const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvertSelector shader)
@@ -4786,6 +4810,27 @@ bool GSDeviceVK::CompilePresentPipelines()
 		Vulkan::SetObjectName(m_device, m_present[index], "Present pipeline %d", i);
 	}
 
+#ifdef ORBIS_VULKAN
+	// Test build 1 (vk-285-55): the COPY shader again, alpha-blended over the frame, for the testing
+	// watermark. Needs proper testing on other drivers; the PS5 driver blends the shelf's UI the same way.
+	{
+		VkShaderModule ps = GetUtilityFragmentShader(*shader, ShaderEntryPoint(PresentShader::COPY));
+		if (ps != VK_NULL_HANDLE)
+		{
+			gpb.SetFragmentShader(ps);
+			gpb.SetBlendAttachment(0, true, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
+				VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD);
+			s_orbis_present_blend = gpb.Create(m_device, g_vulkan_shader_cache->GetPipelineCache(true), false);
+			vkDestroyShaderModule(m_device, ps, nullptr);
+			gpb.SetNoBlendingState();
+		}
+		if (s_orbis_present_blend != VK_NULL_HANDLE)
+			Vulkan::SetObjectName(m_device, s_orbis_present_blend, "Present blend pipeline (watermark)");
+		else
+			Console.Warning("VK: the watermark's blended present pipeline couldn't be made");
+	}
+#endif
+
 	return true;
 }
 
@@ -5260,6 +5305,13 @@ void GSDeviceVK::DestroyResources()
 		if (it != VK_NULL_HANDLE)
 			vkDestroyPipeline(m_device, it, nullptr);
 	}
+#ifdef ORBIS_VULKAN
+	if (s_orbis_present_blend != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(m_device, s_orbis_present_blend, nullptr);
+		s_orbis_present_blend = VK_NULL_HANDLE;
+	}
+#endif
 	for (const auto& pipe : m_convert)
 	{
 		if (pipe != VK_NULL_HANDLE)

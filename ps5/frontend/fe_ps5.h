@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 struct OrbisFrontendPaths
 {
@@ -19,7 +21,26 @@ struct OrbisFrontendPaths
 	bool allow_download = true;
 	bool sound = true;        // the shelf's key sounds (vk-285-47; off with the nomenusound flag)
 	std::string settings_log; // vk-285-51: logs/settings.log, what the settings page changed
+	// Test build 1 (vk-285-55):
+	std::vector<std::string> usb_dirs; // folders on USB drives to list games from (orbis_usb_game_dirs)
+	std::string usb_list;              // cache/usb-games.txt: the USB games seen, for the next start's cover prefetch
+	int test_build = 0;                // > 0: a testing build; the shelf shows TESTING and this label
+	std::string build_label;           // "Test build 1 · vk-285-55", or the plain tag
+	std::string logs_dir;              // logs/: the settings page's logs download reads the sessions there
+	std::string report_header;         // that download's first lines: build, sources, console
 };
+
+// Test build 1 (vk-285-55): the folders on USB drives PS5SX2 lists games from: each drive's root
+// (/mnt/usb0 to /mnt/usb7) and, when present, its DVD/ and CD/ (Open PS2 Loader's layout) and
+// PS5SX2/ folders, matched without regard to case. `when` ("before the jailbreak", ...) labels the
+// [usb] lines it prints (null: silent).
+std::vector<std::string> orbis_usb_game_dirs(const char* when);
+
+// Test build 1 (vk-285-55): the watermark drawn over the game in testing builds: `line1` big and
+// `line2` under it, white with a soft shadow, at the given opacities, sized for a 2160-line screen.
+// RGBA8 pixels (R in the low byte, straight alpha), `w` x `h`. False if the font didn't load.
+bool orbis_frontend_watermark(const char* line1, const char* line2, float alpha1, float alpha2, std::vector<uint32_t>& rgba,
+	int& w, int& h);
 
 // Before the HEN jailbreak: downloads the covers the cache lacks, for at most `budget_s` seconds.
 // HTTPS works there and failed after the jailbreak (vk-285-41/42). `notify` (may be null) is told

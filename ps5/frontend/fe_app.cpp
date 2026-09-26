@@ -536,5 +536,22 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			status = m_cfg.build_tag + "   \xC2\xB7   " + status;
 	}
 	m_fonts->AddText(ui, status.c_str(), W - margin, hy, 36.0f * k, faint, 0.1f, Fonts::Right);
+
+	// Test build 1 (vk-285-55): testing builds say so across the middle of the shelf, over the
+	// cases, with the build under it, so every photo and video of one names the build.
+	if (m_cfg.test_build > 0)
+	{
+		const float px = 300.0f * k, sub_px = 64.0f * k;
+		const float base = H * 0.5f + m_fonts->Ascent(px) * 0.36f;
+		m_fonts->AddText(ui, "TESTING", W * 0.5f + 5.0f * k, base + 5.0f * k, px, Rgba(0, 0, 0, 0.30f), 0.95f, Fonts::Center);
+		m_fonts->AddText(ui, "TESTING", W * 0.5f, base, px, Rgba(1, 1, 1, 0.42f), 0.95f, Fonts::Center);
+		if (!m_cfg.build_label.empty())
+		{
+			const float sub_base = base + m_fonts->Descent(px) + sub_px * 1.1f;
+			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f + 3.0f * k, sub_base + 3.0f * k, sub_px, Rgba(0, 0, 0, 0.45f),
+				0.5f, Fonts::Center);
+			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f, sub_base, sub_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
+		}
+	}
 }
 } // namespace fe

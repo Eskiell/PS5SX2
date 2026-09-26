@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -48,6 +49,11 @@ struct WebConfig
 	// sections) that the page's Recommended button writes, and the log every change goes to.
 	std::string presets;
 	std::string change_log;             // "" for none
+	// Test build 1 (vk-285-55): the logs download (/api/report) and the tester's notes (/api/note).
+	std::string logs_dir;               // logs/: boot.log, emulog.txt, stderr.log and their earlier sessions
+	std::string top_dir;                // /data/PCSX2: gs.ini, live.ini, flags/, settings/, patches/, cheats/
+	std::string report_header;          // the report's first lines: build, sources, console
+	int test_build = 0;                 // names the report file "PS5SX2-test<N>-..."
 };
 
 // vk-285-51: appends "<date time>  <line>" to the settings log (logs/settings.log), which keeps
@@ -91,6 +97,8 @@ private:
 		const uint8_t* data = nullptr; // a static asset instead of body
 		size_t size = 0;
 		std::string cache = "no-store";
+		std::string disposition;      // test build 1: "attachment; filename=..." for the logs download
+		int send_timeout_s = 0;       // a longer send timeout than the usual 3 s (the logs download)
 	};
 
 	void Run();
@@ -107,6 +115,8 @@ private:
 	void ApiSettings(const Request& req, Response& res);
 	void ApiSave(const Request& req, Response& res);
 	void ApiRecommended(const Request& req, const GameInfo* g, const std::string& path, Response& res);
+	void ApiReport(const Request& req, Response& res); // test build 1: one text file with the logs
+	void ApiNote(const Request& req, Response& res);   // test build 1: a tester's note, into settings.log
 	void Log(const Request& req, const std::string& what);
 
 	WebConfig m_cfg;
@@ -120,6 +130,7 @@ private:
 	std::string m_now_playing;
 	std::vector<GameInfo> m_games;
 	double m_games_time = -1e9;
+	std::map<std::string, std::pair<uint64_t, std::string>> m_serials; // path -> (size, serial): USB drives are slow
 };
 
 // The IPv4 address other devices reach this machine on: the one the default route uses, else the

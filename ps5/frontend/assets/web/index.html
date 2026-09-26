@@ -146,6 +146,23 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .file { text-align: center; color: var(--faint); font-size: 12px; margin-top: 12px; }
 .file button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
 
+/* Test build 1 (vk-285-55): the testing banner and the problem report. */
+.testing { margin-top: 18px; padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(255,207,122,0.45);
+           background: rgba(255,207,122,0.08); color: #ffcf7a; font-size: 14px; display: flex; justify-content: space-between;
+           align-items: center; gap: 10px; }
+.testing b { letter-spacing: 1.2px; }
+.testing a { color: #ffcf7a; font-weight: 700; white-space: nowrap; }
+.report textarea { display: block; width: 100%; margin-top: 10px; min-height: 86px; resize: vertical; border-radius: 12px;
+                   border: 1px solid var(--card-line); background: rgba(255,255,255,0.06); color: var(--text);
+                   font: inherit; font-size: 15px; padding: 10px 12px; }
+.report textarea::placeholder { color: var(--faint); }
+.report textarea:focus { outline: none; border-color: rgba(var(--glow),0.7); box-shadow: 0 0 0 3px rgba(var(--glow),0.18); }
+.btnrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.btn { border: 0; border-radius: 99px; padding: 9px 16px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+       text-decoration: none; display: inline-flex; align-items: center; }
+.btn.primary { background: rgba(255,255,255,0.92); color: var(--ink); box-shadow: 0 0 16px rgba(var(--glow),0.45); }
+.btn.ghost { background: rgba(255,255,255,0.08); color: var(--text); border: 1px solid var(--card-line); }
+
 footer { margin-top: 34px; color: var(--faint); font-size: 12px; text-align: center; line-height: 1.6; }
 footer a { color: var(--dim); }
 
@@ -189,6 +206,7 @@ footer a { color: var(--dim); }
   </div>
 
   <main id="main" class="hide">
+    <div class="testing hide" id="testing"><span><b>TESTING</b> · <span id="testlabel"></span></span><a href="#report">Report a problem</a></div>
     <div class="now" id="now">
       <img id="nowcover" alt="">
       <div>
@@ -205,6 +223,19 @@ footer a { color: var(--dim); }
 
     <div id="settings"></div>
     <div class="file" id="file"></div>
+
+    <div class="sec report" id="report">
+      <h2>Report a problem</h2>
+      <div class="card"><div class="row">
+        <div class="label">What went wrong?</div>
+        <div class="hint">Say what happened, then download the logs and post the file in the Discord. Your note goes into the logs with the time.</div>
+        <textarea id="note" maxlength="1500" placeholder="For example: froze after the first cutscene, the sound kept playing"></textarea>
+        <div class="btnrow">
+          <button class="btn ghost" id="savenote">Add note</button>
+          <a class="btn primary" id="dllogs" href="#">Download logs</a>
+        </div>
+      </div></div>
+    </div>
   </main>
 
   <footer>
@@ -544,6 +575,33 @@ async function refreshState() {
 }
 
 $("allgames").addEventListener("click", () => select(current === "@global" && games.length ? games[0].id : "@global"));
+
+// ---- Test build 1 (vk-285-55): a note into the logs, and the logs as one file for the Discord.
+async function sendNote() {
+  const t = $("note").value.trim();
+  if (!t) return true;
+  try {
+    await api("/api/note", { method: "POST", body: t, headers: { "Content-Type": "text/plain" } });
+    $("note").value = "";
+    toast("Note added to the logs");
+    return true;
+  } catch (e) {
+    if (e.message !== "unauthorized") toast("The note didn't reach the console");
+    return false;
+  }
+}
+$("savenote").addEventListener("click", sendNote);
+$("dllogs").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  await sendNote();
+  toast("Downloading the logs…");
+  location.href = "/api/report?t=" + encodeURIComponent(token);
+});
+function showTesting(s) {
+  if (!(s.test > 0)) return;
+  $("testlabel").textContent = s.build;
+  $("testing").classList.remove("hide");
+}
 // The clipboard API needs HTTPS, which a console on the LAN doesn't have; the old copy command works.
 $("discord").addEventListener("click", async () => {
   let ok = false;
@@ -563,6 +621,7 @@ $("discord").addEventListener("click", async () => {
     const s = await api("/api/state");
     state = s;
     $("build").textContent = s.build;
+    showTesting(s);
     games = await api("/api/games");
   } catch (e) { if (e.message !== "unauthorized") toast("The console didn't answer"); return; }
   $("main").classList.remove("hide");

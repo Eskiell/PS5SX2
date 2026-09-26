@@ -19,11 +19,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <string>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <thread>
 #include <time.h>
@@ -592,7 +596,166 @@ void WriteLastGame(const std::string& dir, const std::string& file)
 		std::fclose(f);
 	}
 }
+
+// ---- Test build 1 (vk-285-55): games on USB drives.
+
+std::string LowerAscii(std::string s)
+{
+	for (char& c : s)
+		if (c >= 'A' && c <= 'Z')
+			c = static_cast<char>(c - 'A' + 'a');
+	return s;
+}
+
+bool IsIsoName(const char* name)
+{
+	const size_t n = std::strlen(name);
+	return n > 4 && name[0] != '.' && LowerAscii(name + n - 4) == ".iso";
+}
+
+// The .iso files straight in `dir`, or -1 when it can't be opened as a folder.
+int CountIsos(const std::string& dir)
+{
+	DIR* d = opendir(dir.c_str());
+	if (!d)
+		return -1;
+	int n = 0;
+	while (const dirent* e = readdir(d))
+		n += IsIsoName(e->d_name) ? 1 : 0;
+	closedir(d);
+	return n;
+}
+
+bool OnUsb(const std::string& path)
+{
+	return path.compare(0, 8, "/mnt/usb") == 0;
+}
+
+// cache/usb-games.txt, one "<serial>\t<stem>\t<title>" line per USB game: before the jailbreak,
+// where covers download, the app may not see the drives, so the covers of the games found on them
+// after the jailbreak are fetched at the next start from this list.
+void WriteUsbList(const std::string& path, const std::vector<GameInfo>& games)
+{
+	if (path.empty())
+		return;
+	std::string text;
+	for (const GameInfo& g : games)
+		if (OnUsb(g.path) && !g.serial.empty())
+			text += g.serial + "\t" + g.stem + "\t" + g.title + "\n";
+	std::string old;
+	if (FILE* f = std::fopen(path.c_str(), "rb"))
+	{
+		char buf[4096];
+		size_t n;
+		while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+			old.append(buf, n);
+		std::fclose(f);
+	}
+	if (text.empty() || text == old)
+		return;
+	const size_t slash = path.rfind('/');
+	if (slash != std::string::npos)
+		mkdir(path.substr(0, slash).c_str(), 0777);
+	if (FILE* f = std::fopen(path.c_str(), "wb"))
+	{
+		std::fwrite(text.data(), 1, text.size(), f);
+		std::fclose(f);
+	}
+}
+
+// Adds the listed USB games that `games` doesn't hold (by serial), with no image path: enough for the
+// cover prefetch, which works from serials.
+int AddUsbListGames(const std::string& path, std::vector<GameInfo>& games)
+{
+	FILE* f = path.empty() ? nullptr : std::fopen(path.c_str(), "rb");
+	if (!f)
+		return 0;
+	int added = 0;
+	char line[1024];
+	while (std::fgets(line, sizeof(line), f))
+	{
+		std::string l = line;
+		while (!l.empty() && (l.back() == '\n' || l.back() == '\r'))
+			l.pop_back();
+		const size_t t1 = l.find('\t'), t2 = t1 == std::string::npos ? t1 : l.find('\t', t1 + 1);
+		if (t2 == std::string::npos || t1 == 0)
+			continue;
+		GameInfo g;
+		g.serial = l.substr(0, t1);
+		g.stem = l.substr(t1 + 1, t2 - t1 - 1);
+		g.title = l.substr(t2 + 1);
+		if (std::any_of(games.begin(), games.end(), [&](const GameInfo& x) { return x.serial == g.serial; }))
+			continue;
+		games.push_back(g);
+		added++;
+	}
+	std::fclose(f);
+	return added;
+}
 } // namespace
+
+std::vector<std::string> orbis_usb_game_dirs(const char* when)
+{
+	std::vector<std::string> dirs;
+	int drives = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		char root[16];
+		std::snprintf(root, sizeof(root), "/mnt/usb%d", i);
+		DIR* d = opendir(root);
+		if (!d)
+		{
+			if (when && errno != ENOENT)
+				std::printf("[usb] %s: %s: can't open (errno %d)\n", when, root, errno);
+			continue;
+		}
+		int entries = 0, isos = 0;
+		std::vector<std::string> subs;
+		while (const dirent* e = readdir(d))
+		{
+			if (e->d_name[0] == '.')
+				continue;
+			entries++;
+			isos += IsIsoName(e->d_name) ? 1 : 0;
+			const std::string lower = LowerAscii(e->d_name);
+			if (lower == "dvd" || lower == "cd" || lower == "ps5sx2")
+				subs.push_back(e->d_name);
+		}
+		closedir(d);
+		if (entries == 0)
+			continue; // no drive in this slot (the folder is there either way)
+		drives++;
+		dirs.push_back(root);
+		std::string found = "/ (" + std::to_string(isos) + ")";
+		for (const std::string& sub : subs)
+		{
+			const std::string dir = std::string(root) + "/" + sub;
+			const int n = CountIsos(dir);
+			if (n < 0)
+				continue;
+			dirs.push_back(dir);
+			found += ", " + sub + "/ (" + std::to_string(n) + ")";
+		}
+		if (when)
+			std::printf("[usb] %s: %s: %d entries; .iso files in %s\n", when, root, entries, found.c_str());
+	}
+	if (when && drives == 0)
+		std::printf("[usb] %s: no USB drive with files at /mnt/usb0-7\n", when);
+	if (when)
+		std::fflush(stdout);
+	return dirs;
+}
+
+bool orbis_frontend_watermark(const char* line1, const char* line2, float alpha1, float alpha2, std::vector<uint32_t>& rgba,
+	int& w, int& h)
+{
+	Fonts fonts;
+	if (!fonts.Init(fe_font_text, static_cast<size_t>(fe_font_text_end - fe_font_text), fe_font_icons,
+			static_cast<size_t>(fe_font_icons_end - fe_font_icons)))
+		return false;
+	RasterWatermark(fonts, line1, line2, alpha1, alpha2, rgba, w, h);
+	return true;
+}
 
 // vk-285-50: the settings page's server; it lives until the app ends.
 static fe::WebServer* g_web = nullptr;
@@ -656,6 +819,7 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 		return true;
 	WebConfig cfg;
 	cfg.game_dirs = {paths.games_dir, paths.top_dir};
+	cfg.game_dirs.insert(cfg.game_dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1
 	cfg.settings_dir = paths.settings_dir;
 	cfg.gs_ini = paths.gs_ini;
 	cfg.patches_dir = paths.patches_dir;
@@ -666,6 +830,11 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 	cfg.port = 8844;
 	cfg.presets.assign(reinterpret_cast<const char*>(fe_presets), static_cast<size_t>(fe_presets_end - fe_presets));
 	cfg.change_log = paths.settings_log;
+	// Test build 1 (vk-285-55): the logs download.
+	cfg.logs_dir = paths.logs_dir;
+	cfg.top_dir = paths.top_dir;
+	cfg.report_header = paths.report_header;
+	cfg.test_build = paths.test_build;
 	fe::g_utc_to_local = &SettingsLogLocalTime;
 	cfg.assets = {
 		{"/", "text/html; charset=utf-8", fe_web_page, static_cast<size_t>(fe_web_page_end - fe_web_page)},
@@ -699,16 +868,20 @@ int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budge
 	if (!paths.allow_download)
 		return 0;
 	const double t0 = Now();
-	std::vector<GameInfo> games = ScanGames({paths.games_dir, paths.top_dir});
+	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
+	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives, when visible here
+	std::vector<GameInfo> games = ScanGames(dirs);
 	for (GameInfo& g : games)
 		g.serial = ReadSerial(g.path);
+	// Test build 1: the USB games seen after the jailbreak last time (the drives may not be visible here).
+	const int listed = AddUsbListGames(paths.usb_list, games);
 	CoverConfig cc;
 	cc.manual_dir = paths.covers_dir;
 	cc.cache_dir = paths.cache_dir;
 	cc.url_template = kCoverUrl;
 	const std::vector<int> missing = CoverService::MissingCovers(games, cc);
-	std::printf("[frontend] prefetch: %zu of %zu covers to fetch (checked in %.0f ms)\n", missing.size(), games.size(),
-		(Now() - t0) * 1000.0);
+	std::printf("[frontend] prefetch: %zu of %zu covers to fetch (%d from the USB list; checked in %.0f ms)\n", missing.size(),
+		games.size(), listed, (Now() - t0) * 1000.0);
 	std::fflush(stdout);
 	if (missing.empty())
 		return 0;
@@ -730,16 +903,22 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 {
 	*ran = false;
 	const double t0 = Now();
-	std::vector<GameInfo> games = ScanGames({paths.games_dir, paths.top_dir});
+	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
+	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives
+	std::vector<GameInfo> games = ScanGames(dirs);
+	int on_usb = 0;
 	for (GameInfo& g : games)
 	{
 		g.serial = ReadSerial(g.path);
 		ReadBadges(g, paths.settings_dir, paths.gs_ini, paths.patches_dir);
-		std::printf("[frontend] %s | %s | %s\n", g.file.c_str(), g.serial.empty() ? "no serial" : g.serial.c_str(),
-			g.title.c_str());
+		on_usb += OnUsb(g.path) ? 1 : 0;
+		// Test build 1: the size too (a disc image of an odd size is often a bad dump), and the folder.
+		std::printf("[frontend] %s | %s | %s | %llu bytes | %s\n", g.file.c_str(), g.serial.empty() ? "no serial" : g.serial.c_str(),
+			g.title.c_str(), static_cast<unsigned long long>(g.bytes), g.path.substr(0, g.path.rfind('/')).c_str());
 	}
-	std::printf("[frontend] %zu disc image(s), scanned in %.0f ms\n", games.size(), (Now() - t0) * 1000.0);
+	std::printf("[frontend] %zu disc image(s), %d on USB, scanned in %.0f ms\n", games.size(), on_usb, (Now() - t0) * 1000.0);
 	std::fflush(stdout);
+	WriteUsbList(paths.usb_list, games);
 	if (games.empty())
 	{
 		*ran = true;
@@ -826,6 +1005,8 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	App app;
 	AppConfig acfg;
 	acfg.build_tag = build_tag ? build_tag : "";
+	acfg.test_build = paths.test_build;   // test build 1: the TESTING watermark
+	acfg.build_label = paths.build_label;
 	acfg.preselect = preselect;
 	acfg.sound = mixer;
 	bool ok = app.Init(&renderer, fonts, games, covers, acfg);

@@ -600,6 +600,11 @@ public:
 
 	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 		PresentShader shader, float shaderTime, Filter filter) override;
+#ifdef ORBIS_VULKAN
+	// Test build 1 (vk-285-55): draws sTex over the frame being presented, blended by its alpha
+	// (the testing watermark). Only between BeginPresent and EndPresent.
+	void OrbisPresentBlend(GSTexture* sTex, const GSVector4& sRect, const GSVector4& dRect);
+#endif
 	void DrawMultiStretchRects(
 		const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvertSelector shader) override;
 	void DoMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, GSTextureVK* dTex, ShaderConvertSelector shader);

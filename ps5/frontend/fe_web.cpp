@@ -490,6 +490,95 @@ std::string Error(const char* message)
 {
 	return std::string("{\"error\":") + Json(message) + "}";
 }
+
+// ---- Test build 1 (vk-285-55): the logs report.
+
+std::string StampOf(long long utc)
+{
+	std::tm tm = {};
+	if (g_utc_to_local)
+	{
+		const std::time_t local = static_cast<std::time_t>(g_utc_to_local(utc));
+		gmtime_r(&local, &tm);
+	}
+	else
+	{
+		const std::time_t t = static_cast<std::time_t>(utc);
+		localtime_r(&t, &tm);
+	}
+	char buf[32];
+	std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+	return buf;
+}
+
+std::string Human(long long bytes)
+{
+	char buf[32];
+	if (bytes >= 1024 * 1024)
+		std::snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+	else if (bytes >= 1024)
+		std::snprintf(buf, sizeof(buf), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+	else
+		std::snprintf(buf, sizeof(buf), "%lld B", bytes);
+	return buf;
+}
+
+// Up to `cap` bytes of a file: all of it when it fits, else its first `head` bytes and its last
+// cap - head, with a line saying how much was cut between them. False when it can't be opened.
+bool ReadCapped(const std::string& path, size_t cap, size_t head, std::string& out, long long& size, long long& mtime)
+{
+	const int fd = open(path.c_str(), O_RDONLY);
+	if (fd < 0)
+		return false;
+	struct stat st = {};
+	if (fstat(fd, &st) != 0)
+	{
+		close(fd);
+		return false;
+	}
+	size = static_cast<long long>(st.st_size);
+	mtime = static_cast<long long>(st.st_mtime);
+	auto read_at = [&](long long off, size_t n) {
+		std::string part(n, '\0');
+		size_t got = 0;
+		while (got < n)
+		{
+			const ssize_t r = pread(fd, &part[got], n - got, static_cast<off_t>(off + static_cast<long long>(got)));
+			if (r <= 0)
+				break;
+			got += static_cast<size_t>(r);
+		}
+		part.resize(got);
+		return part;
+	};
+	if (static_cast<unsigned long long>(size) <= cap)
+		out = read_at(0, static_cast<size_t>(size));
+	else
+	{
+		head = std::min(head, cap);
+		const size_t tail = cap - head;
+		out = read_at(0, head);
+		out += "\n[... " + Human(size - static_cast<long long>(cap)) + " cut here ...]\n";
+		out += read_at(size - static_cast<long long>(tail), tail);
+	}
+	close(fd);
+	return true;
+}
+
+// The names in a folder, sorted, without the dot entries.
+std::vector<std::string> ListNames(const std::string& dir)
+{
+	std::vector<std::string> names;
+	if (DIR* d = opendir(dir.c_str()))
+	{
+		while (const dirent* e = readdir(d))
+			if (e->d_name[0] != '.')
+				names.push_back(e->d_name);
+		closedir(d);
+	}
+	std::sort(names.begin(), names.end());
+	return names;
+}
 } // namespace
 
 long long (*g_utc_to_local)(long long utc) = nullptr;
@@ -778,9 +867,19 @@ void WebServer::Serve(int fd, const char* peer)
 	char head[512];
 	const int n = std::snprintf(head, sizeof(head),
 		"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: %s\r\n"
-		"X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+		"X-Content-Type-Options: nosniff\r\nConnection: close\r\n",
 		res.status, Reason(res.status), res.type.c_str(), size, res.cache.c_str());
-	if (!SendAll(fd, head, static_cast<size_t>(n)))
+	// Test build 1: the logs download is saved as a file, and a few MB over Wi-Fi can take a while.
+	std::string header(head, static_cast<size_t>(std::max(n, 0)));
+	if (!res.disposition.empty())
+		header += "Content-Disposition: " + res.disposition + "\r\n";
+	header += "\r\n";
+	if (res.send_timeout_s > 0)
+	{
+		timeval tv = {res.send_timeout_s, 0};
+		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	}
+	if (!SendAll(fd, header.data(), header.size()))
 		return;
 	if (req.method != "HEAD")
 		SendAll(fd, res.data ? static_cast<const void*>(res.data) : static_cast<const void*>(res.body.data()), size);
@@ -826,6 +925,10 @@ void WebServer::Route(const Request& req, Response& res)
 		ApiSettings(req, res);
 	else if (req.path == "/api/settings" && req.method == "POST")
 		ApiSave(req, res);
+	else if (req.path == "/api/report" && (req.method == "GET" || req.method == "HEAD"))
+		ApiReport(req, res);
+	else if (req.path == "/api/note" && req.method == "POST")
+		ApiNote(req, res);
 	else
 	{
 		res.status = req.method == "GET" || req.method == "POST" ? 404 : 405;
@@ -841,7 +944,15 @@ std::vector<GameInfo> WebServer::Games()
 		m_games = ScanGames(m_cfg.game_dirs);
 		for (GameInfo& g : m_games)
 		{
-			g.serial = ReadSerial(g.path);
+			// Test build 1: an image's serial is read once (per size), not at every rescan.
+			const auto it = m_serials.find(g.path);
+			if (it != m_serials.end() && it->second.first == g.bytes)
+				g.serial = it->second.second;
+			else
+			{
+				g.serial = ReadSerial(g.path);
+				m_serials[g.path] = {g.bytes, g.serial};
+			}
 			ReadBadges(g, m_cfg.settings_dir, m_cfg.gs_ini, m_cfg.patches_dir);
 		}
 		m_games_time = Now();
@@ -874,8 +985,8 @@ void WebServer::ApiState(Response& res)
 		else
 			game = "{\"id\":" + Json(playing) + ",\"title\":" + Json(playing) + ",\"serial\":\"\"}";
 	}
-	res.body = "{\"app\":\"PS5SX2\",\"build\":" + Json(m_cfg.build_tag) + ",\"mode\":" + Json(playing.empty() ? "menu" : "game") +
-	           ",\"playing\":" + game + "}";
+	res.body = "{\"app\":\"PS5SX2\",\"build\":" + Json(m_cfg.build_tag) + ",\"test\":" + std::to_string(m_cfg.test_build) +
+	           ",\"mode\":" + Json(playing.empty() ? "menu" : "game") + ",\"playing\":" + game + "}";
 }
 
 void WebServer::ApiGames(Response& res)
@@ -1179,6 +1290,156 @@ void WebServer::ApiRecommended(const Request& req, const GameInfo* g, const std:
 	             (existed ? "; the old file is " + name + ".before-recommended" : std::string()));
 	Request again = req;
 	ApiSettings(again, res);
+}
+
+// Test build 1 (vk-285-55): everything a tester's report needs, as one text file: the settings log
+// (the timeline), this session's logs and the two sessions' before it (after a crash the app is
+// started again, so the crashed session is the one before), the GPU hang dump, the settings files,
+// the switches and the game list. Long logs keep their start and their end; the whole stays under
+// about 8 MB, which a Discord upload takes.
+void WebServer::ApiReport(const Request& req, Response& res)
+{
+	const double t0 = Now();
+	std::string playing;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		playing = m_now_playing;
+	}
+	std::string out;
+	out.reserve(1 << 20);
+	out += "PS5SX2 logs report\n";
+	out += m_cfg.report_header;
+	out += "Made: " + Stamp() + " (the console's clock)\n";
+	out += "Now: " + (playing.empty() ? std::string("on the shelf") : "playing " + playing) + "\n";
+	out += "Sections: settings.log (the timeline), then boot.log, emulog.txt and stderr.log for this session and the\n"
+	       "two before it, the GPU hang dump, the settings files, the switches and the game list. Long logs keep\n"
+	       "their start and their end.\n";
+
+	auto section = [&](const std::string& path, const std::string& what, size_t cap, size_t head) {
+		std::string text;
+		long long size = 0, mtime = 0;
+		std::string name = path;
+		if (!m_cfg.top_dir.empty() && name.compare(0, m_cfg.top_dir.size() + 1, m_cfg.top_dir + "/") == 0)
+			name.erase(0, m_cfg.top_dir.size() + 1);
+		if (!ReadCapped(path, cap, head, text, size, mtime))
+		{
+			out += "\n===== " + name + " (" + what + "): not there =====\n";
+			return;
+		}
+		out += "\n===== " + name + " (" + what + "): " + Human(size) + ", last written " + StampOf(mtime) + " =====\n";
+		out += text;
+		if (!text.empty() && text.back() != '\n')
+			out += "\n";
+		out += "===== end of " + name + " =====\n";
+	};
+
+	const std::string& logs = m_cfg.logs_dir.empty() ? m_cfg.top_dir : m_cfg.logs_dir;
+	section(m_cfg.change_log, "the timeline: starts, games, settings, perf each minute, crashes, notes", 384 * 1024, 0);
+	struct Session
+	{
+		const char* suffix;
+		const char* what;
+		size_t boot, emu, err;
+	};
+	const Session sessions[] = {
+		{"", "this session", 512 * 1024, 2048 * 1024, 512 * 1024},
+		{".1", "the session before; after a crash, the crashed one", 512 * 1024, 2048 * 1024, 512 * 1024},
+		{".2", "two sessions back", 256 * 1024, 1024 * 1024, 256 * 1024},
+	};
+	for (const Session& ss : sessions)
+	{
+		section(logs + "/boot" + ss.suffix + ".log", ss.what, ss.boot, 64 * 1024);
+		section(logs + "/emulog" + ss.suffix + ".txt", ss.what, ss.emu, 160 * 1024);
+		section(logs + "/stderr" + ss.suffix + ".log", ss.what, ss.err, 32 * 1024);
+	}
+	section(logs + "/ps5vk-hang.txt", "the last GPU hang the driver caught", 64 * 1024, 32 * 1024);
+	section(logs + "/pf.log", "page faults this session", 64 * 1024, 16 * 1024);
+
+	// The settings, the switches and what is on the console.
+	if (!m_cfg.top_dir.empty())
+	{
+		section(m_cfg.top_dir + "/gs.ini", "the settings every game starts from", 64 * 1024, 32 * 1024);
+		section(m_cfg.top_dir + "/live.ini", "display and overlay switches", 16 * 1024, 8 * 1024);
+		size_t total = 0;
+		for (const std::string& n : ListNames(m_cfg.settings_dir))
+		{
+			if (total > 256 * 1024)
+				break;
+			if (n.size() < 5 || n.compare(n.size() - 4, 4, ".ini") != 0)
+				continue; // not the .before-recommended copies
+			const size_t before = out.size();
+			section(m_cfg.settings_dir + "/" + n, "a game's own settings", 32 * 1024, 16 * 1024);
+			total += out.size() - before;
+		}
+		auto names = [&](const std::string& dir, const char* what) {
+			const std::vector<std::string> list = ListNames(dir);
+			out += "\n===== " + std::string(what) + ": " + std::to_string(list.size()) + " =====\n";
+			for (const std::string& n : list)
+				out += n + "\n";
+		};
+		names(m_cfg.top_dir + "/flags", "switch files in flags/");
+		names(m_cfg.patches_dir, "patch files");
+		names(m_cfg.top_dir + "/cheats", "cheat files");
+	}
+	{
+		const std::vector<GameInfo> games = Games();
+		out += "\n===== games: " + std::to_string(games.size()) + " (file | serial | size | folder) =====\n";
+		for (const GameInfo& g : games)
+			out += g.file + " | " + (g.serial.empty() ? std::string("no serial") : g.serial) + " | " +
+			       std::to_string(static_cast<unsigned long long>(g.bytes)) + " | " + g.path.substr(0, g.path.rfind('/')) + "\n";
+	}
+	out += "\n===== end of the report =====\n";
+
+	// The file's name: the build and the console's time, e.g. PS5SX2-test1-2026-09-27_1403.txt.
+	std::string when = Stamp(); // "2026-09-27 14:03:22"
+	when = when.substr(0, 10) + "_" + when.substr(11, 2) + when.substr(14, 2);
+	char name[96];
+	if (m_cfg.test_build > 0)
+		std::snprintf(name, sizeof(name), "PS5SX2-test%d-%s.txt", m_cfg.test_build, when.c_str());
+	else
+		std::snprintf(name, sizeof(name), "PS5SX2-logs-%s.txt", when.c_str());
+	res.type = "text/plain; charset=utf-8";
+	res.disposition = std::string("attachment; filename=\"") + name + "\"";
+	res.send_timeout_s = 60;
+	std::printf("[web] logs report: %zu bytes in %.0f ms\n", out.size(), (Now() - t0) * 1000.0);
+	std::fflush(stdout);
+	if (req.method == "GET")
+		Log(req, "logs downloaded (" + Human(static_cast<long long>(out.size())) + ")");
+	res.body = std::move(out);
+}
+
+// Test build 1 (vk-285-55): a tester's own words about what happened, on one line of the settings
+// log, beside the app's own lines from the same moment.
+void WebServer::ApiNote(const Request& req, Response& res)
+{
+	std::string text;
+	for (const char c : req.body)
+	{
+		if (c == '\r')
+			continue;
+		if (c == '\n' || c == '\t')
+			text += (c == '\n' && !text.empty() && text.back() != ' ') ? " / " : " ";
+		else if (static_cast<unsigned char>(c) >= 0x20 && c != 0x7f)
+			text += c;
+	}
+	text = Trim(text);
+	if (text.size() > 1500)
+	{
+		size_t cut = 1500;
+		while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) // not inside a UTF-8 character
+			cut--;
+		text.resize(cut);
+	}
+	if (text.empty())
+	{
+		res.status = 400;
+		res.body = Error("empty note");
+		return;
+	}
+	Log(req, "tester note: " + text);
+	std::printf("[note] %s\n", text.c_str());
+	std::fflush(stdout);
+	res.body = "{\"ok\":true}";
 }
 
 void WebServer::Log(const Request& req, const std::string& what)
