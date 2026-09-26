@@ -103,6 +103,15 @@ extern "C" volatile unsigned long long g_orbis_data_base = 0;
 extern "C" volatile unsigned long long g_orbis_data_size = 0;
 extern "C" volatile unsigned long long g_orbis_code_base = 0;
 extern "C" volatile unsigned long long g_orbis_code_size = 0;
+// vk-285-64: the data block's direct-memory offset, which fastmem's views of the guest pages map
+// (common/Linux/LnxHostSys.cpp, SharedMemoryMappingArea on Orbis); -1 until it is allocated.
+extern "C" long long g_orbis_data_phys = -1;
+// vk-285-64: main-boot's flag file jitdirect: the recompilers' code in direct memory, mapped RW and
+// made executable with sceKernelMprotect (vk-285-62's memory probe ran code from it on FW 4.03),
+// instead of JIT shared memory, which comes out of the 448 MiB flexible budget.
+extern "C" int g_orbis_code_direct = 0;
+extern "C" int sceKernelMprotect(const void* addr, unsigned long long len, int prot);
+extern "C" int sceKernelMunmap(void* addr, unsigned long long len);
 
 bool SysMemory::AllocateMemoryMap()
 {
@@ -136,10 +145,44 @@ bool SysMemory::AllocateMemoryMap()
 
 		if (rc == 0 && rc2 == 0)
 		{
+			g_orbis_data_phys = phys;
+			u8* code = nullptr;
+			int rcc = -1, rcc2 = -1;
+			// vk-285-64: direct memory made executable (g_orbis_code_direct), at the address the JIT
+			// shared memory had, rounded to 2 MiB so the kernel can use large pages.
+			if (g_orbis_code_direct)
+			{
+				const unsigned long long big = 0x200000ULL;
+				const unsigned long long code_bytes = (code_size + big - 1) & ~(big - 1);
+				long long code_phys = -1;
+				u8* want = (u8*)0x900000000ULL;
+				const int ra = sceKernelAllocateDirectMemory(0, total, code_bytes, big, 12, &code_phys);
+				const int rm = ra == 0 ? sceKernelMapDirectMemory((void**)&want, code_bytes, 0x03, 0, code_phys, big) : -1;
+				const int rp = rm == 0 ? sceKernelMprotect(want, code_bytes, 0x07) : -1;
+				printf("[dbg] memmap: code direct %llu MiB: alloc rc=%d phys=%lld map rc=0x%x addr=%p mprotect rc=0x%x\n",
+					code_bytes >> 20, ra, code_phys, (unsigned)rm, want, (unsigned)rp);
+				fflush(stdout);
+				if (rp == 0)
+				{
+					code = want;
+					rcc = rcc2 = 0;
+				}
+				else
+				{
+					if (rm == 0)
+						sceKernelMunmap(want, code_bytes);
+					if (ra == 0)
+						sceKernelReleaseDirectMemory(code_phys, code_bytes);
+				}
+			}
 			// CODE prefers real JIT shared memory (executable; needs root).
 			// Falls back to direct memory when unprivileged.
-			u8* code = (u8*)orbis_alloc_jit(code_size);
-			int rcc = code ? 0 : -1, rcc2 = rcc;
+			if (!code)
+			{
+				code = (u8*)orbis_alloc_jit(code_size);
+				rcc = code ? 0 : -1;
+				rcc2 = rcc;
+			}
 			printf("[dbg] memmap: code jit rc=%d addr=%p\n", rcc, code);
 			fflush(stdout);
 			if (rcc != 0)

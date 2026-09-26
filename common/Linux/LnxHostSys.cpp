@@ -3,7 +3,21 @@
 
 #include "common/Assertions.h"
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
+#include <cstring> // vk-285-65: OrbisMcontext
 extern "C" int orbis_reserve_range(void** addr, unsigned long long len);
+#ifdef ORBIS_VULKAN
+// vk-285-64: fastmem on the PS5. The guest's data block is direct memory (pcsx2/Memory.cpp,
+// g_orbis_data_phys), and the kernel maps one direct-memory range at several addresses (the
+// memory probe, vk-285-62), so the fastmem area is a plain reservation and each view of a guest
+// page is a fixed direct mapping of that page into it -- what shm_open and mmap(MAP_SHARED) do
+// elsewhere. Flexible memory, which the mmap shim hands out, has no second view.
+extern "C" long long g_orbis_data_phys;
+extern "C" int sceKernelMapDirectMemory(void** addr, unsigned long long len, int prot, int flags,
+	long long directMemoryStart, unsigned long long alignment);
+extern "C" int sceKernelMunmap(void* addr, unsigned long long len);
+extern "C" int sceKernelReserveVirtualRange(void** addr, unsigned long long len, int flags, unsigned long long alignment);
+static constexpr int ORBIS_MAP_FIXED = 0x10;
+#endif
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/CrashHandler.h"
@@ -150,8 +164,14 @@ SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
 
+#ifdef ORBIS_VULKAN
+	// vk-285-64: a reservation (Create), not flexible memory.
+	if (sceKernelMunmap(m_base_ptr, m_size) != 0)
+		pxFailRel("Failed to release shared memory area");
+#else
 	if (munmap(m_base_ptr, m_size) != 0)
 		pxFailRel("Failed to release shared memory area");
+#endif
 }
 
 
@@ -179,6 +199,11 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 	std::printf("[dbg] shmarea: reserve %zu bytes rc=%d at %p\n", size, reserve_rc, reserve_rc == 0 ? reserved : nullptr);
 	if (reserve_rc != 0)
 		reserved = nullptr;
+	// vk-285-64: with the guest's data in direct memory the reservation is the whole area; Map()
+	// fills it with direct mappings. (The mmap below would ask the flexible shim for all of it.)
+	if (reserved && g_orbis_data_phys >= 0)
+		return std::unique_ptr<SharedMemoryMappingArea>(
+			new SharedMemoryMappingArea(static_cast<u8*>(reserved), size, size / __pagesize));
 #else
 	if (orbis_reserve_range(&reserved, size) != 0)
 		reserved = nullptr;
@@ -199,6 +224,26 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
 	const uint lnxmode = LinuxProt(mode);
+#ifdef ORBIS_VULKAN
+	// vk-285-64: a view of the guest's data block at a fixed address (see the top of this file).
+	if (!file_handle && g_orbis_data_phys >= 0)
+	{
+		void* addr = map_base;
+		const int prot = (mode.CanRead() ? 0x1 : 0) | (mode.CanWrite() ? 0x2 : 0);
+		const int rc = sceKernelMapDirectMemory(&addr, map_size, prot, ORBIS_MAP_FIXED,
+			g_orbis_data_phys + static_cast<long long>(file_offset), __pagesize);
+		if (rc != 0 || addr != map_base)
+		{
+			static int s_logged = 0;
+			if (s_logged++ < 8)
+				std::printf("[fastmem] map %p +%zu offset 0x%zx failed: rc=0x%x at %p\n", map_base, map_size,
+					file_offset, static_cast<unsigned>(rc), addr);
+			return nullptr;
+		}
+		m_num_mappings++;
+		return static_cast<u8*>(map_base);
+	}
+#endif
 	if (file_handle)
 	{
 		const int fd = static_cast<int>(reinterpret_cast<intptr_t>(file_handle));
@@ -223,6 +268,20 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_file)
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
+
+#ifdef ORBIS_VULKAN
+	// vk-285-64: drop the view and reserve the hole again, so nothing else lands in the area.
+	if (g_orbis_data_phys >= 0)
+	{
+		if (sceKernelMunmap(map_base, map_size) != 0)
+			return false;
+		void* again = map_base;
+		if (sceKernelReserveVirtualRange(&again, map_size, ORBIS_MAP_FIXED, 0) != 0 || again != map_base)
+			return false;
+		m_num_mappings--;
+		return true;
+	}
+#endif
 
 	if (mmap(map_base, map_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
 		return false;
@@ -292,6 +351,20 @@ namespace PageFaultHandler
 {
 	static void SignalHandler(int sig, siginfo_t* info, void* ctx);
 } // namespace PageFaultHandler
+
+#if defined(__FreeBSD__) && defined(ARCH_X86) && defined(ORBIS_VULKAN)
+// vk-285-65: one field of the PS5's signal mcontext, by its offset in FreeBSD's amd64 mcontext_t
+// (mc_rbp 0x48, mc_addr 0x88, mc_err 0x98, mc_rip 0xa0, mc_rsp 0xb8). The PS5 puts the mcontext at
+// ucontext + 0x40, not + 0x10: vk-285-64's crash dump had rbp (the fastmem base 0x3'0000'0000) at
+// +0x88, the fault address at +0xc8, the error code 6 at +0xd8 and rip at +0xe0 -- the note
+// "FreeBSD layout + 0x30" of the crash printer.
+static inline u64 OrbisMcontext(void* ctx, u32 field)
+{
+	u64 value;
+	std::memcpy(&value, static_cast<const u8*>(ctx) + 0x40 + field, sizeof(value));
+	return value;
+}
+#endif
 static bool s_pf_crashing = false;
 
 extern "C" volatile unsigned long long orbis_fault_count;
@@ -300,6 +373,9 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 	orbis_fault_count++;
 	// Orbis: log EVERY fault at entry (before any handling). Lets us reconstruct
 	// primary->secondary chains when a handler forwards or mishandles.
+	// vk-285-64: fastmem backpatches a code site on its first fault, and a game can fault
+	// thousands of times while it runs its first frames: the first 64 and every 4096th.
+	if (orbis_fault_count <= 64 || (orbis_fault_count & 4095) == 0)
 	{
 		FILE* f = fopen(g_orbis_pf_log, "a");
 		if (f)
@@ -308,7 +384,11 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 			void* esp = nullptr;
 			if (ctx)
 			{
-#if defined(__FreeBSD__) && defined(ARCH_X86)
+#if defined(__FreeBSD__) && defined(ARCH_X86) && defined(ORBIS_VULKAN)
+				// vk-285-65: the PS5's mcontext (OrbisMcontext below).
+				epc = reinterpret_cast<void*>(OrbisMcontext(ctx, 0xa0));
+				esp = reinterpret_cast<void*>(OrbisMcontext(ctx, 0xb8));
+#elif defined(__FreeBSD__) && defined(ARCH_X86)
 				ucontext_t* uc = static_cast<ucontext_t*>(ctx);
 				epc = reinterpret_cast<void*>(uc->uc_mcontext.mc_rip);
 				esp = reinterpret_cast<void*>(uc->uc_mcontext.mc_rsp);
@@ -332,7 +412,14 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 
 #elif defined(__FreeBSD__)
 
-#if defined(ARCH_X86)
+#if defined(ARCH_X86) && defined(ORBIS_VULKAN)
+	// vk-285-65: the PS5's mcontext starts 0x30 bytes later than FreeBSD's ucontext_t puts it, so
+	// uc_mcontext.mc_rip read r14 and mc_addr read r11, and no fault was ever recognised (fastmem's
+	// first MMIO access crashed, vk-285-64). The crash printer reads the same layout.
+	void* const exception_address = reinterpret_cast<void*>(OrbisMcontext(ctx, 0x88));
+	void* const exception_pc = reinterpret_cast<void*>(OrbisMcontext(ctx, 0xa0));
+	const bool is_write = (OrbisMcontext(ctx, 0x98) & 2) != 0;
+#elif defined(ARCH_X86)
 	void* const exception_address = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext.mc_addr);
 	void* const exception_pc = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext.mc_rip);
 	const bool is_write = (static_cast<ucontext_t*>(ctx)->uc_mcontext.mc_err & 2) != 0;
@@ -396,6 +483,12 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 bool PageFaultHandler::Install(Error* error)
 {
 	std::unique_lock lock(s_exception_handler_mutex);
+#ifdef ORBIS_VULKAN
+	// vk-285-64: main-boot installs it at start, and vtlb_Core_Alloc again once the fastmem area
+	// exists; the second install is the first one.
+	if (s_installed)
+		return true;
+#endif
 	pxAssertRel(!s_installed, "Page fault handler has already been installed.");
 
 	struct sigaction sa;

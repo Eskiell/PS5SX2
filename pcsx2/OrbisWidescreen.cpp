@@ -43,6 +43,16 @@ namespace
 {
 	constexpr u32 CRC_THIS_DISC = 0x6A8F18B9u;
 	constexpr u32 CRC_PNACH_DISC = 0x76F724A3u;
+	// vk-285-63: Ratchet & Clank USA (SCUS-97199). pcsx2_patches' SCUS-97199_CE4933D0.pnach
+	// (PsxFan107) hooks the same FOV instructions (c46000b0 46010002) and uses the same 4:3 marker
+	// (342147af), but it is disabled there ("appears to break rendering of textures in some
+	// areas"). This disc gets the PAL port's hooks, found by the same patterns; its level code may
+	// load elsewhere, so it is searched over a wider range, and D is looked for near H when it is
+	// not at H-0x158.
+	constexpr u32 CRC_USA_DISC = 0xCE4933D0u;
+	constexpr u32 USA_LO = 0x00100000u, USA_HI = 0x00380000u;
+
+	bool IsRatchetDisc(u32 crc) { return crc == CRC_THIS_DISC || crc == CRC_PNACH_DISC || crc == CRC_USA_DISC; }
 
 	constexpr u32 INJ = 0x000ffef4u; // FOV function
 	constexpr u32 INJ_RET = 0x000fff7cu; // j H+4; nop
@@ -80,6 +90,8 @@ namespace
 	};
 	Sites s_sites{};
 	u32 s_crc = 0;
+	u32 s_d = 0; // the gameplay FOV constant the vendor hooks rewrite (H-0x158 on the PAL discs)
+	u32 s_h_lo = H_LO, s_h_hi = H_HI, s_o_lo = O_LO, s_o_hi = O_HI; // search ranges for this disc
 	bool s_broken = false; // the inject area holds something else: never patch this boot
 	bool s_wide = false;
 	int s_lost = 0; // scans since the FOV hook was last in place
@@ -258,10 +270,21 @@ namespace
 		return true;
 	}
 
+	// vk-285-63: D at H-0x158 (both PAL discs), or the one lui/ori pair of the gameplay FOV within
+	// 0x800 bytes of H.
+	u32 FindD(u32 h)
+	{
+		if (DValid(h - 0x158))
+			return h - 0x158;
+		int n = 0;
+		const u32 d = FindUnique(h > 0x800u ? h - 0x800u : 4u, h + 0x800u, [](u32 a) { return DValid(a); }, &n);
+		return d;
+	}
+
 	void PatchVendorSites()
 	{
-		const u32 d = s_sites.H - 0x158;
-		if (!DValid(d))
+		const u32 d = s_d;
+		if (!d || !DValid(d))
 			return;
 
 		u32 vo_words[9] = {}, vc_words[9] = {};
@@ -282,11 +305,11 @@ namespace
 
 		int nvo = 1, nvc = 1, nm = 1;
 		const u32 vo = vo_ok ? s_sites.VO :
-							   FindUnique(O_LO + 4, O_HI, [](u32 a) { return VOMatch(a, false) || VOMatch(a, true); }, &nvo);
+							   FindUnique(s_o_lo + 4, s_o_hi, [](u32 a) { return VOMatch(a, false) || VOMatch(a, true); }, &nvo);
 		const u32 vc = vc_ok ? s_sites.VC :
-							   FindUnique(O_LO, O_HI, [](u32 a) { return VCMatch(a, false) || VCMatch(a, true); }, &nvc);
+							   FindUnique(s_o_lo, s_o_hi, [](u32 a) { return VCMatch(a, false) || VCMatch(a, true); }, &nvc);
 		const u32 m = m_ok ? s_sites.M :
-							 FindUnique(O_LO + 4, O_HI, [d](u32 a) {
+							 FindUnique(s_o_lo + 4, s_o_hi, [d](u32 a) {
 								 return a != d && MContext(a) && (R(a) == FOV_ORI || R(a) == FOV_ORI_43);
 							 }, &nm);
 
@@ -341,14 +364,20 @@ void OrbisWidescreenTick()
 		s_logged_h = ~0u;
 		if (s_wide)
 			SetWide(false);
-		if (crc == CRC_THIS_DISC || crc == CRC_PNACH_DISC)
+		s_d = 0;
+		const bool usa = crc == CRC_USA_DISC;
+		s_h_lo = usa ? USA_LO : H_LO;
+		s_h_hi = usa ? USA_HI : H_HI;
+		s_o_lo = usa ? USA_LO : O_LO;
+		s_o_hi = usa ? USA_HI : O_HI;
+		if (IsRatchetDisc(crc))
 		{
-			printf("[ws] Ratchet & Clank PAL (CRC %08X): 16:9 patch %s\n", crc,
+			printf("[ws] Ratchet & Clank %s (CRC %08X): 16:9 patch %s\n", usa ? "USA" : "PAL", crc,
 				g_orbis_widescreen.load(std::memory_order_relaxed) ? "on" : "off (live.ini)");
 			fflush(stdout);
 		}
 	}
-	if (crc != CRC_THIS_DISC && crc != CRC_PNACH_DISC)
+	if (!IsRatchetDisc(crc))
 		return;
 	if (!eeMem)
 		return;
@@ -398,7 +427,7 @@ void OrbisWidescreenTick()
 	if (!h_ok)
 	{
 		int n = 0;
-		const u32 h = FindUnique(H_LO + 0x40, H_HI, [](u32 a) { return HMatch(a, false) || HMatch(a, true); }, &n);
+		const u32 h = FindUnique(s_h_lo + 0x40, s_h_hi, [](u32 a) { return HMatch(a, false) || HMatch(a, true); }, &n);
 		if (h && !PcNear(h, 8))
 		{
 			if (!InjectIntact())
@@ -423,7 +452,8 @@ void OrbisWidescreenTick()
 				s_vendor_backoff = 0;
 			}
 			s_sites.H = h;
-			printf("[ws] FOV hook at %06x (D %06x %s)\n", h, h - 0x158, DValid(h - 0x158) ? "ok" : "not found");
+			s_d = FindD(h);
+			printf("[ws] FOV hook at %06x (D %06x %s)\n", h, s_d, s_d == 0 ? "not found" : s_d == h - 0x158 ? "ok" : "ok, moved");
 			fflush(stdout);
 			s_logged_h = h;
 		}

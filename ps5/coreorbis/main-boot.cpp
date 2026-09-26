@@ -430,6 +430,9 @@ static void orbis_apply_gs_ini(MemorySettingsInterface& si)
     orbis_apply_ini_file(si, s_game_ini_path.c_str(), "game ini");
 }
 
+// vk-285-64: pcsx2/Memory.cpp's choice of memory for the recompilers' code (the flag file jitdirect).
+extern "C" int g_orbis_code_direct;
+
 static bool orbis_flag(const char *name)
 {
   const bool on = OrbisFlag(name); // vk-285-33: flags/<name>, or the top folder
@@ -868,7 +871,12 @@ static void orbis_vk_environment()
   // vk-285-23: the driver reports 8192 for its image, framebuffer and viewport extent (4096 by
   // default): PCSX2 caps upscale_multiplier at maxImageDimension2D / 1280, so 4096 stopped it at
   // 3x and 6x ("4K") needs 7680.
-  if (orbis_flag("vk_renderer")) setenv("PS5VK_MAX_EXTENT_2D", "8192", 0);
+  // vk-285-66: 16384 with the flag file vk_16k, so PCSX2 offers 8x (16384 / 1280 = 12.8; at 8192 it
+  // stops at 6x). The descriptor and target size fields hold 14 bits (the driver's ps5vk_max_extent_2d).
+  if (orbis_flag("vk_renderer")) setenv("PS5VK_MAX_EXTENT_2D", orbis_flag("vk_16k") ? "16384" : "8192", 0);
+  // vk-285-66: VkDeviceMemory outside the 4 GiB window and a 12 GiB heap (Mihawk's R86-R88) with the
+  // flag file vk_widemem.
+  if (orbis_flag("vk_renderer") && orbis_flag("vk_widemem")) setenv("PS5VK_WIDE_MEMORY", "1", 0);
   // vk-285-24: two more live flag files the driver reads from PS5VK_LIVE_DIR: vk_noevict stops the
   // per-frame CPU-cache eviction of every render target (0.65 ms a frame at 1x, 9.5 ms at 6x), and
   // vk_async runs the queue on a worker thread, so the GS thread no longer waits for the GPU, and
@@ -880,6 +888,11 @@ static void orbis_vk_environment()
   // strip, so 32x32 blocks of the displayed frame showed the clear (sky) colour. The live flag file
   // vk_nowar switches it off again for comparison.
   if (orbis_flag("vk_renderer") && !orbis_flag("vk_nowarenv")) setenv("PS5VK_WAR_BARRIER", "1", 0);
+  // vk-285-62: three swapchain images with the flag file vk_triple (read when the swapchain is
+  // created, so it applies from the next start). The original PS5 at firmware 4.03 started about a
+  // third of R&C's frames ~15.7 ms late (vk-285-61's GPU trace: ~4.3 ms of GPU work, then the wait
+  // for the display); with two images every late start cost a vblank, with three it has slack.
+  if (orbis_flag("vk_renderer") && orbis_flag("vk_triple")) setenv("PS5VK_SWAPCHAIN_IMAGES", "3", 0);
 }
 #endif
 
@@ -1012,6 +1025,20 @@ int main()
   // probe is the ground truth for privilege on this firmware.
   if (orbis_probe_jit())
     g_jailbreak_ok = 1;
+  // vk-285-62: the memory probe (orbis-shims/orbis_memprobe.cpp): what direct memory can hold
+  // (executable code, aliased guest pages, fixed mappings), with the flag file memprobe.
+  if (orbis_flag("memprobe"))
+  {
+    extern void orbis_memprobe();
+    orbis_memprobe();
+  }
+  // vk-285-64: the recompilers' code in direct memory (pcsx2/Memory.cpp, g_orbis_code_direct) with
+  // the flag file jitdirect; without it, JIT shared memory out of the flexible budget, as before.
+  {
+    g_orbis_code_direct = orbis_flag("jitdirect") ? 1 : 0;
+    printf("[boot] recompiler code in %s\n", g_orbis_code_direct ? "direct memory (jitdirect)" : "JIT shared memory");
+    fflush(stdout);
+  }
   // Orbis dev-loop auto-restart: watch our own eboot; when a new build is
   // uploaded (size/mtime change, stable across two polls so partial FTP
   // writes don't trigger), re-exec into it via sceSystemServiceLoadExec.
@@ -1195,7 +1222,12 @@ int main()
     // Orbis: fastmem crashes in memReset on PS5 (pc=0 in a spawned thread;
     // likely mprotect/VirtualAlloc-style reservation or a startup race).
     // Keep off until that init path is diagnosed. See eerec-58.
-    s_base_si.SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", false);
+    // vk-285-64: the cause was the area itself -- views of the guest pages need memory that can be
+    // mapped twice, and the area was flexible memory (or nothing). With the guest's data in direct
+    // memory the area is a reservation filled with direct mappings (common/Linux/LnxHostSys.cpp);
+    // on with the flag file fastmem.
+    s_base_si.SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", orbis_flag("fastmem"));
+    printf("[boot] fastmem %s\n", orbis_flag("fastmem") ? "on (flag fastmem)" : "off");
     s_base_si.SetBoolValue("EmuCore/CPU/Recompiler", "EnableEECache", false);
     s_base_si.SetBoolValue("EmuCore/Speedhacks", "WaitLoop", true);
     s_base_si.SetBoolValue("EmuCore/Speedhacks", "IntcStat", true);
