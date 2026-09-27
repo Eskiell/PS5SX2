@@ -613,6 +613,16 @@ public:
 	// Test build 1 (vk-285-55): draws sTex over the frame being presented, blended by its alpha
 	// (the testing watermark). Only between BeginPresent and EndPresent.
 	void OrbisPresentBlend(GSTexture* sTex, const GSVector4& sRect, const GSVector4& dRect);
+	// vk-285-94: the GPU profiler (flags/gpuprof; GSDeviceVK.cpp). OrbisGpSecond once a second on the GS thread.
+	void OrbisGpSecond();
+	void OrbisGpDestroy();
+	void OrbisGpBegin(u32 index);
+	void OrbisGpWrite(const void* meta);
+	void OrbisGpStampDraw(const GSHWDrawConfig& config);
+	void OrbisGpStampOp(u8 kind, const GSTexture* dst, u32 w, u32 h, u64 pipe, u32 prims, u8 flags);
+	void OrbisGpStampPass(bool clear);
+	void OrbisGpCollect(u32 index);
+	void OrbisGpDescribe(const void* meta, char* out, size_t n) const;
 #endif
 	void DrawMultiStretchRects(
 		const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvertSelector shader) override;

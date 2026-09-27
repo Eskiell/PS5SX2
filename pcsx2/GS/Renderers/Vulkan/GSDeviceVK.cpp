@@ -1480,6 +1480,638 @@ void OrbisVkTraceTransfer(u8 kind, const GSTexture* tex, const GSVector4i& r)
 }
 #endif
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-94): the GPU profiler, with flags/gpuprof (live: OrbisGpSecond reads the flag once a
+// second; a command buffer started while it's there is profiled). A profiled command buffer gets a GPU
+// timestamp at its start, after each GS draw (RenderHW, all its passes), each utility draw (conversions,
+// copies by draw, the present), image copy and blit, at each render pass start (its clears, and the store
+// and layout changes since the last step), and at its end. The GPU writes a timestamp when all the work
+// before it has finished (end of pipe), so the gap from one to the next is what that step added to the
+// GPU's time. Once a second [gpuprof] lines: the GPU time per command buffer by kind of step, then the
+// costliest groups of steps (same kind, shader, blend, barriers, depth and target size) with their share,
+// count and pixels; every 5 s the costliest single steps of one command buffer, in order. The timestamps
+// cost some GPU and recorder time of their own. Needs proper testing.
+namespace
+{
+	constexpr u32 ORBIS_GP_MAX = 16384; // timestamps per command buffer (SotC's heavy view: ~1,300 GS draws a frame)
+	enum : u8
+	{
+		GPK_START,
+		GPK_DRAW,
+		GPK_UTIL,
+		GPK_COPY,
+		GPK_BLIT,
+		GPK_RPASS,
+		GPK_END,
+		GPK_KINDS
+	};
+	constexpr const char* s_gp_kind_name[GPK_KINDS] = {"start", "draw", "util", "copy", "blit", "rpass", "end"};
+
+	struct OrbisGpMeta
+	{
+		u8 kind, flags, rt_fmt, tex_fmt;
+		u16 rt_w, rt_h, area_w, area_h, tex_w, tex_h;
+		u32 prims, blend, misc;
+		u64 pipe;
+		u64 ps_lo, ps_hi;
+	};
+
+	struct OrbisGpFrame
+	{
+		u32 count = 0;
+		bool on = false, overflow = false;
+		OrbisGpMeta meta[ORBIS_GP_MAX];
+	};
+	OrbisGpFrame s_gp_frame[3]; // GSDeviceVK::NUM_COMMAND_BUFFERS (checked in OrbisGpBegin)
+	u64 s_gp_ts[ORBIS_GP_MAX];
+	VkQueryPool s_gp_pool = VK_NULL_HANDLE;
+	bool s_gp_want = false, s_gp_pool_failed = false;
+
+	struct OrbisGpGroup
+	{
+		u64 key; // 0: free
+		OrbisGpMeta ex;
+		u64 ticks, pixels;
+		u32 count;
+	};
+	constexpr u32 ORBIS_GP_GROUPS = 2048;
+	OrbisGpGroup s_gp_group[ORBIS_GP_GROUPS];
+	u32 s_gp_groups_used = 0, s_gp_groups_lost = 0;
+	u64 s_gp_kind_ticks[GPK_KINDS];
+	u32 s_gp_kind_n[GPK_KINDS];
+	u64 s_gp_span_ticks = 0;
+	u32 s_gp_cbs = 0, s_gp_overflows = 0, s_gp_bad = 0, s_gp_seconds = 0;
+
+	// One command buffer's costliest steps, for the 5-second timeline.
+	struct OrbisGpStep
+	{
+		OrbisGpMeta m;
+		u64 ticks;
+		u32 at;
+	};
+	constexpr u32 ORBIS_GP_TL = 40;
+	OrbisGpStep s_gp_tl[ORBIS_GP_TL];
+	u32 s_gp_tl_n = 0, s_gp_tl_steps = 0;
+	u64 s_gp_tl_span = 0;
+	bool s_gp_tl_want = false;
+
+	u64 OrbisGpKey(const OrbisGpMeta& m)
+	{
+		u64 h = 0xcbf29ce484222325ull;
+		const auto mix = [&h](u64 v) {
+			h ^= v;
+			h *= 0x100000001b3ull;
+			h ^= h >> 29;
+		};
+		mix(m.kind);
+		mix((static_cast<u64>(m.rt_w) << 16) | m.rt_h);
+		mix(m.rt_fmt);
+		switch (m.kind)
+		{
+			case GPK_DRAW:
+				mix(m.ps_lo);
+				mix(m.ps_hi);
+				mix(m.blend);
+				mix(m.misc);
+				mix(m.flags);
+				mix(m.pipe); // the second-pass shader's key, when there's one
+				break;
+			case GPK_UTIL:
+				mix(m.pipe);
+				break;
+			case GPK_COPY:
+			case GPK_BLIT:
+				mix((static_cast<u64>(m.area_w) << 16) | m.area_h);
+				break;
+			case GPK_RPASS:
+				mix(m.flags);
+				mix(m.tex_fmt);
+				break;
+			default:
+				break;
+		}
+		return h | 1;
+	}
+
+	void OrbisGpAdd(const OrbisGpMeta& m, u64 ticks)
+	{
+		const u64 key = OrbisGpKey(m);
+		const u64 pixels = static_cast<u64>(m.area_w) * m.area_h;
+		u32 i = static_cast<u32>(key) & (ORBIS_GP_GROUPS - 1);
+		for (u32 probe = 0; probe < 32; probe++, i = (i + 1) & (ORBIS_GP_GROUPS - 1))
+		{
+			OrbisGpGroup& g = s_gp_group[i];
+			if (g.key == key)
+			{
+				g.ticks += ticks;
+				g.pixels += pixels;
+				g.count++;
+				return;
+			}
+			if (g.key == 0)
+			{
+				if (s_gp_groups_used >= ORBIS_GP_GROUPS * 3 / 4)
+					break;
+				g.key = key;
+				g.ex = m;
+				g.ticks = ticks;
+				g.pixels = pixels;
+				g.count = 1;
+				s_gp_groups_used++;
+				return;
+			}
+		}
+		s_gp_groups_lost++;
+	}
+
+	// GSTexture::Format as a short name.
+	const char* OrbisGpFmt(u8 f)
+	{
+		switch (static_cast<GSTexture::Format>(f))
+		{
+			case GSTexture::Format::Invalid: return "-";
+			case GSTexture::Format::Color: return "C32";
+			case GSTexture::Format::ColorHQ: return "C10";
+			case GSTexture::Format::ColorHDR: return "C16F";
+			case GSTexture::Format::ColorClip: return "CClip";
+			case GSTexture::Format::DepthStencil: return "D32S8";
+			case GSTexture::Format::DepthColor: return "DColor";
+			case GSTexture::Format::UNorm8: return "U8";
+			case GSTexture::Format::UInt16: return "U16";
+			case GSTexture::Format::UInt32: return "U32";
+			case GSTexture::Format::PrimID: return "PrimID";
+			case GSTexture::Format::BC1: return "BC1";
+			case GSTexture::Format::BC2: return "BC2";
+			case GSTexture::Format::BC3: return "BC3";
+			case GSTexture::Format::BC7: return "BC7";
+			default: return "?";
+		}
+	}
+
+	// The pixel shader selector's fields that are set, "name=value" (1-bit ones by name alone).
+	void OrbisGpDescribePS(u64 lo, u64 hi, char* out, size_t n)
+	{
+		GSHWDrawConfig::PSSelector ps;
+		ps.key_lo = lo;
+		ps.key_hi = hi;
+		size_t pos = 0;
+		const auto add = [&](const char* name, u32 v, bool bit) {
+			if (!v || pos + 24 >= n)
+				return;
+			pos += bit ? snprintf(out + pos, n - pos, " %s", name) : snprintf(out + pos, n - pos, " %s=%u", name, v);
+		};
+		add("aem_fmt", ps.aem_fmt, false);
+		add("pal_fmt", ps.pal_fmt, false);
+		add("dst_fmt", ps.dst_fmt, false);
+		add("depth_fmt", ps.depth_fmt, false);
+		add("aem", ps.aem, true);
+		add("fba", ps.fba, true);
+		add("fog", ps.fog, true);
+		add("iip", ps.iip, true);
+		add("date", ps.date, false);
+		add("atst", static_cast<u32>(ps.atst), false);
+		add("afail", static_cast<u32>(ps.afail), false);
+		add("ztst", ps.ztst, false);
+		add("fst", ps.fst, true);
+		add("tfx", ps.tfx, false);
+		add("tcc", ps.tcc, true);
+		add("wms", ps.wms, false);
+		add("wmt", ps.wmt, false);
+		add("adjs", ps.adjs, true);
+		add("adjt", ps.adjt, true);
+		add("ltf", ps.ltf, true);
+		add("shuffle", ps.shuffle, true);
+		add("shuffle_same", ps.shuffle_same, true);
+		add("real16src", ps.real16src, true);
+		add("process_ba", ps.process_ba, false);
+		add("process_rg", ps.process_rg, false);
+		add("shuffle_across", ps.shuffle_across, true);
+		add("write_rg", ps.write_rg, true);
+		add("fbmask", ps.fbmask, true);
+		add("blend_a", ps.blend_a, false);
+		add("blend_b", ps.blend_b, false);
+		add("blend_c", ps.blend_c, false);
+		add("blend_d", ps.blend_d, false);
+		add("fixed_one_a", ps.fixed_one_a, true);
+		add("blend_hw", ps.blend_hw, false);
+		add("a_masked", ps.a_masked, true);
+		add("colclip_hw", ps.colclip_hw, true);
+		add("rta_corr", ps.rta_correction, true);
+		add("rta_src_corr", ps.rta_source_correction, true);
+		add("colclip", ps.colclip, true);
+		add("blend_mix", ps.blend_mix, false);
+		add("round_inv", ps.round_inv, true);
+		add("pabe", ps.pabe, true);
+		add("no_color", ps.no_color, true);
+		add("no_color1", ps.no_color1, true);
+		add("channel", ps.channel, false);
+		add("dither", ps.dither, false);
+		add("dither_adjust", ps.dither_adjust, true);
+		add("zclamp", ps.zclamp, true);
+		add("zfloor", ps.zfloor, true);
+		add("tcoffsethack", ps.tcoffsethack, true);
+		add("tex_is_fb", ps.tex_is_fb, true);
+		add("auto_lod", ps.automatic_lod, true);
+		add("manual_lod", ps.manual_lod, true);
+		add("point_sampler", ps.point_sampler, true);
+		add("region_rect", ps.region_rect, true);
+		add("scanmsk", ps.scanmsk, false);
+		add("aa1", static_cast<u32>(ps.aa1), false);
+		add("abe", ps.abe, true);
+		add("sw_aniso", ps.sw_aniso, false);
+		add("rov_color", ps.rov_color, true);
+		add("rov_depth", static_cast<u32>(ps.rov_depth), false);
+		if (pos == 0 && n > 0)
+			snprintf(out, n, " -");
+	}
+} // namespace
+
+void GSDeviceVK::OrbisGpBegin(u32 index)
+{
+	static_assert(std::size(s_gp_frame) == NUM_COMMAND_BUFFERS);
+	OrbisGpFrame& f = s_gp_frame[index];
+	f.count = 0;
+	f.overflow = false;
+	f.on = s_gp_want && !s_gp_pool_failed;
+	if (!f.on)
+		return;
+	if (s_gp_pool == VK_NULL_HANDLE)
+	{
+		const VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0, VK_QUERY_TYPE_TIMESTAMP,
+			ORBIS_GP_MAX * NUM_COMMAND_BUFFERS, 0};
+		const VkResult res = vkCreateQueryPool(m_device, &ci, nullptr, &s_gp_pool);
+		if (res != VK_SUCCESS)
+		{
+			printf("[gpuprof] no timestamp query pool (VkResult %d): the profiler stays off\n", static_cast<int>(res));
+			s_gp_pool_failed = true;
+			s_gp_pool = VK_NULL_HANDLE;
+			f.on = false;
+			return;
+		}
+	}
+	vkCmdResetQueryPool(m_frame_resources[index].command_buffers[1], s_gp_pool, index * ORBIS_GP_MAX, ORBIS_GP_MAX);
+	OrbisGpMeta m = {};
+	m.kind = GPK_START;
+	f.meta[0] = m;
+	vkCmdWriteTimestamp(m_frame_resources[index].command_buffers[1], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_gp_pool,
+		index * ORBIS_GP_MAX);
+	f.count = 1;
+}
+
+static inline bool OrbisGpOn(u32 frame)
+{
+	return s_gp_frame[frame].on;
+}
+
+void GSDeviceVK::OrbisGpWrite(const void* meta)
+{
+	OrbisGpFrame& f = s_gp_frame[m_current_frame];
+	if (!f.on)
+		return;
+	if (f.count >= ORBIS_GP_MAX)
+	{
+		f.overflow = true;
+		return;
+	}
+	vkCmdWriteTimestamp(m_current_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_gp_pool,
+		m_current_frame * ORBIS_GP_MAX + f.count);
+	f.meta[f.count++] = *static_cast<const OrbisGpMeta*>(meta);
+}
+
+void GSDeviceVK::OrbisGpStampDraw(const GSHWDrawConfig& config)
+{
+	if (!OrbisGpOn(m_current_frame)) [[likely]]
+		return;
+	OrbisGpMeta m = {};
+	m.kind = GPK_DRAW;
+	const GSTexture* rt = config.rt ? config.rt : config.ds;
+	if (rt)
+	{
+		m.rt_w = static_cast<u16>(rt->GetWidth());
+		m.rt_h = static_cast<u16>(rt->GetHeight());
+		m.rt_fmt = static_cast<u8>(rt->GetFormat());
+	}
+	m.area_w = static_cast<u16>(std::max(config.drawarea.width(), 0));
+	m.area_h = static_cast<u16>(std::max(config.drawarea.height(), 0));
+	if (config.tex)
+	{
+		m.tex_w = static_cast<u16>(config.tex->GetWidth());
+		m.tex_h = static_cast<u16>(config.tex->GetHeight());
+		m.tex_fmt = static_cast<u8>(config.tex->GetFormat());
+	}
+	m.flags = (config.require_one_barrier ? 1 : 0) | (config.require_full_barrier ? 2 : 0) |
+	          (config.alpha_second_pass.enable ? 4 : 0) | (config.blend_multi_pass.enable ? 8 : 0) |
+	          (config.ps.colclip_hw ? 16 : 0) |
+	          (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::PrimIDTracking ? 32 : 0) |
+	          (config.ds ? 64 : 0) | (config.tex && (config.tex == config.rt || config.tex == config.ds) ? 128 : 0);
+	m.prims = (config.require_full_barrier && config.drawlist) ? static_cast<u32>(config.drawlist->size()) :
+	          config.indices_per_prim ? config.nindices / config.indices_per_prim : config.nindices;
+	m.blend = config.blend.key;
+	m.misc = static_cast<u32>(config.depth.key) | (static_cast<u32>(config.colormask.key) << 8) |
+	         (static_cast<u32>(config.topology) << 16) | (static_cast<u32>(config.destination_alpha) << 24);
+	m.ps_lo = config.ps.key_lo;
+	m.ps_hi = config.ps.key_hi;
+	m.pipe = config.alpha_second_pass.enable ? (config.alpha_second_pass.ps.key_lo ^ (config.alpha_second_pass.ps.key_hi << 1)) : 0;
+	OrbisGpWrite(&m);
+}
+
+void GSDeviceVK::OrbisGpStampOp(u8 kind, const GSTexture* dst, u32 w, u32 h, u64 pipe, u32 prims, u8 flags)
+{
+	if (!OrbisGpOn(m_current_frame)) [[likely]]
+		return;
+	OrbisGpMeta m = {};
+	m.kind = kind;
+	m.flags = flags;
+	if (dst)
+	{
+		m.rt_w = static_cast<u16>(dst->GetWidth());
+		m.rt_h = static_cast<u16>(dst->GetHeight());
+		m.rt_fmt = static_cast<u8>(dst->GetFormat());
+	}
+	m.area_w = static_cast<u16>(std::min<u32>(w, 0xffff));
+	m.area_h = static_cast<u16>(std::min<u32>(h, 0xffff));
+	m.pipe = pipe;
+	m.prims = prims;
+	OrbisGpWrite(&m);
+}
+
+void GSDeviceVK::OrbisGpStampPass(bool clear)
+{
+	if (!OrbisGpOn(m_current_frame)) [[likely]]
+		return;
+	OrbisGpMeta m = {};
+	m.kind = GPK_RPASS;
+	const GSTexture* rt = m_current_render_target ? static_cast<const GSTexture*>(m_current_render_target) :
+	                                                 static_cast<const GSTexture*>(m_current_depth_target);
+	if (rt)
+	{
+		m.rt_w = static_cast<u16>(rt->GetWidth());
+		m.rt_h = static_cast<u16>(rt->GetHeight());
+	}
+	if (m_current_render_target)
+		m.rt_fmt = static_cast<u8>(m_current_render_target->GetFormat());
+	if (m_current_depth_target)
+		m.tex_fmt = static_cast<u8>(m_current_depth_target->GetFormat());
+	m.flags = (clear ? 1 : 0) | (m_current_render_target ? 2 : 0) | (m_current_depth_target ? 4 : 0);
+	m.area_w = static_cast<u16>(m_current_render_pass_area.width());
+	m.area_h = static_cast<u16>(m_current_render_pass_area.height());
+	OrbisGpWrite(&m);
+}
+
+void GSDeviceVK::OrbisGpCollect(u32 index)
+{
+	OrbisGpFrame& f = s_gp_frame[index];
+	if (!f.on)
+		return;
+	f.on = false;
+	if (f.overflow)
+		s_gp_overflows++;
+	const u32 n = f.count;
+	if (n < 2 || s_gp_pool == VK_NULL_HANDLE)
+		return;
+	const VkResult res = vkGetQueryPoolResults(m_device, s_gp_pool, index * ORBIS_GP_MAX, n, sizeof(u64) * n, s_gp_ts,
+		sizeof(u64), VK_QUERY_RESULT_64_BIT);
+	if (res != VK_SUCCESS || s_gp_ts[0] == 0)
+	{
+		s_gp_bad++;
+		return;
+	}
+	const bool tl = s_gp_tl_want;
+	u32 tl_n = 0;
+	u64 prev = s_gp_ts[0];
+	for (u32 i = 1; i < n; i++)
+	{
+		const u64 t = s_gp_ts[i];
+		if (t == 0 || t < prev)
+		{
+			s_gp_bad++;
+			continue;
+		}
+		const u64 d = t - prev;
+		prev = t;
+		const OrbisGpMeta& m = f.meta[i];
+		s_gp_kind_ticks[m.kind] += d;
+		s_gp_kind_n[m.kind]++;
+		OrbisGpAdd(m, d);
+		if (tl)
+		{
+			// Keep the ORBIS_GP_TL costliest (replace the cheapest kept).
+			if (tl_n < ORBIS_GP_TL)
+			{
+				s_gp_tl[tl_n++] = {m, d, i};
+			}
+			else
+			{
+				u32 lo = 0;
+				for (u32 k = 1; k < ORBIS_GP_TL; k++)
+					if (s_gp_tl[k].ticks < s_gp_tl[lo].ticks)
+						lo = k;
+				if (d > s_gp_tl[lo].ticks)
+					s_gp_tl[lo] = {m, d, i};
+			}
+		}
+	}
+	s_gp_span_ticks += prev - s_gp_ts[0];
+	s_gp_cbs++;
+	if (tl)
+	{
+		std::sort(s_gp_tl, s_gp_tl + tl_n, [](const OrbisGpStep& a, const OrbisGpStep& b) { return a.at < b.at; });
+		s_gp_tl_n = tl_n;
+		s_gp_tl_steps = n;
+		s_gp_tl_span = prev - s_gp_ts[0];
+		s_gp_tl_want = false;
+	}
+}
+
+void GSDeviceVK::OrbisGpDescribe(const void* meta, char* out, size_t n) const
+{
+	const OrbisGpMeta& m = *static_cast<const OrbisGpMeta*>(meta);
+	switch (m.kind)
+	{
+		case GPK_DRAW:
+		{
+			char ps[512];
+			OrbisGpDescribePS(m.ps_lo, m.ps_hi, ps, sizeof(ps));
+			GSHWDrawConfig::BlendState bs;
+			bs.key = m.blend;
+			const GSHWDrawConfig::DepthStencilSelector dss(static_cast<u8>(m.misc & 0xff));
+			snprintf(out, n,
+				"draw rt %ux%u %s area %ux%u tex %ux%u %s prims %u%s%s%s%s%s%s%s | bs %s op %u src %u dst %u%s | z tst %u we %u date %u/%u | cm %x topo %u datm %u | ps%s",
+				m.rt_w, m.rt_h, OrbisGpFmt(m.rt_fmt), m.area_w, m.area_h, m.tex_w, m.tex_h, OrbisGpFmt(m.tex_fmt), m.prims,
+				(m.flags & 1) ? " one-barrier" : "", (m.flags & 2) ? " FULL-BARRIER" : "", (m.flags & 4) ? " +alpha-pass" : "",
+				(m.flags & 8) ? " +blend-pass" : "", (m.flags & 16) ? " colclip-hw" : "", (m.flags & 32) ? " primid-date" : "",
+				(m.flags & 128) ? " tex=target" : "", bs.enable ? "on" : "off", bs.op, bs.src_factor, bs.dst_factor,
+				bs.constant_enable ? " const" : "", dss.ztst, dss.zwe, dss.date, dss.date_one, (m.misc >> 8) & 0xf,
+				(m.misc >> 16) & 0xff, (m.misc >> 24) & 0xff, ps);
+			break;
+		}
+		case GPK_UTIL:
+		{
+			const VkPipeline p = reinterpret_cast<VkPipeline>(m.pipe);
+			char name[64] = "other";
+			for (u32 i = 0; i < m_convert.size(); i++)
+			{
+				if (m_convert[i] == p && p != VK_NULL_HANDLE)
+				{
+					const ShaderConvertSelector sel = ShaderConvertSelector::Get(i);
+					snprintf(name, sizeof(name), "convert %s mask %x%s", sel.Name(), sel.Mask(), sel.Biln() ? " biln" : "");
+					break;
+				}
+			}
+			for (u32 i = 0; i < m_present.size(); i++)
+				if (m_present[i] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "present %u", i);
+			for (u32 i = 0; i < m_merge.size(); i++)
+				if (m_merge[i] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "merge %u", i);
+			for (u32 i = 0; i < m_interlace.size(); i++)
+				if (m_interlace[i] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "interlace %u", i);
+			for (u32 i = 0; i < 4; i++)
+			{
+				if (m_colclip_setup_pipelines[i / 2][i % 2] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "colclip setup");
+				if (m_colclip_finish_pipelines[i / 2][i % 2] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "colclip finish");
+			}
+			for (u32 i = 0; i < 8; i++)
+				if (m_primid_image_setup_pipelines[i / 4][i % 4] == p && p != VK_NULL_HANDLE)
+					snprintf(name, sizeof(name), "primid setup");
+			if (p != VK_NULL_HANDLE && p == m_fxaa_pipeline)
+				snprintf(name, sizeof(name), "fxaa");
+			if (p != VK_NULL_HANDLE && p == m_shadeboost_pipeline)
+				snprintf(name, sizeof(name), "shadeboost");
+			if (p != VK_NULL_HANDLE && p == m_imgui_pipeline)
+				snprintf(name, sizeof(name), "imgui");
+			snprintf(out, n, "util %s | dst %ux%u %s area %ux%u%s", name, m.rt_w, m.rt_h, OrbisGpFmt(m.rt_fmt), m.area_w,
+				m.area_h, m.prims > 1 ? " (multi)" : "");
+			break;
+		}
+		case GPK_COPY:
+		case GPK_BLIT:
+			snprintf(out, n, "%s %ux%u into %ux%u %s", s_gp_kind_name[m.kind], m.area_w, m.area_h, m.rt_w, m.rt_h,
+				OrbisGpFmt(m.rt_fmt));
+			break;
+		case GPK_RPASS:
+			snprintf(out, n, "rpass%s rt %ux%u %s ds %s area %ux%u (the last pass's end, barriers, this one's start)",
+				(m.flags & 1) ? " CLEAR" : "", m.rt_w, m.rt_h, (m.flags & 2) ? OrbisGpFmt(m.rt_fmt) : "-",
+				(m.flags & 4) ? OrbisGpFmt(m.tex_fmt) : "-", m.area_w, m.area_h);
+			break;
+		case GPK_END:
+			snprintf(out, n, "end of the command buffer (what follows the last step: the present's draws, readbacks)");
+			break;
+		default:
+			snprintf(out, n, "%s", m.kind < GPK_KINDS ? s_gp_kind_name[m.kind] : "?");
+			break;
+	}
+}
+
+extern "C" uint32_t ps5vk_debug_timestamp_flush(uint32_t flush) __attribute__((weak)); // the driver (ps5vk_debug.h)
+
+void GSDeviceVK::OrbisGpSecond()
+{
+	const bool want = OrbisFlag("gpuprof");
+	if (want != s_gp_want)
+	{
+		// The driver's timestamps carry the completion marker's cache actions (a GL2 write-back and
+		// invalidate) unless told otherwise: after every draw that would slow the frame being measured.
+		// flags/gpuprof_flush keeps them (to compare).
+		const bool flush = !want || OrbisFlag("gpuprof_flush");
+		if (ps5vk_debug_timestamp_flush)
+			ps5vk_debug_timestamp_flush(flush ? 1u : 0u);
+		printf("[gpuprof] %s (flags/gpuprof), timestamps %s\n", want ? "on" : "off",
+			!ps5vk_debug_timestamp_flush ? "as the driver writes them" : flush ? "with cache actions" : "without cache actions");
+		s_gp_want = want;
+		s_gp_seconds = 0;
+	}
+	if (s_gp_cbs != 0)
+	{
+		const double tick_ms = static_cast<double>(m_device_properties.limits.timestampPeriod) / 1e6;
+		const double per_cb = 1.0 / s_gp_cbs;
+		u64 steps_ticks = 0;
+		for (u32 k = 1; k < GPK_KINDS; k++)
+			steps_ticks += s_gp_kind_ticks[k];
+		printf("[gpuprof] %u command buffers, GPU %.2f ms each | per command buffer:", s_gp_cbs, s_gp_span_ticks * tick_ms * per_cb);
+		for (u32 k = 1; k < GPK_KINDS; k++)
+			printf(" %s %.2f ms (%.0f)", s_gp_kind_name[k], s_gp_kind_ticks[k] * tick_ms * per_cb, s_gp_kind_n[k] * per_cb);
+		printf(" | groups %u lost %u, overflows %u, bad %u\n", s_gp_groups_used, s_gp_groups_lost, s_gp_overflows, s_gp_bad);
+
+		// The costliest groups.
+		constexpr u32 TOP = 18;
+		u32 top[TOP];
+		u32 top_n = 0;
+		for (u32 i = 0; i < ORBIS_GP_GROUPS; i++)
+		{
+			if (s_gp_group[i].key == 0)
+				continue;
+			if (top_n < TOP)
+			{
+				top[top_n++] = i;
+				continue;
+			}
+			u32 lo = 0;
+			for (u32 k = 1; k < TOP; k++)
+				if (s_gp_group[top[k]].ticks < s_gp_group[top[lo]].ticks)
+					lo = k;
+			if (s_gp_group[i].ticks > s_gp_group[top[lo]].ticks)
+				top[lo] = i;
+		}
+		std::sort(top, top + top_n, [](u32 a, u32 b) { return s_gp_group[a].ticks > s_gp_group[b].ticks; });
+		for (u32 r = 0; r < top_n; r++)
+		{
+			const OrbisGpGroup& g = s_gp_group[top[r]];
+			char desc[1024];
+			OrbisGpDescribe(&g.ex, desc, sizeof(desc));
+			printf("[gpuprof] #%u %4.1f%% %.3f ms/cb n %.1f/cb avg %.1f us, %.2f Mpx/step (%.0f Mpx/ms) | %s\n", r + 1,
+				steps_ticks ? 100.0 * g.ticks / steps_ticks : 0.0, g.ticks * tick_ms * per_cb, g.count * per_cb,
+				g.ticks * tick_ms * 1000.0 / g.count, static_cast<double>(g.pixels) / g.count / 1e6,
+				g.ticks ? (static_cast<double>(g.pixels) / 1e6) / (g.ticks * tick_ms) : 0.0, desc);
+		}
+	}
+	if (s_gp_tl_n != 0)
+	{
+		const double tick_ms = static_cast<double>(m_device_properties.limits.timestampPeriod) / 1e6;
+		printf("[gpuprof] one command buffer: %u steps, %.2f ms; its %u costliest steps in order:\n", s_gp_tl_steps,
+			s_gp_tl_span * tick_ms, s_gp_tl_n);
+		for (u32 i = 0; i < s_gp_tl_n; i++)
+		{
+			char desc[1024];
+			OrbisGpDescribe(&s_gp_tl[i].m, desc, sizeof(desc));
+			printf("[gpuprof]   step %5u %7.3f ms | %s\n", s_gp_tl[i].at, s_gp_tl[i].ticks * tick_ms, desc);
+		}
+		s_gp_tl_n = 0;
+	}
+	if (s_gp_want && (++s_gp_seconds % 5) == 0)
+		s_gp_tl_want = true;
+	if (s_gp_cbs != 0 || s_gp_tl_n != 0)
+		fflush(stdout);
+	std::memset(s_gp_group, 0, sizeof(s_gp_group));
+	s_gp_groups_used = s_gp_groups_lost = 0;
+	std::memset(s_gp_kind_ticks, 0, sizeof(s_gp_kind_ticks));
+	std::memset(s_gp_kind_n, 0, sizeof(s_gp_kind_n));
+	s_gp_span_ticks = 0;
+	s_gp_cbs = s_gp_overflows = s_gp_bad = 0;
+}
+
+void GSDeviceVK::OrbisGpDestroy()
+{
+	if (s_gp_pool != VK_NULL_HANDLE)
+	{
+		vkDestroyQueryPool(m_device, s_gp_pool, nullptr);
+		s_gp_pool = VK_NULL_HANDLE;
+	}
+	for (OrbisGpFrame& f : s_gp_frame)
+		f.on = false;
+}
+
+// For GSRenderer.cpp (which doesn't include this header), once a second on the GS thread.
+void OrbisVkGpuProfSecond()
+{
+	if (GSDeviceVK* dev = GSDeviceVK::GetInstance())
+		dev->OrbisGpSecond();
+}
+#endif
+
 void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
 {
 	// Wait for this command buffer to be completed.
@@ -1569,6 +2201,9 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		vkCmdWriteTimestamp(m_current_command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, m_timestamp_query_pool,
 			m_current_frame * 2 + 1);
 	}
+#ifdef ORBIS_VULKAN
+	OrbisGpStampOp(GPK_END, nullptr, 0, 0, 0, 0, 0); // vk-285-94
+#endif
 
 	if (resources.pipeline_statistics_query == QueryState::Querying)
 	{
@@ -1738,6 +2373,9 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 void GSDeviceVK::CommandBufferCompleted(u32 index)
 {
 	FrameResources& resources = m_frame_resources[index];
+#ifdef ORBIS_VULKAN
+	OrbisGpCollect(index); // vk-285-94
+#endif
 
 	for (auto& it : resources.cleanup_resources)
 		it();
@@ -1861,6 +2499,9 @@ void GSDeviceVK::ActivateCommandBuffer(u32 index)
 
 	// using the lower 32 bits of the fence index should be sufficient here, I hope...
 	vmaSetCurrentFrameIndex(m_allocator, static_cast<u32>(m_next_fence_counter));
+#ifdef ORBIS_VULKAN
+	OrbisGpBegin(index); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::ExecuteCommandBuffer(WaitType wait_for_completion)
@@ -3484,6 +4125,9 @@ void GSDeviceVK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 		dTexVK->GetVkLayout(), 1, &ic);
 
 	dTexVK->SetState(GSTexture::State::Dirty);
+#ifdef ORBIS_VULKAN
+	OrbisGpStampOp(GPK_COPY, dTexVK, r.width(), r.height(), 0, 1, 0); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
@@ -3668,6 +4312,9 @@ void GSDeviceVK::DoMultiStretchRects(
 
 	if (ApplyUtilityState())
 		DrawIndexedPrimitive();
+#ifdef ORBIS_VULKAN
+	OrbisGpStampOp(GPK_UTIL, dTex, dTex->GetWidth(), dTex->GetHeight(), reinterpret_cast<u64>(m_current_pipeline), num_rects, 0); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::BeginRenderPassForStretchRect(
@@ -3775,6 +4422,11 @@ void GSDeviceVK::DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect,
 
 	if (ApplyUtilityState())
 		DrawPrimitive();
+#ifdef ORBIS_VULKAN
+	// vk-285-94: the target is the one bound (or the swap chain's image for the present).
+	OrbisGpStampOp(GPK_UTIL, m_current_render_target, static_cast<u32>(std::max(dRect.z - dRect.x, 0.0f)),
+		static_cast<u32>(std::max(dRect.w - dRect.y, 0.0f)), reinterpret_cast<u64>(m_current_pipeline), 1, 0);
+#endif
 }
 
 void GSDeviceVK::BlitRect(GSTexture* sTex, const GSVector4i& sRect, u32 sLevel, GSTexture* dTex,
@@ -3801,6 +4453,9 @@ void GSDeviceVK::BlitRect(GSTexture* sTex, const GSVector4i& sRect, u32 sLevel, 
 	vkCmdBlitImage(GetCurrentCommandBuffer(), sTexVK->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		dTexVK->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ib,
 		filter == Biln ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+#ifdef ORBIS_VULKAN
+	OrbisGpStampOp(GPK_BLIT, dTexVK, dRect.width(), dRect.height(), 0, 1, 0); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::UpdateCLUTTexture(
@@ -5447,6 +6102,9 @@ void GSDeviceVK::DestroyResources()
 
 	if (m_timestamp_query_pool != VK_NULL_HANDLE)
 		vkDestroyQueryPool(m_device, m_timestamp_query_pool, nullptr);
+#ifdef ORBIS_VULKAN
+	OrbisGpDestroy(); // vk-285-94
+#endif
 
 	if (m_pipeline_statistics_query_pool != VK_NULL_HANDLE)
 		vkDestroyQueryPool(m_device, m_pipeline_statistics_query_pool, nullptr);
@@ -6153,6 +6811,9 @@ void GSDeviceVK::BeginRenderPass(VkRenderPass rp, const GSVector4i& rect)
 
 	m_command_buffer_render_passes++;
 	vkCmdBeginRenderPass(GetCurrentCommandBuffer(), &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+#ifdef ORBIS_VULKAN
+	OrbisGpStampPass(false); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::BeginClearRenderPass(VkRenderPass rp, const GSVector4i& rect, const VkClearValue* cv, u32 cv_count)
@@ -6168,6 +6829,9 @@ void GSDeviceVK::BeginClearRenderPass(VkRenderPass rp, const GSVector4i& rect, c
 		cv_count, cv};
 
 	vkCmdBeginRenderPass(GetCurrentCommandBuffer(), &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+#ifdef ORBIS_VULKAN
+	OrbisGpStampPass(true); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::BeginClearRenderPass(VkRenderPass rp, const GSVector4i& rect, u32 clear_color)
@@ -7041,6 +7705,9 @@ void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 	}
 
 	config.colclip_mode = GSHWDrawConfig::ColClipMode::NoModify;
+#ifdef ORBIS_VULKAN
+	OrbisGpStampDraw(config); // vk-285-94
+#endif
 }
 
 void GSDeviceVK::UpdateHWPipelineSelector(GSHWDrawConfig& config, PipelineSelector& pipe)

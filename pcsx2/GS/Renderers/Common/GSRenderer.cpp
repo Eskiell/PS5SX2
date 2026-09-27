@@ -497,6 +497,8 @@ static void OrbisPrintLoad()
 #ifdef ORBIS_VULKAN
 	OrbisGSProfStart(); // vk-285-24: starts sampling this (GS) thread once /data/PCSX2/gsprof exists
 	OrbisEEProfMark(); // vk-285-8: the profiler's sample count at this [load] line
+	extern void OrbisVkGpuProfSecond(); // GSDeviceVK.cpp
+	OrbisVkGpuProfSecond(); // vk-285-94: the GPU profiler's lines (flags/gpuprof)
 #endif
 }
 void OrbisDiagTexture(const char* tag, GSTexture* t);
