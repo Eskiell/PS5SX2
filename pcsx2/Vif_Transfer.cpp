@@ -44,6 +44,23 @@ _vifT void vifTransferLoop(u32* &data) {
 			}
 		}
 
+		// PS5 port (vk-285-96): a NOP (code 0, no IRQ bit) without the handler table's indirect call:
+		// vifCode_Nop's pass 1, step for step. Shadow of the Colossus's VIF1 lists have enough of them
+		// that the handler was ~1.7% of the EE thread at its heaviest view (vk-285-95's profile).
+		if (vifX.cmd == 0 && vifX.pass == 0)
+		{
+			if (vifX.queued_program)
+				vifExecQueue(idx);
+			if (pSize > 1 && ((data[1] >> 24) & 0x7f) == 0x6 && (data[1] & 0x1)) // is mskpath3 next
+			{
+				vifX.vifstalled.enabled = VifStallEnable(vifXch);
+				vifX.vifstalled.value = VIF_TIMING_BREAK;
+			}
+			data  += 1;
+			pSize -= 1;
+			continue;
+		}
+
 		ret = vifCmdHandler[idx][vifX.cmd & 0x7f](vifX.pass, data);
 		data   += ret;
 		pSize  -= ret;
