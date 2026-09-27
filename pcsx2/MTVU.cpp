@@ -22,6 +22,11 @@ std::atomic<int> g_orbis_vu_waiting{0}; // vk-285-29: the VU1 profiler skips the
 std::atomic<u64> g_orbis_vu1_cycles{0}, g_orbis_vu1_runs{0};
 std::atomic<int> g_orbis_vu1_dump_request{0};
 void OrbisVU1Dump();
+// vk-285-75: the emulated VU1 speed in percent, for Instant VU1 off (ExecuteVU): the busy time the EE
+// sees is the recent programs' average cycles divided by this. Set by main-boot.cpp from the settings
+// key EmuCore/Speedhacks/OrbisVU1Speed (gs.ini or a game's settings file; 25..800, default 100).
+// Needs proper testing.
+std::atomic<u32> g_orbis_vu1_speed{100};
 
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
@@ -500,8 +505,12 @@ void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)
 
 	if (!INSTANT_VU1)
 	{
+		// vk-285-75: OrbisVU1Speed scales the busy time (percent; 100 leaves it as counted).
+		const u32 speed = g_orbis_vu1_speed.load(std::memory_order_relaxed);
+		const u32 busy = (speed == 100 || speed == 0) ? cycles :
+			std::max<u32>(4u, static_cast<u32>(static_cast<u64>(cycles) * 100u / speed));
 		VU0.VI[REG_VPU_STAT].UL |= 0x100;
-		CPU_INT(VU_MTVU_BUSY, cycles);
+		CPU_INT(VU_MTVU_BUSY, busy);
 	}
 }
 

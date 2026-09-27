@@ -542,6 +542,20 @@ static MemorySettingsInterface s_base_si;
 static MemorySettingsInterface s_game_si;
 static MemorySettingsInterface s_input_si;
 
+// vk-285-75: EmuCore/Speedhacks/OrbisVU1Speed (percent, 25..800, default 100) from the settings as
+// gs.ini and the game's file left them, into pcsx2/MTVU.cpp's g_orbis_vu1_speed. It only matters with
+// Instant VU1 off: the EE then sees VU1 busy for the recent programs' cycles divided by it.
+extern std::atomic<u32> g_orbis_vu1_speed;
+static void orbis_vu1_speed_from(const SettingsInterface& si)
+{
+  int v = 100;
+  si.GetIntValue("EmuCore/Speedhacks", "OrbisVU1Speed", &v);
+  const u32 speed = static_cast<u32>(std::clamp(v, 25, 800));
+  if (speed != g_orbis_vu1_speed.load(std::memory_order_relaxed))
+    printf("[boot] VU1 speed %u%% (EmuCore/Speedhacks/OrbisVU1Speed; with Instant VU1 off)\n", speed);
+  g_orbis_vu1_speed.store(speed, std::memory_order_relaxed);
+}
+
 // eerec-285: gs.ini re-read while running (GSRenderer.cpp OrbisLiveTune sees the change, StubHost's
 // PumpMessagesOnCPUThread calls this at vsync on the CPU thread).
 static MemorySettingsInterface s_base_pre_gsini; // the base layer as it was before boot applied gs.ini
@@ -599,14 +613,16 @@ void orbis_reload_gs_ini_cpu()
     std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
     s_base_si = trial;
   }
+  orbis_vu1_speed_from(trial); // vk-285-75
   VMManager::ApplySettings();
   // vk-285-34: a changed patch list (Patches/Enable) or a new pnach applies live too; PCSX2 only
   // re-reads them on its own when one of the patch switches changes.
   VMManager::ReloadPatches(true, true, false, true);
   g_orbis_live_reapply.store(1, std::memory_order_release);
-  printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d\n",
+  printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d vu1Instant=%d vu1Speed=%u\n",
     (int)EmuConfig.Speedhacks.EECycleRate, (double)EmuConfig.GS.FrameratePAL, (int)EmuConfig.GS.SWExtraThreads,
-    (int)EmuConfig.GS.TVShader, (int)EmuConfig.Speedhacks.vuThread);
+    (int)EmuConfig.GS.TVShader, (int)EmuConfig.Speedhacks.vuThread, (int)EmuConfig.Speedhacks.vu1Instant,
+    g_orbis_vu1_speed.load(std::memory_order_relaxed));
   fflush(stdout);
   orbis_eventf(kept ? "live apply: applied in the running game; MTVU and the other relaunch-only options wait for the next launch" :
                       "live apply: applied in the running game");
@@ -1273,6 +1289,7 @@ int main()
   printf("[boot] USB keyboard and mouse %s\n", orbis_flag("nousbkbm") ? "off (flag nousbkbm)" : "on ports 1 and 2");
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
+  orbis_vu1_speed_from(s_base_si); // vk-285-75
 
   {
     Error pf_err;
