@@ -157,7 +157,14 @@ static void OrbisApplyLayout(unsigned long long orig)
 		for (int c = 0; c < 64; c++)
 			if ((rest >> c) & 1ull)
 				CPU_SET(c, &set);
-		rc_all = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, sizeof(set), &set) == 0 ? 0 : errno;
+		// vk-285-88: the console's kernel refused sizeof(cpuset_t) (32 bytes) with ERANGE in vk-285-87, so the
+		// set's size is whatever it takes: 8, 16 or 32 bytes (the first 64 bits hold every CPU there is).
+		for (const size_t size : {size_t{8}, size_t{16}, sizeof(set)})
+		{
+			rc_all = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, size, &set) == 0 ? 0 : errno;
+			if (rc_all != ERANGE)
+				break;
+		}
 	}
 	s_orbis_pin_mode = 3;
 	int rc[ORBIS_CPU_SLOTS];

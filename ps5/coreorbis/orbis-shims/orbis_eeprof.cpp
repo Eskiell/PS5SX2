@@ -250,11 +250,33 @@ void Calibrate()
 		(on_stack(rsp_ps5) || on_stack(rsp_bsd)) ? "" : " (neither slot held this stack; kept the default)");
 }
 
+// vk-285-88: a profiled thread pinned alone to a CPU (live.ini pin=3) got its SIGPROF only at its next
+// system call -- the signal waits for the thread to enter the kernel when nothing interrupts it -- so every
+// sample of vk-285-87's GS profile fell on a libkernel syscall stub. The sampler therefore follows the
+// profiled thread's affinity: on its CPU, its wake-up preempts the thread, which then takes the signal at
+// the instruction it was interrupted at.
+extern "C" int scePthreadGetaffinity(pthread_t thread, unsigned long long* mask);
+extern "C" int scePthreadSetaffinity(pthread_t thread, unsigned long long mask);
+static void FollowAffinity()
+{
+	static unsigned long long s_last = 0;
+	unsigned long long mask = 0;
+	if (scePthreadGetaffinity(s_ee, &mask) != 0 || mask == 0 || mask == s_last)
+		return;
+	s_last = mask;
+	const int rc = scePthreadSetaffinity(pthread_self(), mask);
+	std::printf("[eeprof] sampler follows the profiled thread's CPUs %#llx (rc=%d)\n", mask, rc);
+	std::fflush(stdout);
+}
+
 void* SamplerThread(void*)
 {
 	const timespec period = {0, kPeriodUs * 1000};
+	unsigned tick = 0;
 	for (;;)
 	{
+		if ((tick++ & 255u) == 0)
+			FollowAffinity();
 		nanosleep(&period, nullptr);
 		if (s_count.load(std::memory_order_relaxed) >= kMaxSamples)
 			continue;
