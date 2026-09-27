@@ -553,6 +553,24 @@ void MTGS::MainLoop()
 					}
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
 					GS_Packet gsPack = path.mtvu.gsPackQueue.front(); // vu1 program's xgkick packet(s)
+					// PS5 port (vk-285-92): with another XGKICK already claimed, the next program's packet is
+					// complete (the VU thread pushes before it posts): start pulling its first lines over from
+					// the VU thread's cache while this one is parsed. Reading VU1's vertices as they arrived
+					// was a string of cross-core misses in vk-285-90's GS profile (Transfer and the vertex
+					// handlers). Needs proper testing.
+					if (orbis_xgkick_credits > 0)
+					{
+						const GS_Packet& next = path.mtvu.gsPackQueue.peek(1);
+						if (next.size)
+						{
+							const char* p = reinterpret_cast<const char*>(&path.buffer[next.offset]);
+							const u32 lines = std::min<u32>((next.size + 63) / 64, 16);
+							for (u32 i = 0; i < lines && i < 4; i++)
+								_mm_prefetch(p + i * 64, _MM_HINT_T0);
+							for (u32 i = 4; i < lines; i++)
+								_mm_prefetch(p + i * 64, _MM_HINT_T1);
+						}
+					}
 					if (gsPack.size)
 						GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
 					orbis_path1_read += gsPack.size + gsPack.readAmount;

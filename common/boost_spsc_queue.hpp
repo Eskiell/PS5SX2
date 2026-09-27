@@ -139,6 +139,13 @@ public:
         return buffer[read_index_.load(std::memory_order_relaxed)]; // only written from pop thread
     }
 
+    // PS5 port (vk-285-92): the element k places after front(), for the pop thread only, and only when it
+    // knows the push thread has pushed that far (MTGS: an XGKICK credit held means the packet was pushed).
+    T& peek(size_t k)
+    {
+        return buffer[(read_index_.load(std::memory_order_relaxed) + k) % max_size];
+    }
+
     void pop()
     {
         const size_t read_index = read_index_.load(std::memory_order_relaxed); // only written from pop thread
