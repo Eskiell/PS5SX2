@@ -4,6 +4,8 @@
 #include "Common.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
+#include "OrbisCopy.h" // vk-285-98
+#include "OrbisEEDiag.h" // vk-285-100
 #include "VMManager.h"
 #include "Vif_Dynarec.h"
 #include "OrbisEEProf.h"
@@ -59,6 +61,13 @@ extern std::atomic<u64> g_orbis_ee_vif1ints; // Vif1_Dma.cpp
 // Cumulative counts: event tests, VIF1 DMA interrupts, MTVU packets through the GIF fast path and through
 // Execute, VIF1 unpacks handed to the VU thread, VU-thread kicks (locked adds on its semaphore), and
 // (vk-285-93) ring wraps and the wraps that waited for the VU thread to leave the lap's first packet.
+// vk-285-99: the VIF1 DMA tags read per ID (Vif1_Dma.cpp), for the [eestat] line.
+extern u64 g_orbis_vif1_tag_ids[8];
+void OrbisEETagStats(u64 out[8])
+{
+	for (int i = 0; i < 8; i++)
+		out[i] = g_orbis_vif1_tag_ids[i];
+}
 void OrbisEEStats(u64 out[8])
 {
 	out[0] = g_orbis_ee_evtests.load(std::memory_order_relaxed);
@@ -557,6 +566,18 @@ void VU_Thread::ReserveSpace(s32 size)
 	}
 
 	WaitOnSize(size);
+
+	// PS5 port (vk-285-99): the ring's lines 1 KB past this packet's end, asked for with write intent. Each
+	// was last touched a 16 MB lap ago and is long out of the caches, so the packets' stores (~0.9 GB/s of
+	// them in Shadow of the Colossus's heavy view) each waited on a read from memory in the store queue, and
+	// every load that had to wait for an older store (see VifUnpack) waited on those. Needs proper testing.
+	if (g_orbis_pfw.load(std::memory_order_relaxed)) // vk-285-100: flags/nopfw turns these off, live
+	{
+		constexpr s32 ahead = 256; // u32s: the lines this packet's span will be 1 KB on
+		const s32 to = std::min<s32>(m_write_pos + size + ahead, m_orbis_ring_limit);
+		for (s32 at = (m_write_pos + ahead) & ~15; at < to; at += 16)
+			__builtin_prefetch(&buffer[at], 1, 3);
+	}
 }
 
 // Use this when reading read_pos from ee thread
@@ -857,7 +878,26 @@ void VU_Thread::VifUnpack(vifStruct& _vif, VIFregisters& _vifRegs, const u8* dat
 		u32* p = &buffer[wp];
 		p[0] = MTVU_VIF_UNPACK;
 		p += 1;
-		std::memcpy(p, &_vif.tag, vif_copy_size);
+		// PS5 port (vk-285-99): the VIF state from tag to StructEnd field by field, each read with the width
+		// vifUnpackSetup has just written it (volatile, so the compiler doesn't merge the reads). memcpy read
+		// the 30 bytes as two 16-byte loads, and a load that spans several recent stores can't take its value
+		// from them: it waited for all of them to reach the cache, behind every older store in the queue
+		// (the ring's). The same bytes, in the same places, as the VU thread's memcpy expects them.
+		static_assert(offsetof(vifStruct, cmd) - offsetof(vifStruct, tag) == 16 &&
+					  offsetof(vifStruct, StructEnd) - offsetof(vifStruct, tag) == 30, "vifStruct layout");
+		{
+			const auto rd32 = [](const auto& field) { return *reinterpret_cast<const volatile u32*>(&field); };
+			const auto rd16 = [](const auto& field) { return static_cast<u32>(*reinterpret_cast<const volatile u16*>(&field)); };
+			const auto rd8 = [](const auto& field) { return static_cast<u32>(*reinterpret_cast<const volatile u8*>(&field)); };
+			p[0] = rd32(_vif.tag.addr);
+			p[1] = rd32(_vif.tag.size);
+			p[2] = rd32(_vif.tag.cmd);
+			p[3] = rd16(_vif.tag.wl) | (rd16(_vif.tag.cl) << 16);
+			p[4] = rd32(_vif.cmd);
+			p[5] = rd32(_vif.pass);
+			p[6] = rd32(_vif.cl);
+			p[7] = rd8(_vif.usn) | (rd8(_vif.start_aligned) << 8);
+		}
 		p += size_u32(vif_copy_size);
 		VIFregistersMTVU* regs = reinterpret_cast<VIFregistersMTVU*>(p);
 		regs->cycle = _vifRegs.cycle;
@@ -869,7 +909,7 @@ void VU_Thread::VifUnpack(vifStruct& _vif, VIFregisters& _vifRegs, const u8* dat
 		p += size_u32(sizeof(VIFregistersMTVU));
 		p[0] = size;
 		p += 1;
-		std::memcpy(p, data, size);
+		OrbisCopy(p, data, size); // vk-285-98 (OrbisCopy.h)
 		m_write_pos = wp + words;
 	}
 	CommitWritePos();

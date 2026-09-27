@@ -183,7 +183,10 @@ struct DMACh {
 
 	void chcrTransfer(tDMA_TAG* ptag)
 	{
-	    chcr.TAG = ptag[0].upper();
+		// PS5 port (vk-285-99): the tag's upper half into CHCR's with one 32-bit store. The bitfield's 16-bit
+		// store made the next 32-bit load of CHCR (vif1Interrupt, the chain code) wait for it to reach the
+		// cache, behind every older store (the MTVU ring's included). Same bits.
+		chcr._u32 = (chcr._u32 & 0xffffu) | (ptag[0]._u32 & 0xffff0000u);
 	}
 
 	void qwcTransfer(tDMA_TAG* ptag)

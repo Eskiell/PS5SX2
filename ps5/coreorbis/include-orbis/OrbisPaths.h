@@ -27,8 +27,13 @@
 std::string OrbisDir(const char* sub);
 // A switch file: "/data/PCSX2/flags/<name>" when it's there, else "/data/PCSX2/<name>" (the old place).
 std::string OrbisFlagPath(const char* name);
-// Whether that switch is on (the file exists in either place).
+// Whether that switch is on (the file exists in either place). vk-285-105: from a snapshot once
+// OrbisFlagsRefresh has run (main-boot's ticker, once a second), before that from the files.
 bool OrbisFlag(const char* name);
+// vk-285-105: the snapshot's refresh (the ticker thread), and a small file's contents from the same
+// refresh (the first call for a path reads it directly and registers it). False when the file isn't there.
+void OrbisFlagsRefresh();
+bool OrbisCachedRead(const char* path, std::string& out);
 // Where a log or diagnostic file goes: logs/<name>, or the top folder without logs/.
 std::string OrbisLogPath(const char* name);
 // pf.log's path for the page-fault handler (no allocation there); main-boot sets it at start.

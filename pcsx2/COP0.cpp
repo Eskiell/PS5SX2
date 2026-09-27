@@ -3,6 +3,9 @@
 
 #include "Common.h"
 #include "COP0.h"
+#include "VUmicro.h" // vk-285-102: VPU_STAT for ERET
+#include "OrbisEEHle.h" // vk-285-102
+extern u64 g_orbis_eret_block[4]; // vk-285-103 (OrbisEEDiag.cpp)
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
@@ -659,7 +662,32 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 			cpuRegs.CP0.n.Status.b.EXL = 0;
 		}
 		cpuUpdateOperationMode();
-		cpuSetNextEventDelta(4);
+		OrbisTidEret(); // PS5 port (vk-285-102): the GetThreadId cache (OrbisEEHle.h)
+		// PS5 port (vk-285-102): unless flags/noeretfast (vk-285-105: on by default), the event test 4 cycles on only when an interrupt is
+		// waiting to be taken now that EXL is clear (the INTC or DMAC conditions of cpuTestINTCInts and
+		// cpuTestDMACInts, the COP0 timer enabled) or VU0 runs a micro program (the event test steps it).
+		// Otherwise the next event test is the one already scheduled (the IOP, the counters, DMA events).
+		// Shadow of the Colossus: ~315,000 syscalls a second, each ending in an ERET, each ERET an event
+		// test that runs the IOP a few cycles. Needs proper testing.
+		// vk-285-103: vk-285-102 never skipped one in Shadow of the Colossus; [eefast] counts which condition
+		// kept each event test (INTC, DMAC, the COP0 timer's mask bit, VU0).
+		if (g_orbis_eret_fast.load(std::memory_order_relaxed))
+		{
+			const bool intc = (psHu32(INTC_STAT) & psHu32(INTC_MASK)) != 0;
+			const bool dmac = (psHu16(0xe012) & psHu16(0xe010)) != 0 || (psHu16(0xe010) & 0x8000) != 0;
+			const bool timer = (cpuRegs.CP0.n.Status.val & 0x8000) != 0;
+			const bool vu0 = (VU0.VI[REG_VPU_STAT].UL & 1) != 0;
+			g_orbis_eret_block[0] += intc;
+			g_orbis_eret_block[1] += dmac;
+			g_orbis_eret_block[2] += timer;
+			g_orbis_eret_block[3] += vu0;
+			if (!intc && !dmac && !timer && !vu0)
+				g_orbis_eret_skips++;
+			else
+				cpuSetNextEventDelta(4);
+		}
+		else
+			cpuSetNextEventDelta(4);
 		intSetBranch();
 	}
 

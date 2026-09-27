@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include <time.h>
+#include "OrbisEEDiag.h" // vk-285-100
 #include <cmath>
 
 #include "Common.h"
@@ -492,6 +493,7 @@ static __fi void VSyncStart(u64 sCycle)
 	// End-of-frame tasks.
 	DoFMVSwitch();
 	vu1Thread.OrbisVsyncRefresh(); // PS5 port (vk-285-90): live MTVU settings, once a frame
+	OrbisEEVsyncClock(); // PS5 port (vk-285-100): the EE core's clock every 300 vsyncs ([cpuclk])
 	VMManager::Internal::VSyncOnCPUThread();
 
 	// Don't bother throttling if we're going to pause.

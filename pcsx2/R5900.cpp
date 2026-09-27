@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "OrbisEEDiag.h" // vk-285-100
+#include "OrbisEEHle.h" // vk-285-102
 
 #include "common/Path.h"
 #include "common/StringUtil.h"
@@ -50,6 +52,8 @@ static constexpr uint eeWaitCycles = 3072;
 
 bool eeEventTestIsActive = false;
 EE_intProcessStatus eeRunInterruptScan = INT_NOT_RUNNING;
+// PS5 port (vk-285-100): true inside _cpuEventTest_Shared's Instant DMA loop (see Vif1_Dma.cpp OrbisVif1Fuse).
+bool g_orbis_instant_dma_loop = false;
 
 u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
 
@@ -99,6 +103,7 @@ void cpuReset()
 
 __ri void cpuException(u32 code, u32 bd)
 {
+	OrbisTidException(bd); // PS5 port (vk-285-102/103): every exception entry (OrbisEEHle.h)
 	bool errLevel2, checkStatus;
 	u32 offset = 0;
 
@@ -246,11 +251,20 @@ __fi void cpuSetEvent()
 	cpuRegs.nextEventCycle = cpuRegs.cycle;
 }
 
+// PS5 port (vk-285-99): dmastall changed with whole-word stores. With a constant bit the compiler narrowed
+// these to byte ANDs/ORs, and CPU_INT's 32-bit load of the word right after (vif1Interrupt's CPU_INT follows
+// TESTINT's clear) couldn't take its value from the byte store: it waited for the store to reach the cache,
+// behind every older store in the queue. Same bits.
+static __fi void OrbisDmaStallStore(u32 value)
+{
+	*reinterpret_cast<volatile u32*>(&cpuRegs.dmastall) = value;
+}
+
 __fi void cpuClearInt( uint i )
 {
 	pxAssume( i < 32 );
 	cpuRegs.interrupt &= ~(1 << i);
-	cpuRegs.dmastall &= ~(1 << i);
+	OrbisDmaStallStore(cpuRegs.dmastall & ~(1u << i)); // vk-285-99
 }
 
 static __fi void TESTINT( u8 n, void (*callback)() )
@@ -367,10 +381,40 @@ static bool cpuIntsEnabled(int Interrupt)
 		!cpuRegs.CP0.n.Status.b.EXL && (cpuRegs.CP0.n.Status.b.ERL == 0);
 }
 
+// PS5 port (vk-285-98): the lines an event test's VIF1, GIF and DMA handlers read, asked for at its start,
+// so their misses overlap each other and the IOP's block instead of queueing one behind the other.
+// vk-285-97's Shadow of the Colossus EE profile had ~3% of the thread right after loads of these (VIF1_STAT,
+// GIF_STAT, D1_CHCR, the VIF1 state) at ~0.7 million event tests and ~2.3 million VIF1 interrupts a
+// second. Only with a DMA or MTVU interrupt pending. Needs proper testing.
+static __fi void OrbisPrefetchEventLines()
+{
+	if (!(cpuRegs.interrupt & ((1u << DMAC_VIF1) | (1u << DMAC_GIF) | (1u << VU_MTVU_BUSY))))
+		return;
+	const char* const hw = reinterpret_cast<const char*>(eeHw);
+	_mm_prefetch(hw + 0x3c00, _MM_HINT_T0); // VIF1 STAT, FBRST, ERR, MARK
+	_mm_prefetch(hw + 0x3c40, _MM_HINT_T0); // VIF1 CYCLE, MODE, NUM, MASK
+	_mm_prefetch(hw + 0x3c80, _MM_HINT_T0); // VIF1 CODE, ITOPS, BASE, OFST
+	_mm_prefetch(hw + 0x3cc0, _MM_HINT_T0); // VIF1 TOPS, ITOP, TOP
+	_mm_prefetch(hw + 0x9000, _MM_HINT_T0); // D1 CHCR, MADR, QWC, TADR
+	_mm_prefetch(hw + 0x3000, _MM_HINT_T0); // GIF CTRL, MODE, STAT
+	_mm_prefetch(hw + 0xe000, _MM_HINT_T0); // D_CTRL, D_STAT, D_PCR, D_SQWC
+	_mm_prefetch(hw + 0xf500, _MM_HINT_T0); // D_ENABLER (0xf520)
+	const char* const v = reinterpret_cast<const char*>(&vif1);
+	_mm_prefetch(v, _MM_HINT_T0);
+	_mm_prefetch(v + 64, _MM_HINT_T0);
+	_mm_prefetch(v + 128, _MM_HINT_T0);
+}
+
+// PS5 port (vk-285-98): the EE-to-IOP clock ratio below, divided once per PSXCLK (it changes only with the
+// PS1 mode) instead of once per event test.
+static u32 s_orbis_ratio_psxclk = 0;
+static float s_orbis_ratio = 8.0f;
+
 // Shared portion of the branch test, called from both the Interpreter
 // and the recompiler.  (moved here to help alleviate redundant code)
 __fi void _cpuEventTest_Shared()
 {
+	OrbisPrefetchEventLines(); // vk-285-98
 	eeEventTestIsActive = true;
 	cpuRegs.nextEventCycle = cpuRegs.cycle + eeWaitCycles;
 	cpuRegs.lastEventCycle = cpuRegs.cycle;
@@ -380,8 +424,12 @@ __fi void _cpuEventTest_Shared()
 	// be able to read the value before the exception handler clears it).
 
 	uint mask = intcInterrupt() | dmacInterrupt();
+	ORBIS_EEDIAG(if (cpuRegs.interrupt & ((1u << DMAC_VIF1) | (1u << DMAC_GIF) | (1u << VU_MTVU_BUSY))) OrbisEEDiag::ev_dma++); // vk-285-100
 	if (cpuIntsEnabled(mask))
+	{
+		ORBIS_EEDIAG(OrbisEEDiag::exc_intc += (mask & 0x400) != 0; OrbisEEDiag::exc_dmac += (mask & 0x800) != 0); // vk-285-100
 		cpuException(mask, cpuRegs.branch);
+	}
 
 	// ---- IOP -------------
 	// * It's important to run a iopEventTest before calling ExecuteBlock. This
@@ -413,6 +461,7 @@ __fi void _cpuEventTest_Shared()
 
 	if (cpuTestCycle(nextStartCounter, nextDeltaCounter))
 	{
+		ORBIS_EEDIAG(OrbisEEDiag::rcnt++); // vk-285-100
 		rcntUpdate();
 		_cpuTestPERF();
 	}
@@ -431,8 +480,10 @@ __fi void _cpuEventTest_Shared()
 		// Only use the lower 17 bits of the cpuRegs.interrupt as the upper bits are for VU0/1 sync which can't be done in a tight loop
 		if (CHECK_INSTANTDMAHACK && dmacRegs.ctrl.DMAE && !(psHu8(DMAC_ENABLER + 2) & 1) && (cpuRegs.interrupt & 0x1FFFF))
 		{
+			g_orbis_instant_dma_loop = true; // vk-285-100 (Vif1_Dma.cpp OrbisVif1Fuse)
 			while ((cpuRegs.interrupt & 0x1FFFF) && _cpuTestInterrupts())
 				;
+			g_orbis_instant_dma_loop = false;
 		}
 		else
 			_cpuTestInterrupts();
@@ -445,7 +496,12 @@ __fi void _cpuEventTest_Shared()
 	CpuVU1->ExecuteBlock();
 
 	// ---- Schedule Next Event Test --------------
-	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+	if (s_orbis_ratio_psxclk != PSXCLK) // vk-285-98
+	{
+		s_orbis_ratio_psxclk = PSXCLK;
+		s_orbis_ratio = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+	}
+	const float mutiplier = s_orbis_ratio;
 	const int nextIopEventDeta = ((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier);
 	// 8 or more cycles behind and there's an event scheduled
 	g_orbis_ee_evtests.store(g_orbis_ee_evtests.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); // vk-285-90
@@ -454,6 +510,7 @@ __fi void _cpuEventTest_Shared()
 		// EE's running way ahead of the IOP still, so we should branch quickly to give the
 		// IOP extra timeslices in short order.
 
+		ORBIS_EEDIAG(OrbisEEDiag::iop_rapid++); // vk-285-100
 		cpuSetNextEventDelta(48);
 		//Console.Warning( "EE ahead of the IOP -- Rapid Event!  %d", EEsCycle );
 	}
@@ -534,14 +591,16 @@ __fi void cpuTestHwInts()
 
 __fi void CPU_SET_DMASTALL(EE_EventType n, bool set)
 {
+	// vk-285-99: whole-word stores (see OrbisDmaStallStore).
 	if (set)
-		cpuRegs.dmastall |= 1 << n;
+		OrbisDmaStallStore(cpuRegs.dmastall | (1u << n));
 	else
-		cpuRegs.dmastall &= ~(1 << n);
+		OrbisDmaStallStore(cpuRegs.dmastall & ~(1u << n));
 }
 
 __fi void CPU_INT( EE_EventType n, s32 ecycle)
 {
+	ORBIS_EEDIAG(OrbisEEDiag::cpu_int[n & 31]++); // vk-285-100
 	// If it's retunning too quick, just rerun the DMA, there's no point in running the EE for < 4 cycles.
 	// This causes a huge uplift in performance for ONI FMV's.
 	if (ecycle < 4 && !(cpuRegs.dmastall & (1 << n)) && eeRunInterruptScan != INT_NOT_RUNNING)

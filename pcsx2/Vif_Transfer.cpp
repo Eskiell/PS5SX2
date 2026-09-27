@@ -5,6 +5,7 @@
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
 #include "MTVU.h" // vk-285-84: VU_Thread kick batching
+#include "OrbisEEDiag.h" // vk-285-100
 
 //------------------------------------------------------------------
 // VifCode Transfer Interpreter (Vif0/Vif1)
@@ -35,6 +36,8 @@ _vifT void vifTransferLoop(u32* &data) {
 
 			vifXRegs.code = data[0];
 			vifX.cmd	  = data[0] >> 24;
+			if (idx)
+				ORBIS_EEDIAG(OrbisEEDiag::vif1_codes[vifX.cmd & 0x7f]++); // PS5 port (vk-285-100)
 
 
 			VIF_LOG("New VifCMD %x tagsize %x irq %d", vifX.cmd, vifX.tag.size, vifX.irq);
@@ -59,6 +62,54 @@ _vifT void vifTransferLoop(u32* &data) {
 			data  += 1;
 			pSize -= 1;
 			continue;
+		}
+
+		// PS5 port (vk-285-102): the simple register codes too (pass 1 of vifCode_STMod, _STCycl, _Base, _Offset
+		// and _ITop, step for step), without the handler table's indirect call. Shadow of the Colossus's heavy
+		// view, per second: STMOD 1.54M, STCYCL 0.43M, BASE and OFFSET 0.18M each (of 11.6M VIF1 codes,
+		// vk-285-101's [vifcodes]). IRQ-bit forms (cmd | 0x80) still take the table. flags/vifslow turns
+		// these off, live. Needs proper testing.
+		if (vifX.pass == 0 && vifX.cmd <= 0x05 && g_orbis_vif_fast.load(std::memory_order_relaxed))
+		{
+			bool done = true;
+			switch (vifX.cmd)
+			{
+				case 0x05: // STMOD
+					vifXRegs.mode = vifXRegs.code & 0x3;
+					break;
+				case 0x01: // STCYCL (whole-word store, as vk-285-99's vifCode_STCycl)
+					*reinterpret_cast<u32*>(&vifXRegs.cycle) = vifXRegs.code & 0xffffu;
+					break;
+				case 0x03: // BASE (VIF1 only)
+					if (!idx)
+						done = false;
+					else
+						vif1Regs.base = vif1Regs.code & 0x3ff;
+					break;
+				case 0x02: // OFFSET (VIF1 only)
+					if (!idx)
+						done = false;
+					else
+					{
+						vif1Regs.stat.DBF = false;
+						vif1Regs.ofst = vif1Regs.code & 0x3ff;
+						vif1Regs.tops = vif1Regs.base;
+					}
+					break;
+				case 0x04: // ITOP
+					vifXRegs.itops = vifXRegs.code & 0x3ff;
+					break;
+				default:
+					done = false;
+					break;
+			}
+			if (done)
+			{
+				vifX.cmd = 0;
+				data += 1;
+				pSize -= 1;
+				continue;
+			}
 		}
 
 		ret = vifCmdHandler[idx][vifX.cmd & 0x7f](vifX.pass, data);

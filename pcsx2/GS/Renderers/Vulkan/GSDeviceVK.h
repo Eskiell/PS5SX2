@@ -769,7 +769,31 @@ private:
 	void ApplyBaseState(u32 flags, VkCommandBuffer cmdbuf);
 
 	// Which bindings/state has to be updated before the next draw.
-	u32 m_dirty_flags = 0;
+	// PS5 port (vk-285-102): always stored as a whole word. LLVM narrows "flags |= constant" to a byte OR on
+	// the byte the constant touches, and the next 32-bit load (ApplyTFXState's first test, every draw) can't
+	// take its value from a narrower store: it waits until the store reaches the cache, behind every older
+	// store in the queue (the stream buffers' fills). vk-285-101's GS profile: 3.8% of the thread on that load.
+	struct OrbisWholeWord
+	{
+		u32 value = 0;
+		__fi operator u32() const { return value; }
+		__fi OrbisWholeWord& operator=(u32 v)
+		{
+			*reinterpret_cast<volatile u32*>(&value) = v;
+			return *this;
+		}
+		__fi OrbisWholeWord& operator|=(u32 v)
+		{
+			*reinterpret_cast<volatile u32*>(&value) = value | v;
+			return *this;
+		}
+		__fi OrbisWholeWord& operator&=(u32 v)
+		{
+			*reinterpret_cast<volatile u32*>(&value) = value & v;
+			return *this;
+		}
+	};
+	OrbisWholeWord m_dirty_flags;
 	FeedbackLoopFlag m_current_framebuffer_feedback_loop = FeedbackLoopFlag_None;
 	bool m_warned_slow_spin = false;
 

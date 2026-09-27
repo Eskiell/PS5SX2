@@ -3,6 +3,8 @@
 
 #pragma once
 #include <deque>
+#include "OrbisCopy.h" // vk-285-98
+#include "OrbisEEDiag.h" // vk-285-100: g_orbis_pfw
 #include "Gif.h"
 #include "Vif.h"
 #include "GS.h"
@@ -344,7 +346,13 @@ struct Gif_Path
 			mtgsReadWait(); // Let MTGS run to free up buffer space
 		}
 		pxAssertMsg(curSize + size <= buffSize, "Gif Path Buffer Overflow!");
-		memcpy(&buffer[curSize], pMem, size);
+		// PS5 port (vk-285-99): the next copy's lines, 1 KB on, asked for with write intent (see
+		// VU_Thread::ReserveSpace); the buffer is written in order and its lines are long out of the caches.
+		// vk-285-100: flags/nopfw turns these off, live.
+		if (g_orbis_pfw.load(std::memory_order_relaxed))
+			for (u32 at = (curSize + 1024) & ~63u, end = std::min<u32>(curSize + size + 1024, buffSize); at < end; at += 64)
+				__builtin_prefetch(&buffer[at], 1, 3);
+		OrbisCopy(&buffer[curSize], pMem, size); // vk-285-98 (OrbisCopy.h)
 		curSize += size;
 	}
 

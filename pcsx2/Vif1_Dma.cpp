@@ -8,8 +8,12 @@
 #include "VUmicro.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
+#include "OrbisEEDiag.h" // vk-285-100
 
 u32 g_vif1Cycles = 0;
+// PS5 port (vk-285-99): VIF1 DMA tags read, by ID (REFE, CNT, NEXT, REF, REFS, CALL, RET, END), for the
+// [eestat] line: the chains' shape decides how far ahead their tags and data can be prefetched.
+u64 g_orbis_vif1_tag_ids[8] = {};
 
 __fi void vif1FLUSH()
 {
@@ -220,7 +224,9 @@ __fi void vif1SetupTransfer()
 	vif1.irqoffset.value = 0;
 	vif1.irqoffset.enabled = false;
 
-	vif1.done |= hwDmacSrcChainWithStack(vif1ch, ptag->ID);
+	const u32 orbis_id = ptag->ID; // vk-285-99
+	g_orbis_vif1_tag_ids[orbis_id & 7]++;
+	vif1.done |= hwDmacSrcChainWithStack(vif1ch, orbis_id);
 
 	if (vif1ch.qwc > 0)
 	{
@@ -232,7 +238,12 @@ __fi void vif1SetupTransfer()
 			OrbisPrefetchDma(vif1ch.madr + 64);
 	}
 	if (!vif1.done)
-		OrbisPrefetchDma(vif1ch.tadr);
+	{
+		// vk-285-99: after a CNT tag, TADR is the data's start (the next tag's address is only set once the
+		// data is through: MADR + QWC * 16), so vk-285-90 prefetched the data a second time and never the
+		// next tag. Prefetch where the next tag will be.
+		OrbisPrefetchDma(orbis_id == TAG_CNT ? vif1ch.madr + (vif1ch.qwc << 4) : vif1ch.tadr);
+	}
 
 	//Check TIE bit of CHCR and IRQ bit of tag
 	if (vif1ch.chcr.TIE && ptag->IRQ)
@@ -304,8 +315,24 @@ __fi void vif1VUFinish()
 
 std::atomic<u64> g_orbis_ee_vif1ints{0}; // PS5 port (vk-285-90): calls, for the [eestat] line (MTVU.cpp)
 
+// PS5 port (vk-285-100): whether vif1Interrupt can go straight on to its next pass instead of scheduling it.
+// Inside the event test's Instant DMA loop (TESTINT ignores the cycles there) with nothing else pending, the
+// loop would call vif1Interrupt again at once: CPU_INT sets VIF1's bit, the scan's other TESTINTs find
+// nothing, _cpuTestInterrupts returns true (VIF1 not stalled), the loop scans again and TESTINT clears the bit
+// and calls it. Going on in place skips that round trip, and the next-event cycles each CPU_INT would have
+// set (each chain pass brought the next event test to a few dozen cycles on, with nothing left to do there
+// once the chain had ended). Shadow of the Colossus's heavy view: ~2.4 million passes a second.
+// flags/vif1nofuse turns it off, live. Needs proper testing.
+static __fi bool OrbisVif1Fuse()
+{
+	return g_orbis_instant_dma_loop && cpuRegs.interrupt == 0 && !(cpuRegs.dmastall & (1u << DMAC_VIF1)) &&
+		   dmacRegs.ctrl.DMAE && !(psHu8(DMAC_ENABLER + 2) & 1) && g_orbis_vif1_fuse.load(std::memory_order_relaxed);
+}
+
 __fi void vif1Interrupt()
 {
+  for (;;) // vk-285-100: the passes OrbisVif1Fuse lets go on in place
+  {
 	VIF_LOG("vif1Interrupt: %8.8llx chcr %x, done %x, qwc %x", cpuRegs.cycle, vif1ch.chcr._u32, vif1.done, vif1ch.qwc);
 	g_orbis_ee_vif1ints.store(g_orbis_ee_vif1ints.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 
@@ -435,7 +462,14 @@ __fi void vif1Interrupt()
 				CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)));
 			}
 			else
+			{
+				if (OrbisVif1Fuse()) // vk-285-100
+				{
+					g_orbis_vif1_fused++;
+					continue;
+				}
 				CPU_INT(DMAC_VIF1, g_vif1Cycles);
+			}
 		}
 		return;
 	}
@@ -463,7 +497,14 @@ __fi void vif1Interrupt()
 				CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)));
 			}
 			else
+			{
+				if (OrbisVif1Fuse()) // vk-285-100
+				{
+					g_orbis_vif1_fused++;
+					continue;
+				}
 				CPU_INT(DMAC_VIF1, g_vif1Cycles);
+			}
 		}
 		return;
 	}
@@ -500,6 +541,8 @@ __fi void vif1Interrupt()
 	VIF_LOG("VIF1 DMA End");
 	hwDmacIrq(DMAC_VIF1);
 	CPU_SET_DMASTALL(DMAC_VIF1, false);
+	return;
+  } // vk-285-100: for (;;)
 }
 
 void dmaVIF1()
@@ -512,6 +555,11 @@ void dmaVIF1()
 	g_vif1Cycles = 0;
 	vif1.inprogress = 0;
 	CPU_SET_DMASTALL(DMAC_VIF1, false);
+
+	// PS5 port (vk-285-98): the transfer's first tag (chain mode) or data (normal mode), read at its first
+	// vif1Interrupt, a few cycles from now. vk-285-97's SotC EE profile had ~0.8% of the thread on the first
+	// read of a tag (DMACh::transfer): later tags were prefetched (vk-285-90), a chain's first one wasn't.
+	OrbisPrefetchDma(vif1ch.qwc > 0 ? vif1ch.madr : vif1ch.tadr);
 
 	if (vif1ch.qwc > 0) // Normal Mode
 	{

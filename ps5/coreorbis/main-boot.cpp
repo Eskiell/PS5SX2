@@ -45,6 +45,8 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "CDVD/CDVD.h"                  // vk-285-48: cdvdSaveNVRAM
 #include "SPU2/spu2.h"                  // vk-285-48: SPU2::SetOutputPaused
 #include "VUmicro.h"                    // vk-285-76: CpuVU0/CpuVU1->Reset() after a VU codegen switch
+#include "OrbisEEDiag.h"                // vk-285-100: OrbisCoreCyclesPerTsc
+#include "OrbisDeferredLog.h"            // vk-285-104: orbis_log_drain (the ticker)
 #include <dlfcn.h>
 
 // Orbis: DualSense -> PCSX2 port 1 DualShock2 via libScePad (polled on its own thread).
@@ -749,6 +751,30 @@ int sceKernelGetMainSocId(unsigned int* id);
 int sceKernelGetCpumode(void);
 int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, const void* newp, size_t newlen);
 }
+
+// vk-285-101: the CPU clocks, for the question whether the PS5 Pro's 3.85 GHz CPU mode is on for this app. The
+// TSC measured against steady_clock over 50 ms, and this thread's core clock from a chain of dependent adds
+// (OrbisCoreCyclesPerTsc, the best of 3): user-mode timing only. vk-285-100 also called five kernel mode getters
+// (sceKernelIsNeoMode and others, with guessed signatures) here; one of them faulted at boot on the Pro, and the
+// console panicked after tearing the app down. No kernel calls here. The EE and GS threads' cores are measured
+// again in play ([cpuclk] every 5 s, OrbisEEDiag.cpp).
+static void orbis_clock_survey()
+{
+  const auto t0 = std::chrono::steady_clock::now();
+  const unsigned long long c0 = __builtin_ia32_rdtsc();
+  auto t1 = t0;
+  while ((t1 = std::chrono::steady_clock::now()) - t0 < std::chrono::milliseconds(50))
+  {
+  }
+  const unsigned long long c1 = __builtin_ia32_rdtsc();
+  const double sec = std::chrono::duration<double>(t1 - t0).count();
+  const double tsc_mhz = sec > 0.0 ? static_cast<double>(c1 - c0) / sec / 1e6 : 0.0;
+  double ratio = 0.0;
+  for (int i = 0; i < 3; i++)
+    ratio = std::max(ratio, OrbisCoreCyclesPerTsc());
+  printf("[cpuclk] boot: measured TSC %.2f MHz, main-thread core %.0f MHz (%.4f cycles/tick)\n", tsc_mhz,
+    ratio * tsc_mhz, ratio);
+}
 static std::string s_console_info; // "firmware 11.40 · SoC ... · CPU ..." (one line)
 
 static std::string orbis_console_survey()
@@ -789,6 +815,7 @@ static std::string orbis_console_survey()
   const unsigned long long hz = sceKernelGetCpuFrequency();
   const int cpumode = sceKernelGetCpumode();
   printf("[console] CPU: %llu Hz, cpumode %d\n", hz, cpumode);
+  orbis_clock_survey(); // vk-285-100
   if (hz != 0)
     snprintf(buf, sizeof(buf), " \xC2\xB7 CPU %.2f GHz, mode %d", static_cast<double>(hz) / 1e9, cpumode);
   else
@@ -1006,6 +1033,7 @@ static void orbis_vk_environment()
   if (orbis_flag("vk_renderer") && orbis_flag("vk_fullstatecopy")) setenv("PS5VK_FULL_STATE_COPY", "1", 0);
 }
 #endif
+
 
 int main()
 {
@@ -1727,6 +1755,11 @@ int main()
     for (int i = 0; ; i++)
     {
       std::this_thread::sleep_for(std::chrono::seconds(1));
+      // vk-285-105: the flags folder and the polled settings files, read here for the emulation threads
+      // (OrbisFlag and OrbisCachedRead answer from this snapshot; OrbisPaths.h).
+      OrbisFlagsRefresh();
+      // vk-285-104: the GS thread's deferred lines (OrbisDeferredLog.h) out first, from this thread.
+      orbis_log_drain();
       {
         extern unsigned long long g_orbis_gs_idle_ticks, g_orbis_ee_waitgs_ticks, g_orbis_ee_stall_ticks, g_orbis_ee_waitgs_n, g_orbis_ee_stall_n;
         extern unsigned long long g_orbis_hwdraw_n;

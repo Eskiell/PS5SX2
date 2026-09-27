@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS.h"
+#include "OrbisEEDiag.h" // vk-285-100
 #include "Gif_Unit.h"
 #include "MTGS.h"
 #include "MTVU.h"
@@ -839,6 +840,17 @@ void MTGS::GenericStall(uint size)
 	uint& s_orbis_cached_readpos = g_orbis_mtgs_ee.cached_readpos; // vk-285-90: its own line (OrbisMtgsEE)
 	uint readpos = s_orbis_cached_readpos;
 	uint freeroom;
+
+	// PS5 port (vk-285-99): the ring's lines 1 KB past this packet's span, asked for with write intent (see
+	// VU_Thread::ReserveSpace): each packet's stores otherwise wait on a read from memory in the store queue.
+	// At most 64 lines for a big packet.
+	if (g_orbis_pfw.load(std::memory_order_relaxed)) // vk-285-100: flags/nopfw turns these off, live
+	{
+		constexpr uint ahead = 64; // qwords
+		const uint lines = std::min<uint>((size + 3) / 4, 64);
+		for (uint i = 0; i < lines; i++)
+			__builtin_prefetch(&RingBuffer[(writepos + ahead + i * 4) & RingBufferMask], 1, 3);
+	}
 
 	if (writepos < readpos)
 		freeroom = readpos - writepos;

@@ -676,8 +676,10 @@ vifOp(vifCode_STCycl)
 	vifStruct& vifX = GetVifX;
 	pass1
 	{
-		vifXRegs.cycle.cl = static_cast<u8>(vifXRegs.code);
-		vifXRegs.cycle.wl = static_cast<u8>(vifXRegs.code >> 8);
+		// PS5 port (vk-285-99): CL and WL in one 32-bit store (pad bytes zero, as the register reads). Two byte
+		// stores, and the unpacks' 32-bit copies of CYCLE for the VU thread couldn't take their value from them
+		// (VU_Thread::VifUnpack): each waited for the stores to reach the cache. Same CL and WL.
+		*reinterpret_cast<u32*>(&vifXRegs.cycle) = vifXRegs.code & 0xffffu;
 		vifX.cmd = 0;
 		vifX.pass = 0;
 	}

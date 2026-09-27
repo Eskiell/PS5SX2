@@ -15,6 +15,8 @@ extern "C" void orbis_rec_dump();
 extern "C" void orbis_vtlb_dump();
 // vk-285-51: the settings log (frontend/fe_ps5.cpp; open/write only). Weak: the GL build has none.
 extern "C" void orbis_event_log(const char* line) __attribute__((weak));
+// vk-285-104: the deferred GS-thread log to stdout (pcsx2/OrbisDeferredLog.cpp). Weak: builds without it.
+extern "C" void orbis_log_drain() __attribute__((weak));
 
 namespace CrashHandler
 {
@@ -39,6 +41,8 @@ void CrashSignalHandler(int signal, siginfo_t* siginfo, void* ctx)
   }
   // Orbis: stdout is block-buffered now; flush first so the buffered tail
   // (the most important part) is never lost on abort().
+  if (orbis_log_drain)
+    orbis_log_drain(); // vk-285-104: the GS thread's deferred lines first (OrbisDeferredLog.h)
   fflush(stdout);
   printf("[crash] signal=%d fault_addr=%p pc=%p tid=%llu\n", signal, addr, pc, (unsigned long long)pthread_self());
   if (ctx)
@@ -199,6 +203,8 @@ void CrashSignalHandler(int signal, siginfo_t* siginfo, void* ctx)
     fp = next;
   }
   fflush(stdout);
+  if (orbis_log_drain)
+    orbis_log_drain(); // vk-285-102: boot.log goes through a pipe; write it out before dying
   abort();
 }
 } // namespace CrashHandler

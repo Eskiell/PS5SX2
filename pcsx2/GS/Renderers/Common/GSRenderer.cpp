@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "ImGui/FullscreenUI.h"
+#include "OrbisEEDiag.h" // vk-285-100
 #include "ImGui/ImGuiManager.h"
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "GS/Renderers/Common/GSFunctionMap.h" // vk-285-28: GSCodeReserve (the [rec] line)
@@ -77,6 +78,11 @@ int g_orbis_perf = 0; // eerec-280: perf OSD + [perf] klog line every second (li
 #include <sys/cpuset.h>
 #include <cerrno>
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
+// PS5 port (vk-285-104): this file's printf/fflush(stdout) go to the deferred log (OrbisDeferredLog.h); the
+// ticker thread writes them out, so the GS thread never waits on /data or on stdout's lock.
+#include "OrbisDeferredLog.h"
+#define printf OrbisDeferredPrintf
+#define fflush OrbisDeferredFlush
 std::atomic<int> g_orbis_gsini_reload{0}; // GS thread saw gs.ini change -> the CPU thread applies it
 std::atomic<int> g_orbis_live_reapply{0}; // the CPU thread applied gs.ini -> apply live.ini again
 std::atomic<int> g_orbis_pin_request{-1}; // live.ini pin= -> the CPU thread (OrbisApplyPinning)
@@ -444,6 +450,18 @@ static void OrbisPrintLoad()
 			static_cast<unsigned long long>(cur[7]));
 		for (int i = 0; i < 8; i++)
 			s_prev[i] = cur[i];
+		// vk-285-99: VIF1 DMA tags read this second, by ID (MTVU.cpp OrbisEETagStats).
+		extern void OrbisEETagStats(u64 out[8]);
+		static u64 s_tag_prev[8] = {};
+		u64 tags[8];
+		OrbisEETagStats(tags);
+		printf("[eetags] per s: refe=%llu cnt=%llu next=%llu ref=%llu refs=%llu call=%llu ret=%llu end=%llu\n",
+			static_cast<unsigned long long>(tags[0] - s_tag_prev[0]), static_cast<unsigned long long>(tags[1] - s_tag_prev[1]),
+			static_cast<unsigned long long>(tags[2] - s_tag_prev[2]), static_cast<unsigned long long>(tags[3] - s_tag_prev[3]),
+			static_cast<unsigned long long>(tags[4] - s_tag_prev[4]), static_cast<unsigned long long>(tags[5] - s_tag_prev[5]),
+			static_cast<unsigned long long>(tags[6] - s_tag_prev[6]), static_cast<unsigned long long>(tags[7] - s_tag_prev[7]));
+		for (int i = 0; i < 8; i++)
+			s_tag_prev[i] = tags[i];
 	}
 	{
 		// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
@@ -625,25 +643,23 @@ static void OrbisLiveTune()
 		// eerec-285: gs.ini applies live once a changed file reads the same twice (a half-written one is skipped)
 		static bool s_gsini_init = false;
 		static std::string s_gsini_applied, s_gsini_pending;
+		// vk-285-105: the files as main-boot's ticker last read them (OrbisCachedRead, once a second), so this
+		// thread doesn't open files on /data (an open there now and then takes 30+ ms).
 		std::string g;
-		if (FILE* f = fopen("/data/PCSX2/gs.ini", "rb"))
 		{
-			char b[2048];
-			const size_t n = fread(b, 1, sizeof(b), f);
-			fclose(f);
-			g.assign(b, n);
+			std::string b;
+			if (OrbisCachedRead("/data/PCSX2/gs.ini", b))
+				g.assign(b, 0, std::min<size_t>(b.size(), 2048));
 		}
 		// vk-285-32: and the game's own settings file (main-boot.cpp), so editing it applies live too.
 		extern const char* OrbisGameIniPath();
 		if (const char* gp = OrbisGameIniPath(); gp && *gp)
 		{
-			if (FILE* f = fopen(gp, "rb"))
+			std::string b;
+			if (OrbisCachedRead(gp, b))
 			{
-				char b[2048];
-				const size_t n = fread(b, 1, sizeof(b), f);
-				fclose(f);
 				g.append("\n#game\n");
-				g.append(b, n);
+				g.append(b, 0, std::min<size_t>(b.size(), 2048));
 			}
 		}
 		if (!s_gsini_init)
@@ -673,12 +689,10 @@ static void OrbisLiveTune()
 	std::string cur;
 	if (g_orbis_live_reapply.exchange(0, std::memory_order_acq_rel))
 		s_last = "\x01"; // eerec-285: gs.ini was applied, so apply live.ini again (present mode, pin)
-	if (FILE* f = fopen("/data/PCSX2/live.ini", "rb"))
 	{
-		char buf[1024];
-		const size_t n = fread(buf, 1, sizeof(buf), f);
-		fclose(f);
-		cur.assign(buf, n);
+		std::string b; // vk-285-105: as the ticker last read it (see gs.ini above)
+		if (OrbisCachedRead("/data/PCSX2/live.ini", b))
+			cur.assign(b, 0, std::min<size_t>(b.size(), 1024));
 	}
 	if (cur == s_last)
 		return;
@@ -865,8 +879,12 @@ static void OrbisGLOSD()
 				printf("%s%.0f", i ? "/" : "", PerformanceMetrics::GetGSSWThreadUsage(i));
 			printf("\n");
 			OrbisPrintLoad(); // eerec-281
-			fflush(stdout);
 		}
+		// vk-285-100: the EE switches' flag files, [cpuclk] every 5 s and the eediag lines (OrbisEEDiag.cpp);
+		// the flags are read whether or not the lines print.
+		OrbisEEDiagSecond(print);
+		if (print)
+			fflush(stdout);
 		s_count = 0;
 		s_t0 = now;
 	}

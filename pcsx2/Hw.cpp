@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "OrbisEEDiag.h" // vk-285-100
 #include "Gif_Unit.h"
 #include "Hardware.h"
 #include "SPU2/spu2.h"
@@ -102,12 +103,14 @@ __fi uint dmacInterrupt()
 
 void hwIntcIrq(int n)
 {
+	ORBIS_EEDIAG(OrbisEEDiag::intc_irq[n & 15]++); // PS5 port (vk-285-100)
 	psHu32(INTC_STAT) |= 1<<n;
 	if(psHu32(INTC_MASK) & (1<<n))cpuTestINTCInts();
 }
 
 void hwDmacIrq(int n)
 {
+	ORBIS_EEDIAG(OrbisEEDiag::dmac_irq[n & 15]++); // PS5 port (vk-285-100)
 	psHu32(DMAC_STAT) |= 1<<n;
 	if(psHu16(DMAC_STAT+2) & (1<<n))cpuTestDMACInts();
 }

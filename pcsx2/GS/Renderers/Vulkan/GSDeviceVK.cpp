@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/GS.h"
+#include "OrbisEEDiag.h" // vk-285-102: g_orbis_nt_store
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
@@ -36,6 +37,11 @@
 // vk-285-36, vk-285-38: the GS thread's time in Vulkan calls, by kind (VKOrbisTiming.h), printed
 // by main-boot's ticker as [vkwait] and [shaders].
 #include "GS/Renderers/Vulkan/VKOrbisTiming.h"
+// PS5 port (vk-285-104): this file's printf/fflush(stdout) go to the deferred log (OrbisDeferredLog.h); the
+// ticker thread writes them out, so the GS thread never waits on /data or on stdout's lock.
+#include "OrbisDeferredLog.h"
+#define printf OrbisDeferredPrintf
+#define fflush OrbisDeferredFlush
 #ifdef ORBIS_VULKAN
 // vk-285-51: the port's settings log (frontend/fe_ps5.cpp), for the GPU-hang exit. Weak: tools have none.
 extern "C" void orbis_event_log(const char* line) __attribute__((weak));
@@ -1457,7 +1463,7 @@ namespace
 		std::rename(path.c_str(), OrbisLogPath("vkhang.1.txt").c_str());
 		OrbisVkTraceWrite(path.c_str(), header, hung);
 		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote %s; closing the app\n", where, hung, path.c_str());
-		fflush(stdout);
+		orbis_log_drain(); // vk-285-104: the deferred lines (this one included) to boot.log before _exit
 		fflush(stderr);
 		if (orbis_event_log)
 		{
@@ -2325,6 +2331,11 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 
 	{
 		ORBIS_VKW(4);
+#ifdef ORBIS_VULKAN
+		// PS5 port (vk-285-98): the stream buffers' streaming stores (OrbisStreamCopy and the vertex upload's
+		// storent) are weakly ordered; this orders them before the submission that lets the GPU read them.
+		_mm_sfence();
+#endif
 		res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
 	}
 	if (res != VK_SUCCESS)
@@ -4722,6 +4733,46 @@ void GSDeviceVK::DoFXAA(GSTexture* sTex, GSTexture* dTex)
 	static_cast<GSTextureVK*>(dTex)->TransitionToLayout(GSTextureVK::Layout::ShaderReadOnly);
 }
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-98): a copy into a stream buffer with streaming stores. The driver's memory is ordinary
+// cached memory ([membench]): each line the GS thread writes there was last written a lap of the ring ago and
+// is long gone from the caches, so a plain store first reads it from memory; a streaming store doesn't
+// (~2.6x faster on the Pro). The destination must be 16-byte aligned; the source may not be. The vertex
+// upload already streams (GSVector4i::storent). SubmitCommandBuffer fences the stores.
+static __fi void OrbisStreamCopy(void* dst, const void* src, size_t size)
+{
+	u8* d = static_cast<u8*>(dst);
+	const u8* s = static_cast<const u8*>(src);
+	for (; size >= 64; size -= 64, d += 64, s += 64)
+	{
+		const __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
+		const __m128i b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16));
+		const __m128i c = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 32));
+		const __m128i e = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 48));
+		_mm_stream_si128(reinterpret_cast<__m128i*>(d), a);
+		_mm_stream_si128(reinterpret_cast<__m128i*>(d + 16), b);
+		_mm_stream_si128(reinterpret_cast<__m128i*>(d + 32), c);
+		_mm_stream_si128(reinterpret_cast<__m128i*>(d + 48), e);
+	}
+	for (; size >= 16; size -= 16, d += 16, s += 16)
+		_mm_stream_si128(reinterpret_cast<__m128i*>(d), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s)));
+	if (size != 0)
+		std::memcpy(d, s, size);
+}
+
+// PS5 port (vk-285-102): the streaming stores only with flags/ntstore (live). vk-285-101's GS profile, with the
+// GS thread now near its limit, had its hottest samples on stores and loads right behind these copies (a full
+// store queue: UpdateCurrentFencePosition's two stores 3%, ApplyTFXState's first load of the dirty flags 3.8%).
+// Plain copies by default until an A/B says otherwise.
+static __fi void OrbisUploadCopy(void* dst, const void* src, size_t size)
+{
+	if (g_orbis_nt_store.load(std::memory_order_relaxed))
+		OrbisStreamCopy(dst, src, size);
+	else
+		std::memcpy(dst, src, size);
+}
+#endif
+
 void GSDeviceVK::IASetVertexBuffer(const void* vertex, size_t stride, size_t count, size_t align_multiplier)
 {
 	const u32 size = static_cast<u32>(stride) * static_cast<u32>(count);
@@ -4742,17 +4793,27 @@ void GSDeviceVK::IASetVertexBuffer(const void* vertex, size_t stride, size_t cou
 void GSDeviceVK::UploadIndices(VKStreamBuffer& buffer, const void* index, size_t count)
 {
 	const u32 size = sizeof(u16) * static_cast<u32>(count);
-	if (!buffer.ReserveMemory(size, sizeof(u16)))
+#ifdef ORBIS_VULKAN
+	// vk-285-98: 16-byte aligned, for OrbisStreamCopy (the start is still counted in indices).
+	constexpr u32 align = 16;
+#else
+	constexpr u32 align = sizeof(u16);
+#endif
+	if (!buffer.ReserveMemory(size, align))
 	{
 		ExecuteCommandBufferAndRestartRenderPass(false, "Uploading bytes to index buffer");
-		if (!buffer.ReserveMemory(size, sizeof(u16)))
+		if (!buffer.ReserveMemory(size, align))
 			pxFailRel("Failed to reserve space for vertices");
 	}
 
 	m_index.start = buffer.GetCurrentOffset() / sizeof(u16);
 	m_index.count = count;
 
+#ifdef ORBIS_VULKAN
+	OrbisUploadCopy(buffer.GetCurrentHostPointer(), index, size); // vk-285-98, vk-285-102
+#else
 	std::memcpy(buffer.GetCurrentHostPointer(), index, size);
+#endif
 	buffer.CommitMemory(size);
 }
 
@@ -7158,7 +7219,11 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 			return ApplyTFXState(true);
 		}
 
+#ifdef ORBIS_VULKAN
+		OrbisUploadCopy(m_vertex_uniform_stream_buffer.GetCurrentHostPointer(), &m_vs_cb_cache, sizeof(m_vs_cb_cache)); // vk-285-98, vk-285-102
+#else
 		std::memcpy(m_vertex_uniform_stream_buffer.GetCurrentHostPointer(), &m_vs_cb_cache, sizeof(m_vs_cb_cache));
+#endif
 		m_tfx_dynamic_offsets[0] = m_vertex_uniform_stream_buffer.GetCurrentOffset();
 		m_vertex_uniform_stream_buffer.CommitMemory(sizeof(m_vs_cb_cache));
 		flags |= DIRTY_FLAG_TFX_UBO;
@@ -7179,7 +7244,11 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 			return ApplyTFXState(true);
 		}
 
+#ifdef ORBIS_VULKAN
+		OrbisUploadCopy(m_fragment_uniform_stream_buffer.GetCurrentHostPointer(), &m_ps_cb_cache, sizeof(m_ps_cb_cache)); // vk-285-98, vk-285-102
+#else
 		std::memcpy(m_fragment_uniform_stream_buffer.GetCurrentHostPointer(), &m_ps_cb_cache, sizeof(m_ps_cb_cache));
+#endif
 		m_tfx_dynamic_offsets[1] = m_fragment_uniform_stream_buffer.GetCurrentOffset();
 		m_fragment_uniform_stream_buffer.CommitMemory(sizeof(m_ps_cb_cache));
 		flags |= DIRTY_FLAG_TFX_UBO;

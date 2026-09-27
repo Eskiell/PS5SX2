@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "OrbisEEDiag.h" // vk-285-100
+#include "OrbisEEHle.h" // vk-285-102
 
 #include <float.h>
 
@@ -916,6 +918,24 @@ void SYSCALL()
 
 	BIOS_LOG("Bios call: %s (%x)", R5900::bios[call], call);
 
+	ORBIS_EEDIAG(OrbisEEDiag::syscalls[call]++); // PS5 port (vk-285-100)
+
+	// PS5 port (vk-285-102): GetThreadId from the cache while the thread can't have changed (OrbisEEHle.h).
+	if (call == 0x2f && OrbisTidSyscall())
+		return;
+
+	// PS5 port (vk-285-100): with flags/hleflush, FlushCache (0x64) and iFlushCache (0x68) return here instead of
+	// running the kernel's handler, as recSYSCALL already does when v1 is a constant at compile time (upstream:
+	// the handler's cycles are added, 5650, and the kernel is skipped). This covers the calls whose number was
+	// not a constant. Without the EE cache emulation the kernel's cache instructions do nothing (recCACHE emits
+	// no code). Like GetMemorySize below, execution goes on after the SYSCALL; v0 keeps its value (FlushCache
+	// is void). Needs proper testing.
+	if ((call == 0x64 || call == 0x68) && !CHECK_CACHE && g_orbis_hle_flush.load(std::memory_order_relaxed))
+	{
+		g_orbis_hle_flushes++;
+		cpuRegs.cycle += 5650;
+		return;
+	}
 
 	switch (static_cast<Syscall>(call))
 	{

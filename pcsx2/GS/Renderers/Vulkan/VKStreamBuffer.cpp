@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
+#include <atomic>
+extern std::atomic<int> g_orbis_gs_pfw; // vk-285-103 (OrbisEEDiag.cpp)
 #include "GS/Renderers/Vulkan/VKBuilders.h"
 #include "GS/Renderers/Vulkan/VKStreamBuffer.h"
 
@@ -226,6 +228,19 @@ void VKStreamBuffer::CommitMemory(u32 final_num_bytes)
 
 	m_current_offset += final_num_bytes;
 	m_current_space -= final_num_bytes;
+	// PS5 port (vk-285-103): with flags/gspfw (live), the two lines 2 KB past the new offset asked for with write
+	// intent, so the draws a little later find them in the cache: the copies into these buffers write lines last
+	// touched a lap of the ring ago, and vk-285-102's GS profile had ~6% of the thread in stalls behind the
+	// store queue those misses fill (UpdateCurrentFencePosition's and CommitMemory's own stores). An A/B.
+	if (g_orbis_gs_pfw.load(std::memory_order_relaxed))
+	{
+		const u32 ahead = m_current_offset + 2048;
+		if (ahead + 128 <= m_size)
+		{
+			__builtin_prefetch(m_host_pointer + ahead, 1, 3);
+			__builtin_prefetch(m_host_pointer + ahead + 64, 1, 3);
+		}
+	}
 	UpdateCurrentFencePosition();
 }
 

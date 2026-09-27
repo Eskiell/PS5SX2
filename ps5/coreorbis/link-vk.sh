@@ -126,11 +126,22 @@ echo "[link-vk] driver archives, Mesa utility objects and glslang ready"
 
 # 4. The pie link (twice: the second pass localizes everything but the imports), as conv.sh.
 STUBS=$(find "$SDK/target/lib" -maxdepth 1 -name '*.so' ! -name 'libScePosixForWebKit.so' ! -name 'libSceGLSlimVSH.so' | sort)
+# vk-285-98: the hot functions of the EE and GS threads, in profile order, placed together at the start of
+# .text (lld --symbol-ordering-file; every object has function sections). They were spread over ~15 MB of
+# text, far past what the instruction TLB and the L2 hold, between the JIT code the EE thread also runs.
+# orbis-hot.order comes from Shadow of the Colossus's EE (vk-285-97) and GS (vk-285-96) profiles
+# (tools: mkorder.py in the session notes); ORBIS_ORDER=none links without it.
+ORDER_ARGS=()
+ORDER_FILE=${ORBIS_ORDER:-$here/orbis-hot.order}
+if [[ $ORDER_FILE != none && -f $ORDER_FILE ]]; then
+  ORDER_ARGS=(--symbol-ordering-file="$ORDER_FILE" --no-warn-symbol-ordering)
+  echo "[link-vk] function order: $(wc -l < "$ORDER_FILE") hot functions first ($ORDER_FILE)"
+fi
 pie_link() {
   # shellcheck disable=SC2086
   "$LLD" -m elf_x86_64 -pie -z max-page-size=0x4000 -mllvm -emulated-tls \
     --hash-style=gnu -T "$NATIVE/tooling/native/ps5-pie.ld" -T "$here/orbis-shims/ehframe.ld" --eh-frame-hdr \
-    --version-script "$NATIVE/tooling/native/app-symbols.map" "$@" -e _start \
+    --version-script "$NATIVE/tooling/native/app-symbols.map" "${ORDER_ARGS[@]}" "$@" -e _start \
     ${LLD_EXTRA:---no-dynamic-linker} \
     -o "$OUT/build/llvm-pie.elf" $OBJS "${MESA_UTIL[@]}" \
     --whole-archive "${VK_ARCHIVES[@]}" --no-whole-archive \
