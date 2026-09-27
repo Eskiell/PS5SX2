@@ -1,11 +1,13 @@
-// PS5SX2 (vk-285-73): PS5 notifications from a worker thread, and the notification test.
+// PS5SX2 (vk-285-73): PS5 notifications from a worker thread. vk-285-74 removed vk-285-73's
+// notification test (L3+R3 + D-pad Right/Left and its ten variants); the worker stays for
+// RetroAchievements.
 //
 // Two ways to put a toast on the PS5's screen, both public (the ps5-payload-dev SDK declares them and
 // ships a sample of each):
 //   - the kernel toast, sceKernelSendNotificationRequest(0, request, 0xc30, 0): a 0xc30-byte request whose
 //     text starts at byte 0x2d. It is what the port has used since the start ("PS5SX2: starting"). The
 //     PS4 layout (PS4-Notify's documentation) also has a "use icon" byte at 0x2c and an icon URI at
-//     0x42d; whether the PS5 honours them is one of the things the test below finds out.
+//     0x42d; whether the PS5 honours them is not known yet.
 //   - the rich toast, libSceNotification's sceNotificationSend(user, logged, json): a JSON payload that
 //     the system UI's notification overlay draws (its klog says "[notification] Post7 ... useCaseId=
 //     <id> buflen=<bytes>"). The layout here is the SDK's notify sample (LightningMods, GPL-3.0-or-later):
@@ -19,7 +21,6 @@
 // never wait on the system UI. Every send goes to boot.log ("[notify] ...") with its result.
 
 #include "ProsperoNotify.h"
-#include "notify_test_badge.h"
 
 #include <atomic>
 #include <chrono>
@@ -74,12 +75,6 @@ namespace
 
 	constexpr int32_t USER_SYSTEM = 0xfe; // the SDK sample's SCE_NOTIFICATION_LOCAL_USER_ID_SYSTEM
 
-	constexpr const char* BADGE_DIR = "/data/PCSX2/cache/notify";
-	constexpr const char* BADGE_DATA = "/data/PCSX2/cache/notify/test_badge.png";
-	constexpr const char* BADGE_USER = "/user/data/PCSX2/cache/notify/test_badge.png";
-	constexpr const char* APP_ICON = "/user/appmeta/PPSA99203/icon0.png";
-	constexpr const char* WEB_ICON = "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/SCUS-97199.jpg";
-
 	enum class Api : uint8_t
 	{
 		Kernel,
@@ -96,34 +91,7 @@ namespace
 		bool preview_view = false; // add the sample's platformViews.previewDisabled view
 		bool logged = false; // sceNotificationSend's second argument (keep it in the notification list)
 		bool foreground_user = false; // send to the foreground user instead of the system's id
-		int test = 0; // > 0: the test variant this is
 	};
-
-	// The test's variants, in the order D-pad Right steps through them.
-	struct Variant
-	{
-		const char* name;
-		Api api;
-		const char* icon;
-		bool icon_predefined;
-		bool preview_view;
-		bool logged;
-		bool foreground_user;
-	};
-	constexpr Variant VARIANTS[] = {
-		{"kernel toast, text only", Api::Kernel, nullptr, false, false, false, false},
-		{"kernel toast + the PS4 trophy icon URI", Api::Kernel, "cxml://psnotification/tex_default_icon_trophy", false, false,
-			false, false},
-		{"kernel toast + an icon file in /data", Api::Kernel, BADGE_DATA, false, false, false, false},
-		{"rich toast + an icon file in /data", Api::Rich, BADGE_DATA, false, false, false, false},
-		{"rich toast + the same file as /user/data", Api::Rich, BADGE_USER, false, false, false, false},
-		{"rich toast + the app's own icon", Api::Rich, APP_ICON, false, false, false, false},
-		{"rich toast + an https image", Api::Rich, WEB_ICON, false, false, false, false},
-		{"rich toast, the SDK sample's layout (logged)", Api::Rich, BADGE_DATA, false, true, true, false},
-		{"rich toast + a predefined icon named trophy", Api::Rich, "trophy", true, false, false, false},
-		{"rich toast to the foreground user", Api::Rich, BADGE_DATA, false, false, false, true},
-	};
-	constexpr int VARIANT_COUNT = static_cast<int>(sizeof(VARIANTS) / sizeof(VARIANTS[0]));
 
 	constexpr size_t MAX_QUEUED = 8;
 	// The queue lives on the heap and is never freed: the worker waits on it for the whole process, so
@@ -140,15 +108,8 @@ namespace
 		static Shared* const s = new Shared();
 		return *s;
 	}
-	std::atomic<int> s_test_variant{0};
 
 	using NotificationSend = int (*)(int32_t user, bool logged, const char* payload);
-
-	void Event(const char* line)
-	{
-		if (orbis_event_log)
-			orbis_event_log(line);
-	}
 
 	// A system library by name, from the directories the ps5-payload-dev SDK's loader searches
 	// (the same list as ProsperoKbdMouse.cpp).
@@ -191,29 +152,6 @@ namespace
 			fflush(stdout);
 		}
 		return s_send;
-	}
-
-	// The test icon, written once per launch if the file is missing or not ours.
-	void EnsureBadgeFile()
-	{
-		static bool s_done = false;
-		if (s_done)
-			return;
-		s_done = true;
-		struct stat st;
-		if (stat(BADGE_DATA, &st) == 0 && st.st_size == static_cast<off_t>(kNotifyTestBadgePngLen))
-		{
-			printf("[notify] test icon: %s (present)\n", BADGE_DATA);
-			return;
-		}
-		mkdir("/data/PCSX2/cache", 0777);
-		mkdir(BADGE_DIR, 0777);
-		FILE* f = fopen(BADGE_DATA, "wb");
-		const size_t written = f ? fwrite(kNotifyTestBadgePng, 1, kNotifyTestBadgePngLen, f) : 0;
-		if (f)
-			fclose(f);
-		printf("[notify] test icon: %s (%s, %zu bytes)\n", BADGE_DATA, written == kNotifyTestBadgePngLen ? "written" : "write failed",
-			written);
 	}
 
 	std::string Quote(const std::string& s)
@@ -292,10 +230,6 @@ namespace
 
 	void Send(Request r)
 	{
-		const Variant* v = r.test > 0 ? &VARIANTS[r.test - 1] : nullptr;
-		if (r.api == Api::Rich || (!r.icon.empty() && r.icon.compare(0, 6, "/data/") == 0))
-			EnsureBadgeFile();
-
 		const auto t0 = std::chrono::steady_clock::now();
 		int rc = 0;
 		const char* how = "kernel";
@@ -333,11 +267,7 @@ namespace
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
 		char line[512];
-		if (v)
-			snprintf(line, sizeof(line), "notification test %d/%d (%s): %s, rc %#x, %.1f ms", r.test, VARIANT_COUNT, v->name, how,
-				static_cast<unsigned>(rc), ms);
-		else
-			snprintf(line, sizeof(line), "notification: %s, rc %#x, %.1f ms", how, static_cast<unsigned>(rc), ms);
+		snprintf(line, sizeof(line), "notification: %s, rc %#x, %.1f ms", how, static_cast<unsigned>(rc), ms);
 		printf("[notify] %s\n", line);
 		if (!r.icon.empty())
 			printf("[notify]   icon %s%s\n", r.icon_predefined ? "predefined " : "", r.icon.c_str());
@@ -345,8 +275,6 @@ namespace
 			printf("[notify]   user %#x, logged %d, payload %zu bytes (klog: Post7 ... buflen): %s\n", static_cast<unsigned>(user),
 				r.logged ? 1 : 0, payload.size(), payload.c_str());
 		fflush(stdout);
-		if (v)
-			Event(line);
 	}
 
 	void* Worker(void*)
@@ -406,35 +334,5 @@ void OrbisNotifyRich(const char* message, const char* sub_message, const char* i
 	r.message = message ? message : "";
 	r.sub_message = sub_message ? sub_message : "";
 	r.icon = icon ? icon : "";
-	Queue(std::move(r));
-}
-
-void OrbisNotifyTest(bool next)
-{
-	int n = s_test_variant.load(std::memory_order_relaxed);
-	if (next || n == 0)
-		n = (n % VARIANT_COUNT) + 1;
-	s_test_variant.store(n, std::memory_order_relaxed);
-
-	const Variant& v = VARIANTS[n - 1];
-	Request r;
-	r.api = v.api;
-	r.test = n;
-	r.icon = v.icon ? v.icon : "";
-	r.icon_predefined = v.icon_predefined;
-	r.preview_view = v.preview_view;
-	r.logged = v.logged;
-	r.foreground_user = v.foreground_user;
-	char tag[160];
-	snprintf(tag, sizeof(tag), "test %d/%d: %s", n, VARIANT_COUNT, v.name);
-	if (v.api == Api::Kernel)
-		r.message = std::string("PS5SX2 notification ") + tag + "\nAchievement unlocked: First Steps (10 points)";
-	else
-	{
-		r.message = "Achievement unlocked: First Steps";
-		r.sub_message = std::string("10 points \xC2\xB7 ") + tag;
-	}
-	printf("[notify] L3+R3 + D-pad %s: %s\n", next ? "Right" : "Left", tag);
-	fflush(stdout);
 	Queue(std::move(r));
 }

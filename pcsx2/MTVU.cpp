@@ -15,6 +15,13 @@ unsigned long long g_orbis_vu_idle_ticks, g_orbis_ee_waitvu_ticks, g_orbis_ee_vu
 void OrbisCpuSample(int slot); // eerec-285 (GSRenderer.cpp)
 void OrbisVUProfStart(); // vk-285-29 (orbis_eeprof.cpp)
 std::atomic<int> g_orbis_vu_waiting{0}; // vk-285-29: the VU1 profiler skips the ring waits
+// vk-285-74: VU1 cycles and program runs the MTVU thread executed (the [load] line prints them per
+// second, so VU busy ms over VU1 cycles says how fast the recompiled code runs), and the vudump
+// request the GS thread raises when /data/PCSX2/flags/vudump appears (served here, between
+// programs, where the recompiler's lists can't change under it; x86/microVU.cpp).
+std::atomic<u64> g_orbis_vu1_cycles{0}, g_orbis_vu1_runs{0};
+std::atomic<int> g_orbis_vu1_dump_request{0};
+void OrbisVU1Dump();
 
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
@@ -168,6 +175,14 @@ void VU_Thread::ExecuteRingBuffer()
 					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
 					vuCycles[vuCycleIdx].store(VU1.cycle, std::memory_order_release);
 					vuCycleIdx = (vuCycleIdx + 1) & 3;
+					// vk-285-74: only this thread writes them, so no locked adds.
+					g_orbis_vu1_cycles.store(g_orbis_vu1_cycles.load(std::memory_order_relaxed) + VU1.cycle, std::memory_order_relaxed);
+					g_orbis_vu1_runs.store(g_orbis_vu1_runs.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					if (g_orbis_vu1_dump_request.load(std::memory_order_relaxed)) [[unlikely]]
+					{
+						g_orbis_vu1_dump_request.store(0, std::memory_order_relaxed);
+						OrbisVU1Dump();
+					}
 					break;
 				}
 				case MTVU_VU_WRITE_MICRO:

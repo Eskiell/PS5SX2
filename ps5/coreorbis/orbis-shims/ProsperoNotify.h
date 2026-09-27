@@ -9,9 +9,5 @@ void OrbisNotifyPlain(const char* text);
 // A rich toast (libSceNotification's sceNotificationSend with a JSON payload): a message, a second
 // line and an icon, given as a file path the system UI can read or a URL. Falls back to the kernel
 // toast when the library or the call fails. Needs proper testing: the layout is the public SDK
-// sample's, and which icon sources the system UI accepts is what vk-285-73's test finds out.
+// sample's, and which icon sources the system UI accepts is not known yet.
 void OrbisNotifyRich(const char* message, const char* sub_message, const char* icon);
-
-// The notification test (vk-285-73): hold L3+R3 in a game, D-pad Right sends the next variant,
-// D-pad Left the same one again. Each send goes to boot.log with its result and payload.
-void OrbisNotifyTest(bool next);

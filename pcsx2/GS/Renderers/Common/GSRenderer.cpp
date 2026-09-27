@@ -220,7 +220,11 @@ struct OrbisLoadMeasure
 	double ee_wait = 0.0;
 	double sw_busy[16] = {};
 	u32 nsw = 0;
+	double vu_mcycles = 0.0; // vk-285-74: VU1 cycles the MTVU thread ran this second, in millions
+	double vu_runs = 0.0; // and VU1 program runs
 };
+extern std::atomic<u64> g_orbis_vu1_cycles, g_orbis_vu1_runs; // vk-285-74 (MTVU.cpp)
+extern std::atomic<int> g_orbis_vu1_dump_request;
 static OrbisLoadMeasure s_orbis_load_measure;
 
 static void OrbisMeasureLoad()
@@ -256,6 +260,39 @@ static void OrbisMeasureLoad()
 		s_prev[10 + i] = g_orbis_sw_busy_ticks[i];
 	s_tsc = tsc;
 	s_t = now;
+
+	// vk-285-74: VU1 cycles and program runs this second (MTVU.cpp).
+	{
+		static u64 s_cycles = 0, s_runs = 0;
+		const u64 cycles = g_orbis_vu1_cycles.load(std::memory_order_relaxed);
+		const u64 runs = g_orbis_vu1_runs.load(std::memory_order_relaxed);
+		if (m.measured)
+		{
+			m.vu_mcycles = static_cast<double>(cycles - s_cycles) / 1e6 / sec;
+			m.vu_runs = static_cast<double>(runs - s_runs) / sec;
+		}
+		s_cycles = cycles;
+		s_runs = runs;
+	}
+	// vk-285-74: /data/PCSX2/flags/vudump appearing while the game runs asks the MTVU thread for a dump
+	// of the VU1 recompiler (microVU.cpp OrbisVU1Dump). A flag already there at launch does nothing: move
+	// it out and back in at the spot to study.
+	{
+		static int s_prev_flag = -1;
+		const int flag = OrbisFlag("vudump") ? 1 : 0;
+		if (s_prev_flag == 0 && flag == 1)
+		{
+			if (THREAD_VU1)
+			{
+				g_orbis_vu1_dump_request.store(1, std::memory_order_release);
+				printf("[vudump] flag seen: the MTVU thread dumps after its current program\n");
+			}
+			else
+				printf("[vudump] flag seen, but the dump needs the VU thread (MTVU) on\n");
+			fflush(stdout);
+		}
+		s_prev_flag = flag;
+	}
 }
 
 // The [load] line of the second OrbisMeasureLoad last measured, and the [rec]/[mcd] lines after it.
@@ -265,8 +302,9 @@ static void OrbisPrintLoad()
 	if (!m.measured)
 		return;
 	const double* const v = m.v;
-	printf("[load] ms/s ee: busy=%.0f waitgs=%.0f ringfull=%.0f vsyncq=%.0f waitvu=%.0f vuring=%.0f throttle=%.0f | gs: busy=%.0f swsync=%.0f | vu: busy=%.0f | sw busy=",
-		1000.0 - m.ee_wait, v[0], v[1], v[2], v[3], v[4], v[5], 1000.0 - v[6], v[7], 1000.0 - v[8]);
+	// vk-285-74: the VU part adds the VU1 cycles (millions) and program runs of the second.
+	printf("[load] ms/s ee: busy=%.0f waitgs=%.0f ringfull=%.0f vsyncq=%.0f waitvu=%.0f vuring=%.0f throttle=%.0f | gs: busy=%.0f swsync=%.0f | vu: busy=%.0f cyc=%.2fM runs=%.0f | sw busy=",
+		1000.0 - m.ee_wait, v[0], v[1], v[2], v[3], v[4], v[5], 1000.0 - v[6], v[7], 1000.0 - v[8], m.vu_mcycles, m.vu_runs);
 	for (u32 i = 0; i < m.nsw; i++)
 		printf("%s%.0f", i ? "/" : "", m.sw_busy[i]);
 	OrbisPrintCpu(); // eerec-285

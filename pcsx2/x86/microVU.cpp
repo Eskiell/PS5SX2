@@ -7,6 +7,14 @@
 #include "common/Perf.h"
 #include "common/StringUtil.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
 //------------------------------------------------------------------
 // Micro VU - Main Functions
 //------------------------------------------------------------------
@@ -502,4 +510,112 @@ size_t OrbisMVUUsed(int vu, size_t* size)
 	const microVU& m = vu == 0 ? microVU0 : microVU1;
 	*size = static_cast<size_t>((uptr)m.prog.x86end - (uptr)m.prog.x86start);
 	return m.prog.x86ptr ? static_cast<size_t>((uptr)m.prog.x86ptr - (uptr)m.prog.x86start) : 0;
+}
+
+// vk-285-74: the VU1 recompiler's state, for studying offline which x86 code the hot VU1 programs get
+// (tools/vu1dump.py, with a vuprof profile of the same launch). Raised by the vudump flag (GSRenderer.cpp)
+// and run on the MTVU thread between two programs (MTVU.cpp), where nothing compiles or frees. The buffer
+// goes to /data/PCSX2/logs/vu1dump-<n>.bin from a thread of its own. Little-endian layout:
+//   "VU1DUMP1", u32 version (1), u32 0, u64 VU1 cycles run so far, u64 program runs so far
+//   VU1 micro memory (16 KiB), VU1 data memory (16 KiB)
+//   u64 code base (the rec cache, dispatchers first), u64 bytes in use, the bytes
+//   u32 program count, then per program: u32 start PC (bytes), u32 index, u32 range count, the ranges
+//   (s32 start, s32 end), its micro memory copy (16 KiB), u32 block count, per block u32 PC (bytes) and
+//   u64 x86 entry.
+// Needs proper testing.
+void OrbisVU1Dump()
+{
+	static int s_count = 0;
+	if (s_count >= 8)
+	{
+		printf("[vudump] 8 dumps this launch already, request ignored\n");
+		fflush(stdout);
+		return;
+	}
+	const int n = s_count++;
+	const auto t0 = std::chrono::steady_clock::now();
+	microVU& mVU = microVU1;
+	std::vector<u8> out;
+	out.reserve(8u << 20);
+	const auto put = [&out](const void* p, size_t size) {
+		const u8* b = static_cast<const u8*>(p);
+		out.insert(out.end(), b, b + size);
+	};
+	const auto put32 = [&put](u32 v) { put(&v, sizeof(v)); };
+	const auto put64 = [&put](u64 v) { put(&v, sizeof(v)); };
+	const auto patch32 = [&out](size_t at, u32 v) { std::memcpy(&out[at], &v, sizeof(v)); };
+
+	extern std::atomic<u64> g_orbis_vu1_cycles, g_orbis_vu1_runs; // MTVU.cpp
+	put("VU1DUMP1", 8);
+	put32(1);
+	put32(0);
+	put64(g_orbis_vu1_cycles.load(std::memory_order_relaxed));
+	put64(g_orbis_vu1_runs.load(std::memory_order_relaxed));
+	put(VU1.Micro, 0x4000);
+	put(VU1.Mem, 0x4000);
+
+	const u8* const base = mVU.cache;
+	const u64 used = (mVU.prog.x86ptr && mVU.prog.x86ptr > base) ? static_cast<u64>(mVU.prog.x86ptr - base) : 0;
+	put64(reinterpret_cast<u64>(base));
+	put64(used);
+	put(base, used);
+
+	const size_t nprog_at = out.size();
+	put32(0);
+	u32 nprog = 0, nblocks = 0;
+	for (u32 i = 0; i < mProgSize / 2; i++)
+	{
+		const microProgramList* list = mVU.prog.prog[i];
+		if (!list)
+			continue;
+		for (const microProgram* prog : *list)
+		{
+			if (!prog)
+				continue;
+			nprog++;
+			put32(prog->startPC);
+			put32(static_cast<u32>(prog->idx));
+			const u32 nr = prog->ranges ? static_cast<u32>(prog->ranges->size()) : 0;
+			put32(nr);
+			for (u32 r = 0; r < nr; r++)
+			{
+				put32(static_cast<u32>((*prog->ranges)[r].start));
+				put32(static_cast<u32>((*prog->ranges)[r].end));
+			}
+			put(prog->data, sizeof(prog->data));
+			const size_t nb_at = out.size();
+			put32(0);
+			u32 nb = 0;
+			for (u32 pc = 0; pc < mProgSize / 2; pc++)
+			{
+				const microBlockManager* bm = prog->block[pc];
+				if (!bm)
+					continue;
+				bm->forEachBlock([&](const microBlock& b) {
+					put32(pc * 8);
+					put64(reinterpret_cast<u64>(b.x86ptrStart));
+					nb++;
+				});
+			}
+			patch32(nb_at, nb);
+			nblocks += nb;
+		}
+	}
+	patch32(nprog_at, nprog);
+	const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+	char path[96];
+	std::snprintf(path, sizeof(path), "/data/PCSX2/logs/vu1dump-%d.bin", n);
+	printf("[vudump] %d: %u programs, %u blocks, code %p + %#llx, %zu bytes, built in %.1f ms on the MTVU thread -> %s\n", n,
+		nprog, nblocks, static_cast<const void*>(base), static_cast<unsigned long long>(used), out.size(), ms, path);
+	fflush(stdout);
+	std::thread([buf = std::move(out), file = std::string(path)]() {
+		FILE* f = std::fopen(file.c_str(), "wb");
+		const size_t written = f ? std::fwrite(buf.data(), 1, buf.size(), f) : 0;
+		if (f)
+			std::fclose(f);
+		printf("[vudump] %s: %s (%zu of %zu bytes)\n", file.c_str(), written == buf.size() ? "written" : "write failed", written,
+			buf.size());
+		fflush(stdout);
+	}).detach();
 }

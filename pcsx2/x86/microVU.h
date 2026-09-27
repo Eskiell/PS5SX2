@@ -165,6 +165,16 @@ private:
 
 public:
 	inline int getFullListCount() const { return fListI; }
+	// PS5 port (vk-285-74): every block of this start PC, quick-search list first (the vudump flag,
+	// OrbisVU1Dump in microVU.cpp).
+	template <typename F>
+	void forEachBlock(F&& f) const
+	{
+		for (const microBlockLink* linkI = qBlockList; linkI != nullptr; linkI = linkI->next)
+			f(linkI->block);
+		for (const microBlockLink* linkI = fBlockList; linkI != nullptr; linkI = linkI->next)
+			f(linkI->block);
+	}
 	microBlockManager()
 	{
 		qListI = fListI = 0;
