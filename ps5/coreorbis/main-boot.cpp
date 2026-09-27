@@ -986,6 +986,15 @@ static void orbis_vk_environment()
   // every step waited about a vblank (Gran Turismo 4: 2.4-3 steps a frame, 25-29 ms). The live flag
   // file vk_cpuupload puts the uploads back on the CPU while a game runs.
   if (orbis_flag("vk_renderer")) setenv("PS5VK_GPU_UPLOAD", "1", 0);
+  // vk-285-86: the flag file vk_recordthread moves the driver's command encoding off the GS thread:
+  // PCSX2's vkCmd* calls copy their arguments and return, and the driver's own thread encodes them
+  // (~22% of the GS thread in Shadow of the Colossus's heavy views, vk-285-84). Read when the
+  // device is created, so it applies from the next start; the live flag file vk_recordsync keeps
+  // new recordings on the GS thread for an A/B within a run. Needs proper testing.
+  if (orbis_flag("vk_renderer") && orbis_flag("vk_recordthread")) setenv("PS5VK_RECORD_THREAD", "1", 0);
+  // vk-285-86: the flag file vk_fullstatecopy binds pipelines with Mesa's whole dynamic-state copy
+  // instead of the driver's per-group copy (A/B for the per-draw state cost).
+  if (orbis_flag("vk_renderer") && orbis_flag("vk_fullstatecopy")) setenv("PS5VK_FULL_STATE_COPY", "1", 0);
 }
 #endif
 
