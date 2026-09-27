@@ -72,6 +72,7 @@ private:
 	bool AllocateBuffer(VkBufferUsageFlags usage, u32 size);
 	void UpdateCurrentFencePosition();
 	void UpdateGPUPosition();
+	void OrbisMaterializeFence(); // PS5 port (vk-285-97)
 
 	// Waits for as many fences as needed to allocate num_bytes bytes from the buffer.
 	bool WaitForClearSpace(u32 num_bytes);
@@ -85,6 +86,12 @@ private:
 	bool m_orbis_coherent = false; // PS5 port (vk-285-85): see Create()
 	VkBuffer m_buffer = VK_NULL_HANDLE;
 	u8* m_host_pointer = nullptr;
+
+	// PS5 port (vk-285-97): the newest fence's entry, kept here until something reads the list
+	// (OrbisMaterializeFence), so a commit doesn't touch the deque.
+	u64 m_orbis_fence_counter = 0;
+	u32 m_orbis_fence_offset = 0;
+	bool m_orbis_fence_pending = false;
 
 	// List of fences and the corresponding positions in the buffer
 	std::deque<std::pair<u64, u32>, OrbisLineAllocator<std::pair<u64, u32>>> m_tracked_fences; // vk-285-91

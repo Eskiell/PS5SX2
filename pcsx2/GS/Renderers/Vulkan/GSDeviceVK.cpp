@@ -5097,6 +5097,74 @@ bool GSDeviceVK::CreateNullTexture()
 	return true;
 }
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-97): what the stream buffers' memory costs to write and read, against the heap, once per
+// run: the [membench] line. TSC ticks per 256 bytes written in order over 16 MiB (more than the L3), as
+// plain copies, with a prefetchw 1 KiB ahead, and as non-temporal stores, and per 8 bytes read over 1 MiB.
+// It tells cached memory from write-combined or uncached, which decides how the GS thread should fill the
+// vertex, index and uniform buffers. Runs before the buffer's first use.
+static void OrbisMemBench(u8* mapped, size_t mapped_bytes)
+{
+	static bool s_done = false;
+	if (s_done || mapped == nullptr)
+		return;
+	s_done = true;
+	const size_t bytes = std::min<size_t>(mapped_bytes, 16u << 20) & ~static_cast<size_t>(255);
+	const size_t read_bytes = std::min<size_t>(bytes, 1u << 20);
+	u8* const heap = static_cast<u8*>(_aligned_malloc(bytes, 4096));
+	if (heap == nullptr)
+		return;
+	std::memset(heap, 0, bytes);
+	alignas(64) u8 src[256];
+	for (u32 i = 0; i < sizeof(src); i++)
+		src[i] = static_cast<u8>(i);
+	const auto write = [&](u8* dst, int mode) {
+		const u64 start = __builtin_ia32_rdtsc();
+		for (size_t off = 0; off < bytes; off += 256)
+		{
+			u8* const d = dst + off;
+			if (mode == 1)
+				__builtin_prefetch(d + 1024, 1, 3);
+			if (mode == 2)
+			{
+				for (u32 i = 0; i < 256; i += 32)
+					_mm256_stream_si256(reinterpret_cast<__m256i*>(d + i),
+						_mm256_load_si256(reinterpret_cast<const __m256i*>(src + i)));
+			}
+			else
+			{
+				std::memcpy(d, src, 256);
+			}
+		}
+		_mm_sfence();
+		return static_cast<double>(__builtin_ia32_rdtsc() - start) / static_cast<double>(bytes / 256);
+	};
+	u64 sink = 0;
+	const auto read = [&](const u8* p) {
+		const u64 start = __builtin_ia32_rdtsc();
+		for (size_t off = 0; off < read_bytes; off += 8)
+			sink += *reinterpret_cast<const volatile u64*>(p + off);
+		return static_cast<double>(__builtin_ia32_rdtsc() - start) / static_cast<double>(read_bytes / 8);
+	};
+	write(heap, 0);
+	const double heap_w = write(heap, 0);
+	const double heap_nt = write(heap, 2);
+	write(mapped, 0);
+	const double map_w = write(mapped, 0);
+	const double map_pw = write(mapped, 1);
+	const double map_nt = write(mapped, 2);
+	read(heap);
+	const double heap_r = read(heap);
+	read(mapped);
+	const double map_r = read(mapped);
+	Console.WriteLn("[membench] TSC ticks per 256 B written over %zu MiB: heap %.0f, heap NT %.0f, mapped %.0f, "
+					"mapped+prefetchw %.0f, mapped NT %.0f; per 8 B read over %zu KiB: heap %.1f, mapped %.1f (%llx)",
+		bytes >> 20, heap_w, heap_nt, map_w, map_pw, map_nt, read_bytes >> 10, heap_r, map_r,
+		static_cast<unsigned long long>(sink & 0xf));
+	_aligned_free(heap);
+}
+#endif
+
 bool GSDeviceVK::CreateBuffers()
 {
 	if (!m_vertex_stream_buffer.Create(
@@ -5106,6 +5174,9 @@ bool GSDeviceVK::CreateBuffers()
 		Host::ReportErrorAsync("GS", "Failed to allocate vertex buffer");
 		return false;
 	}
+#ifdef ORBIS_VULKAN
+	OrbisMemBench(m_vertex_stream_buffer.GetHostPointer(), VERTEX_BUFFER_SIZE); // vk-285-97
+#endif
 
 	if (!m_index_stream_buffer.Create(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, INDEX_BUFFER_SIZE))
 	{

@@ -20,8 +20,12 @@ VKStreamBuffer::VKStreamBuffer(VKStreamBuffer&& move)
 	, m_orbis_coherent(move.m_orbis_coherent)
 	, m_buffer(move.m_buffer)
 	, m_host_pointer(move.m_host_pointer)
+	, m_orbis_fence_counter(move.m_orbis_fence_counter)
+	, m_orbis_fence_offset(move.m_orbis_fence_offset)
+	, m_orbis_fence_pending(move.m_orbis_fence_pending)
 	, m_tracked_fences(std::move(move.m_tracked_fences))
 {
+	move.m_orbis_fence_pending = false;
 	move.m_size = 0;
 	move.m_current_offset = 0;
 	move.m_current_space = 0;
@@ -49,6 +53,9 @@ VKStreamBuffer& VKStreamBuffer::operator=(VKStreamBuffer&& move)
 	std::swap(m_buffer, move.m_buffer);
 	std::swap(m_host_pointer, move.m_host_pointer);
 	std::swap(m_orbis_coherent, move.m_orbis_coherent); // vk-285-85
+	std::swap(m_orbis_fence_counter, move.m_orbis_fence_counter); // vk-285-97
+	std::swap(m_orbis_fence_offset, move.m_orbis_fence_offset);
+	std::swap(m_orbis_fence_pending, move.m_orbis_fence_pending);
 	std::swap(m_tracked_fences, move.m_tracked_fences);
 
 	return *this;
@@ -83,6 +90,7 @@ bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
 	m_current_offset = 0;
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
+	m_orbis_fence_pending = false; // vk-285-97
 	m_allocation = new_allocation;
 	m_buffer = new_buffer;
 	m_host_pointer = static_cast<u8*>(ai.pMappedData);
@@ -111,6 +119,7 @@ void VKStreamBuffer::Destroy(bool defer)
 	m_current_offset = 0;
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
+	m_orbis_fence_pending = false; // vk-285-97
 	m_buffer = VK_NULL_HANDLE;
 	m_allocation = VK_NULL_HANDLE;
 	m_host_pointer = nullptr;
@@ -119,6 +128,27 @@ void VKStreamBuffer::Destroy(bool defer)
 bool VKStreamBuffer::ReserveMemory(u32 num_bytes, u32 alignment)
 {
 	const u32 required_bytes = num_bytes + alignment;
+
+	// PS5 port (vk-285-97): room in front of the offset against the GPU position last seen -- which only
+	// moves on, so the room only grows -- needs no look at the fence list. The list's loads missed on
+	// ~0.5% of the GS thread's samples in vk-285-96's Shadow of the Colossus profile, ~4 times a draw.
+	// The same cases as below; the full path (and its reset to the start when the GPU has caught up) runs
+	// when this one finds no room. Needs proper testing.
+	if (m_current_offset >= m_current_gpu_position)
+	{
+		if (required_bytes <= m_size - m_current_offset)
+		{
+			m_current_offset = Common::AlignUp(m_current_offset, alignment);
+			m_current_space = m_size - m_current_offset;
+			return true;
+		}
+	}
+	else if (required_bytes < m_current_gpu_position - m_current_offset)
+	{
+		m_current_offset = Common::AlignUp(m_current_offset, alignment);
+		m_current_space = m_current_gpu_position - m_current_offset - 1;
+		return true;
+	}
 
 	// Check for sane allocations
 	if (required_bytes > m_size)
@@ -201,21 +231,37 @@ void VKStreamBuffer::CommitMemory(u32 final_num_bytes)
 
 void VKStreamBuffer::UpdateCurrentFencePosition()
 {
-	// Has the offset changed since the last fence?
+	// PS5 port (vk-285-97): the entry waits in m_orbis_fence_* until the list is read or the fence
+	// changes; the list then holds what the original code below would have made of it.
 	const u64 counter = GSDeviceVK::GetInstance()->GetCurrentFenceCounter();
+	if (m_orbis_fence_pending && m_orbis_fence_counter != counter)
+		OrbisMaterializeFence();
+	m_orbis_fence_counter = counter;
+	m_orbis_fence_offset = m_current_offset;
+	m_orbis_fence_pending = true;
+}
+
+void VKStreamBuffer::OrbisMaterializeFence()
+{
+	if (!m_orbis_fence_pending)
+		return;
+	m_orbis_fence_pending = false;
+	const u64 counter = m_orbis_fence_counter;
+	// Has the offset changed since the last fence?
 	if (!m_tracked_fences.empty() && m_tracked_fences.back().first == counter)
 	{
 		// Still haven't executed a command buffer, so just update the offset.
-		m_tracked_fences.back().second = m_current_offset;
+		m_tracked_fences.back().second = m_orbis_fence_offset;
 		return;
 	}
 
 	// New buffer, so update the GPU position while we're at it.
-	m_tracked_fences.emplace_back(counter, m_current_offset);
+	m_tracked_fences.emplace_back(counter, m_orbis_fence_offset);
 }
 
 void VKStreamBuffer::UpdateGPUPosition()
 {
+	OrbisMaterializeFence(); // vk-285-97
 	auto start = m_tracked_fences.begin();
 	auto end = start;
 
@@ -241,6 +287,7 @@ void VKStreamBuffer::UpdateGPUPosition()
 
 bool VKStreamBuffer::WaitForClearSpace(u32 num_bytes)
 {
+	OrbisMaterializeFence(); // vk-285-97
 	u32 new_offset = 0;
 	u32 new_space = 0;
 	u32 new_gpu_position = 0;
