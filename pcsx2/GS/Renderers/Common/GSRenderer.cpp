@@ -73,6 +73,9 @@ int g_orbis_diag = 0; // eerec-280: periodic GL readback diagnostics (live.ini d
 int g_orbis_perf = 0; // eerec-280: perf OSD + [perf] klog line every second (live.ini perf=1)
 // ---- eerec-285: live gs.ini reload flags; CPU placement sampling and pinning ----
 #include <pthread.h>
+#include <sys/param.h> // vk-285-87: cpuset_setaffinity (pin_all)
+#include <sys/cpuset.h>
+#include <cerrno>
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 std::atomic<int> g_orbis_gsini_reload{0}; // GS thread saw gs.ini change -> the CPU thread applies it
 std::atomic<int> g_orbis_live_reapply{0}; // the CPU thread applied gs.ini -> apply live.ini again
@@ -83,6 +86,18 @@ extern "C" int scePthreadGetaffinity(pthread_t thread, unsigned long long* mask)
 extern "C" int scePthreadSetaffinity(pthread_t thread, unsigned long long mask);
 // slots: 0 EE, 1 GS, 2 VU1, 3..7 SW workers 0..4
 static constexpr int ORBIS_CPU_SLOTS = 8;
+// vk-285-87: pin=3's layout from live.ini, a CPU each (-1: any CPU the others leave free) for the EE, GS
+// and VU threads and the Vulkan driver's recorder and queue worker; pin_all=1 first restricts every thread
+// of the process to the CPUs the layout leaves free (cpuset_setaffinity), so no unnamed thread shares the
+// EE's or the VU's core.
+enum { ORBIS_PIN_EE, ORBIS_PIN_GS, ORBIS_PIN_VU, ORBIS_PIN_REC, ORBIS_PIN_QUEUE, ORBIS_PIN_COUNT };
+static std::atomic<int> s_orbis_pin_cpu[ORBIS_PIN_COUNT] = {-1, -1, -1, -1, -1};
+static std::atomic<int> s_orbis_pin_all{0};
+#ifdef ORBIS_VULKAN
+void* OrbisVkDeviceHandle(); // GSDeviceVK.cpp
+extern "C" uint32_t ps5vk_debug_threads(void* device, pthread_t* recorder, pthread_t* queue_worker)
+	__attribute__((weak)); // the driver (ps5vk_debug.h)
+#endif
 static pthread_t s_orbis_thr[ORBIS_CPU_SLOTS];
 static unsigned s_orbis_cpu_hist[ORBIS_CPU_SLOTS][16];
 static unsigned long long s_orbis_cpu_last[ORBIS_CPU_SLOTS];
@@ -110,6 +125,70 @@ void OrbisCpuForget(int slot)
 	if (slot >= 0 && slot < ORBIS_CPU_SLOTS)
 		s_orbis_thr[slot] = pthread_t{};
 }
+// vk-285-87: pin=3, the explicit layout (s_orbis_pin_cpu). A named CPU outside the process mask counts as
+// unnamed. The EE's and the VU's SMT siblings are left free as well, so those two threads have their cores
+// alone; every unnamed thread gets the CPUs left over.
+static void OrbisApplyLayout(unsigned long long orig)
+{
+	int cpu[ORBIS_PIN_COUNT];
+	unsigned long long reserved = 0;
+	for (int i = 0; i < ORBIS_PIN_COUNT; i++)
+	{
+		cpu[i] = s_orbis_pin_cpu[i].load(std::memory_order_acquire);
+		if (cpu[i] < 0 || cpu[i] > 15 || !((orig >> cpu[i]) & 1ull))
+			cpu[i] = -1;
+		if (cpu[i] >= 0)
+			reserved |= 1ull << cpu[i];
+	}
+	if (cpu[ORBIS_PIN_EE] >= 0)
+		reserved |= 1ull << (cpu[ORBIS_PIN_EE] ^ 1);
+	if (cpu[ORBIS_PIN_VU] >= 0)
+		reserved |= 1ull << (cpu[ORBIS_PIN_VU] ^ 1);
+	unsigned long long rest = orig & ~reserved;
+	if (rest == 0)
+		rest = orig;
+	auto mask_of = [&](int which) { return cpu[which] >= 0 ? (1ull << cpu[which]) : rest; };
+	// Every thread of the process first, when asked: the named ones get their own CPUs right after.
+	int rc_all = 1;
+	if (s_orbis_pin_all.load(std::memory_order_acquire))
+	{
+		cpuset_t set;
+		CPU_ZERO(&set);
+		for (int c = 0; c < 64; c++)
+			if ((rest >> c) & 1ull)
+				CPU_SET(c, &set);
+		rc_all = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, sizeof(set), &set) == 0 ? 0 : errno;
+	}
+	s_orbis_pin_mode = 3;
+	int rc[ORBIS_CPU_SLOTS];
+	for (int i = 0; i < ORBIS_CPU_SLOTS; i++)
+	{
+		const unsigned long long m = (i == 0) ? mask_of(ORBIS_PIN_EE) : (i == 1) ? mask_of(ORBIS_PIN_GS) :
+			(i == 2) ? mask_of(ORBIS_PIN_VU) : rest;
+		rc[i] = (s_orbis_thr[i] != pthread_t{}) ? scePthreadSetaffinity(s_orbis_thr[i], m) : 1;
+	}
+	int rc_rec = 1, rc_queue = 1;
+#ifdef ORBIS_VULKAN
+	if (ps5vk_debug_threads)
+	{
+		if (void* const device = OrbisVkDeviceHandle())
+		{
+			pthread_t recorder{}, queue{};
+			const uint32_t found = ps5vk_debug_threads(device, &recorder, &queue);
+			if (found & 1u)
+				rc_rec = scePthreadSetaffinity(recorder, mask_of(ORBIS_PIN_REC));
+			if (found & 2u)
+				rc_queue = scePthreadSetaffinity(queue, mask_of(ORBIS_PIN_QUEUE));
+		}
+	}
+#endif
+	printf("[pin] mode=3 ee=%d gs=%d vu=%d rec=%d queue=%d rest=%#llx all=%d rc ee=%d gs=%d vu=%d rec=%d queue=%d\n",
+		cpu[ORBIS_PIN_EE], cpu[ORBIS_PIN_GS], cpu[ORBIS_PIN_VU], cpu[ORBIS_PIN_REC], cpu[ORBIS_PIN_QUEUE], rest,
+		rc_all, rc[0], rc[1], rc[2], rc_rec, rc_queue);
+	fflush(stdout);
+	OrbisOSDLabel("PIN 3");
+}
+
 // CPU thread (Host::PumpMessagesOnCPUThread). SMT siblings are taken to be CPUs 2k and 2k+1.
 void OrbisApplyPinning(int mode)
 {
@@ -133,9 +212,14 @@ void OrbisApplyPinning(int mode)
 	for (int k = 7; k >= 0; k--)
 		if (((s_orig >> (2 * k)) & 3ull) == 3ull)
 			pairs[np++] = k;
-	if (np < 3)
+	if (np < 3 && mode != 3)
 		mode = 0;
 	unsigned long long ee = s_orig, gs = s_orig, rest = s_orig;
+	if (mode == 3)
+	{
+		OrbisApplyLayout(s_orig);
+		return;
+	}
 	if (mode >= 1)
 	{
 		ee = 1ull << (2 * pairs[0]);
@@ -572,6 +656,7 @@ static void OrbisLiveTune()
 		return;
 	s_last = cur;
 	int mode = -1;
+	int pin_request = -1; // vk-285-87: issued once every key is read
 	size_t pos = 0;
 	while (pos < cur.size())
 	{
@@ -613,8 +698,20 @@ static void OrbisLiveTune()
 			g_orbis_diag = (v != 0.0f);
 		else if (k == "perf")
 			g_orbis_perf = (v != 0.0f);
-		else if (k == "pin") // eerec-285
-			g_orbis_pin_request.store(std::clamp(static_cast<int>(v), 0, 2), std::memory_order_release);
+		else if (k == "pin") // eerec-285; vk-285-87: 3, the layout below (applied after the whole file)
+			pin_request = std::clamp(static_cast<int>(v), 0, 3);
+		else if (k == "pin_ee") // vk-285-87
+			s_orbis_pin_cpu[ORBIS_PIN_EE].store(static_cast<int>(v), std::memory_order_release);
+		else if (k == "pin_gs")
+			s_orbis_pin_cpu[ORBIS_PIN_GS].store(static_cast<int>(v), std::memory_order_release);
+		else if (k == "pin_vu")
+			s_orbis_pin_cpu[ORBIS_PIN_VU].store(static_cast<int>(v), std::memory_order_release);
+		else if (k == "pin_rec")
+			s_orbis_pin_cpu[ORBIS_PIN_REC].store(static_cast<int>(v), std::memory_order_release);
+		else if (k == "pin_q")
+			s_orbis_pin_cpu[ORBIS_PIN_QUEUE].store(static_cast<int>(v), std::memory_order_release);
+		else if (k == "pin_all")
+			s_orbis_pin_all.store(v != 0.0f ? 1 : 0, std::memory_order_release);
 #ifdef ORBIS_VULKAN
 		else if (k == "widescreen") // vk-285-12: R&C PAL 16:9 patch (pcsx2/OrbisWidescreen.cpp)
 			g_orbis_widescreen.store(v != 0.0f ? 1 : 0, std::memory_order_release);
@@ -628,6 +725,8 @@ static void OrbisLiveTune()
 			GSConfig.AspectRatio = t;
 		}
 	}
+	if (pin_request >= 0)
+		g_orbis_pin_request.store(pin_request, std::memory_order_release);
 	printf("[present] live.ini (%zu bytes) applied: deinterlace=%d fxaa=%d antiblur=%d\n", cur.size(),
 		static_cast<int>(GSConfig.InterlaceMode), static_cast<int>(GSConfig.FXAA), static_cast<int>(GSConfig.PCRTCAntiBlur));
 	printf("[present] swtex=%d testpat=%d upload=%d diag=%d perf=%d\n", g_orbis_swtex, g_orbis_testpat, g_orbis_upload_mode,

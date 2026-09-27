@@ -1215,6 +1215,15 @@ float GSDeviceVK::GetAndResetAccumulatedGPUTime()
 	return time;
 }
 
+// vk-285-87: the Vulkan device, for the port's CPU pinning (GSRenderer.cpp, OrbisApplyLayout), which places
+// the driver's own threads with the emulator's.
+void* OrbisVkDeviceHandle()
+{
+	if (!g_gs_device || g_gs_device->GetRenderAPI() != RenderAPI::Vulkan)
+		return nullptr;
+	return GSDeviceVK::GetInstance()->GetDevice();
+}
+
 bool GSDeviceVK::SetGPUTimingEnabled(bool enabled)
 {
 	m_gpu_timing_enabled = enabled && m_gpu_timing_supported;
