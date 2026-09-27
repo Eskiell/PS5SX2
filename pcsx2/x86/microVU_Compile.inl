@@ -627,9 +627,14 @@ static void mvuPreloadRegisters(microVU& mVU, u32 endCount)
 	int free_regs = mVU.regAlloc->getFreeXmmCount();
 	int free_gprs = mVU.regAlloc->getFreeGPRCount();
 
-	auto preloadVF = [&mVU, &vfs_loaded, &free_regs](u8 reg)
+	// PS5 port (vk-285-76): registers the block writes whole (xyzw) before it reads them are not
+	// preloaded: the value loaded would never be used (Shadow of the Colossus's lighting loop loaded three
+	// such registers on every pass). Needs proper testing.
+	u32 vfs_written = 0;
+
+	auto preloadVF = [&mVU, &vfs_loaded, &free_regs, &vfs_written](u8 reg)
 	{
-		if (free_regs <= REQUIRED_FREE_XMMS || reg == 0 || (vfs_loaded & (1u << reg)) != 0)
+		if (free_regs <= REQUIRED_FREE_XMMS || reg == 0 || (vfs_loaded & (1u << reg)) != 0 || (vfs_written & (1u << reg)) != 0)
 			return;
 
 		mVU.regAlloc->clearNeeded(mVU.regAlloc->allocReg(reg));
@@ -680,6 +685,12 @@ static void mvuPreloadRegisters(microVU& mVU, u32 endCount)
 			// not writing entire vector
 			preloadVF(lvfr.reg);
 		}
+
+		// vk-285-76: after this pair's reads, note the registers it writes whole.
+		if (uvfr.reg != 0 && uvfr.reg < 32 && uvfr.x && uvfr.y && uvfr.z && uvfr.w)
+			vfs_written |= (1u << uvfr.reg);
+		if (lvfr.reg != 0 && lvfr.reg < 32 && lvfr.x && lvfr.y && lvfr.z && lvfr.w)
+			vfs_written |= (1u << lvfr.reg);
 
 		if (info->lOp.branch)
 			break;

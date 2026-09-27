@@ -382,9 +382,23 @@ alignas(16) static const SSEMasks sseMasks =
 };
 
 
+// PS5 port (vk-285-76): per-game "fast VU MIN/MAX" (EmuCore/CPU/Recompiler/OrbisVUFastMinMax, read by
+// main-boot.cpp, which also resets the VU recompilers when it changes). MAX/MINI then compile to the SSE
+// float MAXPS/MINPS instead of the exact sign-magnitude integer compare below. The difference is only for
+// operands that aren't normal floats: denormals (flushed to zero under the VU's DAZ, so a game that uses
+// MAX/MINI on integers breaks), infinities/NaNs, and which zero +0/-0 gives. Shadow of the Colossus's
+// per-vertex lighting loop has a MAX and a MINI on its critical path. Needs proper testing.
+std::atomic<int> g_orbis_vu_fast_minmax{0};
+
 // Warning: Modifies t1 and t2
 void MIN_MAX_PS(microVU& mVU, const xmm& to, const xmm& from, const xmm& t1in, const xmm& t2in, bool min)
 {
+	if (g_orbis_vu_fast_minmax.load(std::memory_order_relaxed))
+	{
+		if (min) xMIN.PS(to, from);
+		else     xMAX.PS(to, from);
+		return;
+	}
 	const xmm& t1 = t1in.IsEmpty() ? mVU.regAlloc->allocReg() : t1in;
 	const xmm& t2 = t2in.IsEmpty() ? mVU.regAlloc->allocReg() : t2in;
 
@@ -440,6 +454,12 @@ void MIN_MAX_PS(microVU& mVU, const xmm& to, const xmm& from, const xmm& t1in, c
 // Warning: Modifies to's upper 3 vectors, and t1
 void MIN_MAX_SS(mV, const xmm& to, const xmm& from, const xmm& t1in, bool min)
 {
+	if (g_orbis_vu_fast_minmax.load(std::memory_order_relaxed)) // vk-285-76 (see MIN_MAX_PS)
+	{
+		if (min) xMIN.SS(to, from);
+		else     xMAX.SS(to, from);
+		return;
+	}
 	const xmm& t1 = t1in.IsEmpty() ? mVU.regAlloc->allocReg() : t1in;
 	xSHUF.PS(to, from, 0);
 	xPAND   (to, ptr128[sseMasks.MIN_MAX_1]);

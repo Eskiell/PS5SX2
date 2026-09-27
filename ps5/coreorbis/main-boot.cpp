@@ -44,6 +44,7 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "SIO/Memcard/MemoryCardFile.h" // vk-285-48: FileMcd_EmuClose/Open
 #include "CDVD/CDVD.h"                  // vk-285-48: cdvdSaveNVRAM
 #include "SPU2/spu2.h"                  // vk-285-48: SPU2::SetOutputPaused
+#include "VUmicro.h"                    // vk-285-76: CpuVU0/CpuVU1->Reset() after a VU codegen switch
 #include <dlfcn.h>
 
 // Orbis: DualSense -> PCSX2 port 1 DualShock2 via libScePad (polled on its own thread).
@@ -546,7 +547,10 @@ static MemorySettingsInterface s_input_si;
 // gs.ini and the game's file left them, into pcsx2/MTVU.cpp's g_orbis_vu1_speed. It only matters with
 // Instant VU1 off: the EE then sees VU1 busy for the recent programs' cycles divided by it.
 extern std::atomic<u32> g_orbis_vu1_speed;
-static void orbis_vu1_speed_from(const SettingsInterface& si)
+// vk-285-76: EmuCore/CPU/Recompiler/OrbisVUFastMinMax (bool, default off): VU MAX/MINI as SSE float
+// max/min (pcsx2/x86/microVU_Misc.inl). Returns true when it changed, so a live apply can recompile.
+extern std::atomic<int> g_orbis_vu_fast_minmax;
+static bool orbis_vu1_speed_from(const SettingsInterface& si)
 {
   int v = 100;
   si.GetIntValue("EmuCore/Speedhacks", "OrbisVU1Speed", &v);
@@ -554,6 +558,16 @@ static void orbis_vu1_speed_from(const SettingsInterface& si)
   if (speed != g_orbis_vu1_speed.load(std::memory_order_relaxed))
     printf("[boot] VU1 speed %u%% (EmuCore/Speedhacks/OrbisVU1Speed; with Instant VU1 off)\n", speed);
   g_orbis_vu1_speed.store(speed, std::memory_order_relaxed);
+
+  bool fast = false;
+  si.GetBoolValue("EmuCore/CPU/Recompiler", "OrbisVUFastMinMax", &fast);
+  const int prev = g_orbis_vu_fast_minmax.exchange(fast ? 1 : 0, std::memory_order_relaxed);
+  if (prev != (fast ? 1 : 0))
+  {
+    printf("[boot] fast VU MIN/MAX %s (EmuCore/CPU/Recompiler/OrbisVUFastMinMax)\n", fast ? "on" : "off");
+    return true;
+  }
+  return false;
 }
 
 // eerec-285: gs.ini re-read while running (GSRenderer.cpp OrbisLiveTune sees the change, StubHost's
@@ -613,8 +627,16 @@ void orbis_reload_gs_ini_cpu()
     std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
     s_base_si = trial;
   }
-  orbis_vu1_speed_from(trial); // vk-285-75
+  const bool vu_codegen_changed = orbis_vu1_speed_from(trial); // vk-285-75, vk-285-76
   VMManager::ApplySettings();
+  if (vu_codegen_changed)
+  {
+    // vk-285-76: recompile the VU programs with the new MAX/MINI code (we are on the CPU thread at vsync;
+    // recMicroVU1::Reset waits for the VU thread first).
+    CpuVU0->Reset();
+    CpuVU1->Reset();
+    printf("[gsini] VU recompilers reset (fast VU MIN/MAX %s)\n", g_orbis_vu_fast_minmax.load() ? "on" : "off");
+  }
   // vk-285-34: a changed patch list (Patches/Enable) or a new pnach applies live too; PCSX2 only
   // re-reads them on its own when one of the patch switches changes.
   VMManager::ReloadPatches(true, true, false, true);
