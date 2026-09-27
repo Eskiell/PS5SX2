@@ -204,6 +204,36 @@ void VU_Thread::ExecuteRingBuffer()
 							g_orbis_vu1_long_top.store(vifRegs.top, std::memory_order_relaxed);
 							g_orbis_vu1_long_tpc.store(VU1.VI[REG_TPC].UL * 8, std::memory_order_relaxed);
 						}
+						if (b == 7)
+						{
+							// vk-285-78: a run that used the whole budget: its VI registers and the qwords the
+							// program reads its count from (0, TOP, 0x1a6: Shadow of the Colossus's lighting program
+							// copies qword 0 to 0x1a6 and reads NLOOP at TOP), the first 12 of a launch, then one
+							// every ~5 s. Needs proper testing.
+							static u32 s_logged = 0;
+							static u64 s_last = 0;
+							const u64 now = __builtin_ia32_rdtsc();
+							if (s_logged < 12 || now - s_last > 5ull * 1600000000ull)
+							{
+								s_logged++;
+								s_last = now;
+								const u32* mem = reinterpret_cast<const u32*>(VU1.Mem);
+								const auto q = [mem](u32 qw, char* out, size_t n) {
+									const u32 i = (qw & 0x3ff) * 4;
+									snprintf(out, n, "%08x %08x %08x %08x", mem[i], mem[i + 1], mem[i + 2], mem[i + 3]);
+								};
+								char q0[40], qt[40], qb[40];
+								q(0, q0, sizeof(q0));
+								q(vifRegs.top, qt, sizeof(qt));
+								q(0x1a6, qb, sizeof(qb));
+								printf("[vurunaway] start %04x stop %04x top %03x itop %03x | vi1-15:", addr == -1 ? 0xffffu :
+									static_cast<u32>(addr & 0x7ff) * 8, VU1.VI[REG_TPC].UL * 8, vifRegs.top, vifRegs.itop);
+								for (int i = 1; i < 16; i++)
+									printf(" %04x", VU1.VI[i].US[0]);
+								printf(" | q[0] %s | q[top] %s | q[1a6] %s\n", q0, qt, qb);
+								fflush(stdout);
+							}
+						}
 					}
 					if (g_orbis_vu1_dump_request.load(std::memory_order_relaxed)) [[unlikely]]
 					{
