@@ -5859,7 +5859,11 @@ __forceinline void GSState::VertexKick(u32 skip)
 	u32 next = vtx_buff.next;
 	u32 xy_tail = vtx_buff.xy_tail;
 
-	if (GSIsHardwareRenderer() && GSLocalMemory::m_psm[m_context->ZBUF.PSM].bpp == 32)
+	// PS5 port (vk-285-90): the setting first. It's almost always off, and then this skips a call and a
+	// table lookup per vertex (the call's line was ~2.5% of the GS thread in vk-285-89's Shadow of the
+	// Colossus profile). Same result: the body does nothing unless the setting is on.
+	if (GSConfig.UserHacks_Limit24BitDepth != GSLimit24BitDepth::Disabled && GSIsHardwareRenderer() &&
+		GSLocalMemory::m_psm[m_context->ZBUF.PSM].bpp == 32)
 	{
 		if (GSConfig.UserHacks_Limit24BitDepth == GSLimit24BitDepth::PrioritizeUpper)
 			m_v.XYZ.Z = ((m_v.XYZ.Z >> 8) & ~0xFF) | (m_v.XYZ.Z & 0xFF);

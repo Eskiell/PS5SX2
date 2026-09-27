@@ -583,6 +583,14 @@ static bool orbis_vu1_speed_from(const SettingsInterface& si)
     if (old_spin != (spin ? 1 : 0) || old_batch != (batch ? 1 : 0))
       printf("[boot] MTVU: VU thread spin %s, kick batching %s (EmuCore/Speedhacks/OrbisMTVUSpin, OrbisMTVUBatch)\n",
         spin ? "on" : "off", batch ? "on" : "off");
+    // vk-285-90: EmuCore/Speedhacks/OrbisMTVURingKB (256..16384, default 16384 = the whole buffer): the
+    // EE-to-VU ring's length, taken at its next wrap (pcsx2/MTVU.cpp).
+    extern std::atomic<u32> g_orbis_mtvu_ring_kb;
+    int ring_kb = 16384;
+    si.GetIntValue("EmuCore/Speedhacks", "OrbisMTVURingKB", &ring_kb);
+    const u32 ring = static_cast<u32>(std::clamp(ring_kb, 256, 16384));
+    if (g_orbis_mtvu_ring_kb.exchange(ring, std::memory_order_relaxed) != ring)
+      printf("[boot] MTVU ring %u KB (EmuCore/Speedhacks/OrbisMTVURingKB)\n", ring);
   }
 
   bool fast = false;
@@ -670,11 +678,12 @@ void orbis_reload_gs_ini_cpu()
   {
     extern std::atomic<int> g_orbis_mtvu_spin;
     extern std::atomic<int> g_orbis_mtvu_batch;
-    printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d vu1Instant=%d vu1Speed=%u mtvuSpin=%d mtvuBatch=%d\n",
+    extern std::atomic<u32> g_orbis_mtvu_ring_kb;
+    printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d vu1Instant=%d vu1Speed=%u mtvuSpin=%d mtvuBatch=%d mtvuRingKB=%u\n",
       (int)EmuConfig.Speedhacks.EECycleRate, (double)EmuConfig.GS.FrameratePAL, (int)EmuConfig.GS.SWExtraThreads,
       (int)EmuConfig.GS.TVShader, (int)EmuConfig.Speedhacks.vuThread, (int)EmuConfig.Speedhacks.vu1Instant,
       g_orbis_vu1_speed.load(std::memory_order_relaxed), g_orbis_mtvu_spin.load(std::memory_order_relaxed),
-      g_orbis_mtvu_batch.load(std::memory_order_relaxed)); // vk-285-84
+      g_orbis_mtvu_batch.load(std::memory_order_relaxed), g_orbis_mtvu_ring_kb.load(std::memory_order_relaxed)); // vk-285-84/90
   }
   fflush(stdout);
   orbis_eventf(kept ? "live apply: applied in the running game; MTVU and the other relaunch-only options wait for the next launch" :
@@ -1037,6 +1046,32 @@ int main()
   fprintf(stderr, "[boot] stderr-ok\n");
   printf("[boot] main=%p\n", (void*)&main);
   printf("[boot] build=" ORBIS_BUILD_TAG "\n");
+  {
+    // vk-285-91: what VZEROUPPER costs on this CPU. The GS thread's profiles (vk-285-89/90) had 5-7% of
+    // their samples on the instruction right after one, so the eboot is now built with -mno-vzeroupper
+    // (no SSE/AVX transition penalty to avoid on Zen 2, which keeps the upper halves apart). Two short
+    // loops of a 256-bit add, one with a VZEROUPPER after each add; the best of three, in TSC ticks.
+    const auto loop = [](bool vzu) {
+      unsigned long long best = ~0ull;
+      for (int rep = 0; rep < 3; rep++)
+      {
+        const unsigned long long t0 = __builtin_ia32_rdtsc();
+        if (vzu)
+          for (int i = 0; i < 1000000; i++)
+            asm volatile("vpaddd %%ymm1, %%ymm1, %%ymm1\n\tvzeroupper" ::: "xmm0", "xmm1", "xmm2", "xmm3", "xmm4",
+              "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory");
+        else
+          for (int i = 0; i < 1000000; i++)
+            asm volatile("vpaddd %%ymm1, %%ymm1, %%ymm1" ::: "xmm1", "memory");
+        const unsigned long long dt = __builtin_ia32_rdtsc() - t0;
+        if (dt < best)
+          best = dt;
+      }
+      return static_cast<double>(best) / 1e6;
+    };
+    const double with = loop(true), without = loop(false);
+    printf("[vzubench] ticks per iteration: 256-bit add + vzeroupper %.2f, 256-bit add alone %.2f (TSC)\n", with, without);
+  }
   if (g_orbis_test_build > 0)
     printf("[boot] testing build: %s\n", orbis_build_label().c_str()); // test build 1 (vk-285-55)
 #ifdef ORBIS_VULKAN

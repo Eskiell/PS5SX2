@@ -69,13 +69,29 @@ namespace MTGS
 	alignas(__cachelinesize) static std::atomic<unsigned int> s_ReadPos; // cur pos gs is reading from
 	alignas(__cachelinesize) static std::atomic<unsigned int> s_WritePos; // cur pos ee thread is writing to
 
+	// PS5 port (vk-285-90): the EE thread's own MTGS state on a cache line nothing else writes. In vk-285-89
+	// GenericStall's cached read position (vk-285-84) sat on s_ReadPos's line, which this thread writes per
+	// packet, so the cache missed about as often as the load it replaced; s_packet_size sat there too, and
+	// s_CopyDataTally on the line of the flags the GS thread polls. An external, 64-byte object keeps its
+	// layout (the compiler split and repacked the internal padded ones). The old names are references.
+	struct alignas(__cachelinesize) OrbisMtgsEE
+	{
+		u32 packet_startpos, packet_size, packet_writepos;
+		int copy_data_tally;
+		uint cached_readpos;
+	};
+	OrbisMtgsEE g_orbis_mtgs_ee;
+	static_assert(sizeof(OrbisMtgsEE) == __cachelinesize);
+
 	// These vars maintain instance data for sending Data Packets.
 	// Only one data packet can be constructed and uploaded at a time.
-	static u32 s_packet_startpos; // size of the packet (data only, ie. not including the 16 byte command!)
-	static u32 s_packet_size; // size of the packet (data only, ie. not including the 16 byte command!)
-	static u32 s_packet_writepos; // index of the data location in the ringbuffer.
+	static u32& s_packet_startpos = g_orbis_mtgs_ee.packet_startpos; // size of the packet (data only, ie. not including the 16 byte command!)
+	static u32& s_packet_size = g_orbis_mtgs_ee.packet_size; // size of the packet (data only, ie. not including the 16 byte command!)
+	static u32& s_packet_writepos = g_orbis_mtgs_ee.packet_writepos; // index of the data location in the ringbuffer.
 
-	static std::atomic<bool> s_SignalRingEnable;
+	// PS5 port (vk-285-90): on a line of their own. The GS thread loads s_SignalRingEnable after every packet,
+	// and it sat on s_WritePos's line, which the EE thread writes per packet.
+	alignas(__cachelinesize) static std::atomic<bool> s_SignalRingEnable;
 	static std::atomic<int> s_SignalRingPosition;
 
 	static std::atomic<int> s_QueuedFrameCount;
@@ -88,7 +104,7 @@ namespace MTGS
 
 	// Used to delay the sending of events.  Performance is better if the ringbuffer
 	// has more than one command in it when the thread is kicked.
-	static int s_CopyDataTally;
+	static int& s_CopyDataTally = g_orbis_mtgs_ee.copy_data_tally; // vk-285-90 (see OrbisMtgsEE)
 
 #ifdef RINGBUF_DEBUG_STACK
 	static std::mutex s_lock_Stack;
@@ -377,8 +393,18 @@ void MTGS::MainLoop()
 
 		// note: m_ReadPos is intentionally not volatile, because it should only
 		// ever be modified by this thread.
-		while (s_ReadPos.load(std::memory_order_relaxed) != s_WritePos.load(std::memory_order_acquire))
+		// PS5 port (vk-285-90): s_WritePos is loaded again only when this thread has caught up with the last
+		// value it loaded, not after every packet: the EE thread writes it per packet (~1.2 million MTVU
+		// packets a second in Shadow of the Colossus), so each load was a cross-core miss. Needs proper testing.
+		unsigned int orbis_write_pos = s_WritePos.load(std::memory_order_acquire);
+		for (;;)
 		{
+			if (s_ReadPos.load(std::memory_order_relaxed) == orbis_write_pos)
+			{
+				orbis_write_pos = s_WritePos.load(std::memory_order_acquire);
+				if (s_ReadPos.load(std::memory_order_relaxed) == orbis_write_pos)
+					break;
+			}
 			const unsigned int local_ReadPos = s_ReadPos.load(std::memory_order_relaxed);
 
 			pxAssert(local_ReadPos < RingBufferSize);
@@ -792,7 +818,7 @@ void MTGS::GenericStall(uint size)
 	// old value can only under-state the room; the shared line (written by the GS thread per packet, a
 	// cross-core miss per packet in vk-285-83's SotC profile, ~26,000 VU1 packets a frame) is loaded only
 	// when it says there's no room. Needs proper testing.
-	static uint s_orbis_cached_readpos = 0;
+	uint& s_orbis_cached_readpos = g_orbis_mtgs_ee.cached_readpos; // vk-285-90: its own line (OrbisMtgsEE)
 	uint readpos = s_orbis_cached_readpos;
 	uint freeroom;
 

@@ -462,8 +462,13 @@ private:
 		m_tfx_fragment_shaders;
 	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_pipelines;
 #ifdef ORBIS_VULKAN
-	PipelineSelector m_orbis_last_selector{}; // vk-285-85: GetTFXPipeline's last lookup
-	VkPipeline m_orbis_last_pipeline = VK_NULL_HANDLE;
+	// vk-285-90: GetTFXPipeline's direct-mapped cache in front of m_tfx_pipelines (was the last lookup alone).
+	struct OrbisPipeSlot
+	{
+		PipelineSelector sel;
+		VkPipeline pipeline = VK_NULL_HANDLE;
+	};
+	std::array<OrbisPipeSlot, 64> m_orbis_pipe_cache{};
 #endif
 
 	VkRenderPass m_utility_color_render_pass_load = VK_NULL_HANDLE;

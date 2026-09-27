@@ -20,6 +20,7 @@
 #include "Recording/InputRecording.h"
 #include "VMManager.h"
 #include "VUmicro.h"
+#include "MTVU.h" // vk-285-90
 
 static const uint EECNT_FUTURE_TARGET = 0x10000000;
 
@@ -490,6 +491,7 @@ static __fi void VSyncStart(u64 sCycle)
 {
 	// End-of-frame tasks.
 	DoFMVSwitch();
+	vu1Thread.OrbisVsyncRefresh(); // PS5 port (vk-285-90): live MTVU settings, once a frame
 	VMManager::Internal::VSyncOnCPUThread();
 
 	// Don't bother throttling if we're going to pause.

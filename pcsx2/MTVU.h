@@ -40,6 +40,17 @@ class VU_Thread final {
 	int  m_cached_read_pos;
 	bool m_defer_kicks;
 	bool m_kick_pending;
+	// PS5 port (vk-285-90), EE-thread state on the same line:
+	// - m_orbis_batch: OrbisMTVUBatch as of the last vsync (OrbisVsyncRefresh), for BeginKickBatch, which
+	//   loaded g_orbis_mtvu_batch per VIF1 transfer from a line the VU thread writes per program (its
+	//   counters): ~1% of the EE thread in vk-285-89's SotC profile.
+	// - m_orbis_ring_limit: where the ring wraps, in u32s (<= buffer_size): OrbisMTVURingKB, taken at a wrap
+	//   (the VU thread follows the MTVU_NULL_PACKET, so a lap may be shorter than the buffer).
+	bool m_orbis_batch;
+	s32  m_orbis_ring_limit;
+	// - the [eestat] counts (OrbisEEStats): unpacks handed over, and kicks.
+	u64  m_orbis_unpacks = 0; // cumulative (not cleared by Reset)
+	u64  m_orbis_kicks = 0;
 	alignas(__cachelinesize) Threading::WorkSema semaEvent;
 	std::atomic_bool m_shutdown_flag{false};
 
@@ -90,6 +101,16 @@ public:
 	void FlushKick();
 	bool BeginKickBatch();
 	void EndKickBatch(bool was_deferring);
+
+	// PS5 port (vk-285-90): a data packet (unpack, memory or register write) only marks a kick pending; the
+	// next program's ExecuteVU kicks for it, as does every wait on the VU thread (WaitVU, WaitOnSize) and on
+	// the GS thread (FlushKick). The VU thread can't run anything that needs the data before a program.
+	void OrbisDataKick() { m_kick_pending = true; }
+
+	// PS5 port (vk-285-90): once per vsync on the EE thread (Counters.cpp): the live settings it caches.
+	void OrbisVsyncRefresh();
+	u64 OrbisUnpacks() const { return m_orbis_unpacks; }
+	u64 OrbisKicks() const { return m_orbis_kicks; }
 
 	// Used for assertions...
 	bool IsDone();

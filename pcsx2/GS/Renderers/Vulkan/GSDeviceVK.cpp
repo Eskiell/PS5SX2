@@ -1299,6 +1299,23 @@ namespace
 	u64 s_orbis_trace_seq = 0;
 	u32 s_orbis_submit = 0;
 
+	// vk-285-90: the ring only runs with the flag file flags/vkring (read at the first traced call). Two
+	// fresh ~128-byte entries per draw in a 2 MB ring (always out of the caches) were ~2% of the GS thread in
+	// vk-285-89's Shadow of the Colossus profile. Without it a GPU-hang dump (vkhang.txt) and the on-demand
+	// vktrace.txt only say that the ring was off.
+	bool s_orbis_trace_on = false, s_orbis_trace_read = false;
+	__fi bool OrbisVkTraceOn()
+	{
+		if (!s_orbis_trace_read) [[unlikely]]
+		{
+			s_orbis_trace_read = true;
+			s_orbis_trace_on = OrbisFlag("vkring");
+			printf("[vkhw] draw ring for GPU-hang dumps: %s (flags/vkring)\n", s_orbis_trace_on ? "on" : "off");
+			fflush(stdout);
+		}
+		return s_orbis_trace_on;
+	}
+
 	OrbisVkTraceEntry& OrbisVkTraceNew(u8 kind)
 	{
 		OrbisVkTraceEntry& e = s_orbis_trace[s_orbis_trace_seq % ORBIS_VK_TRACE_N];
@@ -1322,6 +1339,8 @@ namespace
 
 	void OrbisVkTraceDraw(const GSHWDrawConfig& config)
 	{
+		if (!OrbisVkTraceOn()) // vk-285-90
+			return;
 		OrbisVkTraceEntry& e = OrbisVkTraceNew(1);
 		e.topology = static_cast<u8>(config.topology);
 		e.vs = config.vs.key;
@@ -1354,6 +1373,8 @@ namespace
 
 	void OrbisVkTraceOp(u8 kind, const GSTexture* dst, const GSTexture* src, const GSVector4i& r, u64 extra)
 	{
+		if (!OrbisVkTraceOn()) // vk-285-90
+			return;
 		OrbisVkTraceEntry& e = OrbisVkTraceNew(kind);
 		OrbisVkTraceTex(dst, e.a, e.aw, e.ah, e.af);
 		OrbisVkTraceTex(src, e.b, e.bw, e.bh, e.bf);
@@ -1370,6 +1391,8 @@ namespace
 		if (FILE* f = fopen(path, "w"))
 		{
 			fprintf(f, "%s\n", header);
+			if (!s_orbis_trace_on) // vk-285-90
+				fprintf(f, "the draw ring was off: put the flag file flags/vkring in place and relaunch to record it\n");
 			fprintf(f, "kinds: 1 draw, 2 copy, 3 clear, 4 stretch, 5 multi-stretch, 6 readback, 7 upload; tex = ptr WxH f<GSTexture::Format>\n");
 			fprintf(f, "draw: topo(0 pt,1 line,2 tri) vs depth colormask date(0 off,1 stencil,2 stencilone,3 primid,4 full) sampler flags(1 one-barrier,2 full-barrier,4 alpha2,8 blend-mp,16 line-expand,32+ hazard) blend ps nv/ni rt ds tex pal drawarea scissor\n");
 			const u64 first = s_orbis_trace_seq > ORBIS_VK_TRACE_N ? s_orbis_trace_seq - ORBIS_VK_TRACE_N : 0;
@@ -1410,6 +1433,8 @@ namespace
 	// really uses, its feedback-loop flags and the TFX texture slots 0-2.
 	void OrbisVkTracePipe(u64 ps_lo, u64 ps_hi, u8 feedback, const void* t0, const void* t1, const void* t2, u64 pipeline)
 	{
+		if (!OrbisVkTraceOn()) // vk-285-90
+			return;
 		OrbisVkTraceEntry& e = OrbisVkTraceNew(8);
 		e.ps_lo = ps_lo;
 		e.ps_hi = ps_hi;
@@ -5296,7 +5321,8 @@ void GSDeviceVK::DestroyResources()
 	for (auto& it : m_tfx_pipelines)
 		vkDestroyPipeline(m_device, it.second, nullptr);
 #ifdef ORBIS_VULKAN
-	m_orbis_last_pipeline = VK_NULL_HANDLE; // vk-285-85
+	for (OrbisPipeSlot& slot : m_orbis_pipe_cache) // vk-285-90
+		slot.pipeline = VK_NULL_HANDLE;
 #endif
 	for (auto& it : m_tfx_fragment_shaders)
 		vkDestroyShaderModule(m_device, it.second, nullptr);
@@ -5673,16 +5699,22 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 {
 #ifdef ORBIS_VULKAN
 	// PS5 port (vk-285-85): consecutive draws often repeat the selector; the hash and map lookup were
-	// ~1.3% of the GS thread in vk-285-84's Shadow of the Colossus profile. Needs proper testing.
-	if (m_orbis_last_pipeline != VK_NULL_HANDLE && p == m_orbis_last_selector)
-		return m_orbis_last_pipeline;
+	// ~1.3% of the GS thread in vk-285-84's Shadow of the Colossus profile. vk-285-90: a 64-entry
+	// direct-mapped cache instead of the last lookup alone (the map lookup was still ~1.5% in vk-285-89's:
+	// the game alternates between a few pipelines). Needs proper testing.
+	u64 w[4];
+	std::memcpy(w, &p, sizeof(w));
+	static_assert(sizeof(PipelineSelector) == sizeof(w));
+	OrbisPipeSlot& slot = m_orbis_pipe_cache[((w[0] ^ w[1] ^ w[2] ^ w[3]) * 0x9E3779B97F4A7C15ull) >> 58];
+	if (slot.pipeline != VK_NULL_HANDLE && slot.sel == p)
+		return slot.pipeline;
 #endif
 	const auto it = m_tfx_pipelines.find(p);
 	if (it != m_tfx_pipelines.end())
 	{
 #ifdef ORBIS_VULKAN
-		m_orbis_last_selector = p;
-		m_orbis_last_pipeline = it->second;
+		slot.sel = p;
+		slot.pipeline = it->second;
 #endif
 		return it->second;
 	}
@@ -5690,8 +5722,8 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 	VkPipeline pipeline = CreateTFXPipeline(p);
 	m_tfx_pipelines.emplace(p, pipeline);
 #ifdef ORBIS_VULKAN
-	m_orbis_last_selector = p;
-	m_orbis_last_pipeline = pipeline;
+	slot.sel = p;
+	slot.pipeline = pipeline;
 #endif
 	return pipeline;
 }

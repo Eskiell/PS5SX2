@@ -7,8 +7,40 @@
 
 #include "vk_mem_alloc.h"
 
+#include "common/AlignedMalloc.h"
+
 #include <deque>
 #include <memory>
+
+// PS5 port (vk-285-91): an allocator that gives each allocation whole cache lines of its own. The stream
+// buffers' fence lists (a deque read on every ReserveMemory, ~3 times a draw) came from the general heap, and
+// the load of the deque's block map missed on ~1.9% of the GS thread's samples in vk-285-90's Shadow of the
+// Colossus profile: most likely a line shared with memory another thread writes. Needs proper testing.
+template <typename T>
+struct OrbisLineAllocator
+{
+	using value_type = T;
+	OrbisLineAllocator() = default;
+	template <typename U>
+	OrbisLineAllocator(const OrbisLineAllocator<U>&) noexcept
+	{
+	}
+	T* allocate(std::size_t n)
+	{
+		return static_cast<T*>(_aligned_malloc((n * sizeof(T) + 63) & ~static_cast<std::size_t>(63), 64));
+	}
+	void deallocate(T* p, std::size_t) noexcept { _aligned_free(p); }
+	template <typename U>
+	bool operator==(const OrbisLineAllocator<U>&) const noexcept
+	{
+		return true;
+	}
+	template <typename U>
+	bool operator!=(const OrbisLineAllocator<U>&) const noexcept
+	{
+		return false;
+	}
+};
 
 class VKStreamBuffer
 {
@@ -55,5 +87,5 @@ private:
 	u8* m_host_pointer = nullptr;
 
 	// List of fences and the corresponding positions in the buffer
-	std::deque<std::pair<u64, u32>> m_tracked_fences;
+	std::deque<std::pair<u64, u32>, OrbisLineAllocator<std::pair<u64, u32>>> m_tracked_fences; // vk-285-91
 };

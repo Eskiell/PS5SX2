@@ -134,6 +134,25 @@ bool _VIF1chain()
 		return VIF1transfer(pMem, vif1ch.qwc * 4, false);
 }
 
+// PS5 port (vk-285-90): a cache prefetch of a DMA address (the same mapping as dmaGetAddr, no side effects;
+// nothing for addresses dmaGetAddr would not map to RAM or the scratchpad). vk-285-89's Shadow of the Colossus
+// EE profile: the first read of each VIF1 tag and of each packet's first VIF code missed the caches (~2% of
+// the EE thread at ~1.2 million packets a second). Needs proper testing.
+static __fi void OrbisPrefetchDma(u32 addr)
+{
+	const u8* p;
+	if (DMA_TAG(addr).SPR)
+		p = &eeMem->Scratch[addr & 0x3ff0];
+	else
+	{
+		addr &= 0x1ffffff0;
+		if (addr >= Ps2MemSize::ExposedRam)
+			return;
+		p = &eeMem->Main[addr];
+	}
+	_mm_prefetch(reinterpret_cast<const char*>(p), _MM_HINT_T0);
+}
+
 __fi void vif1SetupTransfer()
 {
 	tDMA_TAG* ptag;
@@ -204,7 +223,16 @@ __fi void vif1SetupTransfer()
 	vif1.done |= hwDmacSrcChainWithStack(vif1ch, ptag->ID);
 
 	if (vif1ch.qwc > 0)
+	{
 		vif1.inprogress |= 1;
+		// vk-285-90: this packet's data is read at the next vif1Interrupt (after its cycles of EE code), the
+		// next tag after that.
+		OrbisPrefetchDma(vif1ch.madr);
+		if (vif1ch.qwc > 4)
+			OrbisPrefetchDma(vif1ch.madr + 64);
+	}
+	if (!vif1.done)
+		OrbisPrefetchDma(vif1ch.tadr);
 
 	//Check TIE bit of CHCR and IRQ bit of tag
 	if (vif1ch.chcr.TIE && ptag->IRQ)
@@ -274,9 +302,12 @@ __fi void vif1VUFinish()
 	//DevCon.Warning("VU1 state cleared");
 }
 
+std::atomic<u64> g_orbis_ee_vif1ints{0}; // PS5 port (vk-285-90): calls, for the [eestat] line (MTVU.cpp)
+
 __fi void vif1Interrupt()
 {
 	VIF_LOG("vif1Interrupt: %8.8llx chcr %x, done %x, qwc %x", cpuRegs.cycle, vif1ch.chcr._u32, vif1.done, vif1ch.qwc);
+	g_orbis_ee_vif1ints.store(g_orbis_ee_vif1ints.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 
 	g_vif1Cycles = 0;
 

@@ -27,7 +27,11 @@ CXX := $(PS5_PAYLOAD_SDK)/bin/prospero-clang++
 CC  := $(PS5_PAYLOAD_SDK)/bin/prospero-clang
 export PS5_PAYLOAD_SDK
 
-CXXFLAGS := -Wall -g -O3 -DNDEBUG -std=c++20 -march=znver2 -msse4.1 -mavx2 \
+# vk-285-91: -mno-vzeroupper. The GS thread's profiles had 5-7% of their samples right after a VZEROUPPER;
+# Zen 2 has no SSE/AVX transition penalty for it to avoid (the upper halves are renamed apart), and leaving
+# it out changes no results (the ABI doesn't keep the upper halves across calls). main-boot [vzubench]
+# measures the instruction.
+CXXFLAGS := -Wall -g -O3 -DNDEBUG -std=c++20 -march=znver2 -msse4.1 -mavx2 -mno-vzeroupper \
   -D_M_X86=1 -D__POSIX__=1 -DXBYAK_NO_EXCEPTION \
   -DOVERRIDE_HOST_PAGE_SIZE=0x4000 -DOVERRIDE_HOST_CACHE_LINE_SIZE=64 \
   -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
@@ -249,7 +253,7 @@ SRCS := $(SRCS) $(IMGUI_SRCS)
 SRCS := $(SRCS) $(PCSX2)/pcsx2/Achievements.cpp $(DEV9_SRCS)
 C_SRCS := $(RCHEEVOS_SRCS) $(DEMANGLE_SRCS)
 
-CFLAGS := -O3 -DNDEBUG -march=znver2 -msse4.1 -mavx2 -D_M_X86=1 \
+CFLAGS := -O3 -DNDEBUG -march=znver2 -msse4.1 -mavx2 -mno-vzeroupper -D_M_X86=1 \
   -DRC_NO_THREADS=1 -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ROM -DRC_HASH_NO_ZIP \
   -include string.h -include stdlib.h \
   -I$(PCSX2)/3rdparty/rcheevos/include -I$(PCSX2)/3rdparty/demangler/include

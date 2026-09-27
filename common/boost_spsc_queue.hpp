@@ -130,18 +130,21 @@ public:
         return true;
     }
 
+    // PS5 port (vk-285-90): front() and pop() take the read index from read_index_ itself (only the pop
+    // thread writes it) instead of storing it in pending_pop_read_index first. That field shares a cache line
+    // with whatever follows the queue (in Gif_Path, PATH2's size and offset, which the EE thread reads), and
+    // MTGS's front() for every VU1 packet made that line bounce. Same result with a single consumer.
     T& front()
     {
-        pending_pop_read_index = read_index_.load(std::memory_order_relaxed); // only written from pop thread
-
-        return buffer[pending_pop_read_index];
+        return buffer[read_index_.load(std::memory_order_relaxed)]; // only written from pop thread
     }
 
     void pop()
     {
-        buffer[pending_pop_read_index].~T();
+        const size_t read_index = read_index_.load(std::memory_order_relaxed); // only written from pop thread
+        buffer[read_index].~T();
 
-        size_t next = next_index(pending_pop_read_index);
+        size_t next = next_index(read_index);
         read_index_.store(next, std::memory_order_release);
     }
 

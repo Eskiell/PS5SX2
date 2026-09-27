@@ -712,8 +712,14 @@ Vulkan::DescriptorSetUpdateBuilder::DescriptorSetUpdateBuilder()
 
 void Vulkan::DescriptorSetUpdateBuilder::Clear()
 {
-	m_writes = {};
+	// PS5 port (vk-285-90): each write is zeroed as it's added (only the first m_num_writes are ever passed
+	// on) instead of all 16 (1 KB) here, which ran twice per draw in GSDeviceVK::ApplyTFXState: that memset
+	// was ~3% of the GS thread in vk-285-89's Shadow of the Colossus profile. The info counts restart too
+	// (the infos of a pushed or updated set are consumed by then).
 	m_num_writes = 0;
+	m_num_buffer_infos = 0;
+	m_num_image_infos = 0;
+	m_num_views = 0;
 }
 
 void Vulkan::DescriptorSetUpdateBuilder::Update(VkDevice device, bool clear /*= true*/)
@@ -748,6 +754,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddImageDescriptorWrite(VkDescriptorSet
 	ii.sampler = VK_NULL_HANDLE;
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -766,6 +773,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddSamplerDescriptorWrite(VkDescriptorS
 	ii.sampler = sampler;
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -780,6 +788,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddSamplerDescriptorWrites(
 	pxAssert(m_num_writes < MAX_WRITES && (m_num_image_infos + num_samplers) < MAX_IMAGE_INFOS);
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -807,6 +816,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddCombinedImageSamplerDescriptorWrite(
 	ii.sampler = sampler;
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -822,6 +832,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddCombinedImageSamplerDescriptorWrites
 	pxAssert(m_num_writes < MAX_WRITES && (m_num_image_infos + num_views) < MAX_IMAGE_INFOS);
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -849,6 +860,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddBufferDescriptorWrite(
 	bi.range = size;
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -866,6 +878,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddBufferViewDescriptorWrite(
 	bi = view;
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -880,6 +893,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddInputAttachmentDescriptorWrite(
 	pxAssert(m_num_writes < MAX_WRITES && m_num_image_infos < MAX_IMAGE_INFOS);
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;
@@ -899,6 +913,7 @@ void Vulkan::DescriptorSetUpdateBuilder::AddStorageImageDescriptorWrite(
 	pxAssert(m_num_writes < MAX_WRITES && m_num_image_infos < MAX_IMAGE_INFOS);
 
 	VkWriteDescriptorSet& dw = m_writes[m_num_writes++];
+	dw = {}; // vk-285-90 (see Clear)
 	dw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	dw.dstSet = set;
 	dw.dstBinding = binding;

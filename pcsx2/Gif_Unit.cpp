@@ -7,6 +7,7 @@
 #include "Vif_Dma.h"
 #include "MTVU.h"
 
+OrbisGifFakeCounts g_orbis_gif_fake; // vk-285-90 (Gif_Unit.h); before gifUnit, whose paths' Reset writes it
 Gif_Unit gifUnit;
 
 // Returns true on stalling SIGNAL
@@ -202,7 +203,7 @@ bool SaveStateBase::gifPathFreeze(u32 path)
 		}
 	}
 	u8* bufferPtr = gifPath.buffer; // Backup current buffer ptr
-	Freeze(gifPath.mtvu.fakePackets);
+	Freeze(g_orbis_gif_fake.count[path]); // vk-285-90: was gifPath.mtvu.fakePackets (same size and place)
 	FreezeMem(&gifPath, sizeof(gifPath) - sizeof(gifPath.mtvu));
 	FreezeMem(bufferPtr, gifPath.curSize);
 	gifPath.buffer = bufferPtr;

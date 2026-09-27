@@ -50,6 +50,29 @@ std::atomic<u32> g_orbis_vu1_b0_runs{0}, g_orbis_vu1_b0_odd{0};
 // Needs proper testing.
 std::atomic<int> g_orbis_mtvu_spin{1};
 std::atomic<int> g_orbis_mtvu_batch{0};
+// vk-285-90: the ring's length in KB (EmuCore/Speedhacks/OrbisMTVURingKB, live, taken at the next wrap):
+// 16384 (the whole 16 MB buffer, as before) by default. A shorter lap keeps the lines the EE thread writes
+// in the caches (a 16 MB lap comes back to lines long gone to memory). 256..16384. Needs proper testing.
+std::atomic<u32> g_orbis_mtvu_ring_kb{16384};
+extern std::atomic<u64> g_orbis_ee_evtests; // R5900.cpp
+extern std::atomic<u64> g_orbis_ee_vif1ints; // Vif1_Dma.cpp
+// Cumulative counts: event tests, VIF1 DMA interrupts, MTVU packets through the GIF fast path and through
+// Execute, VIF1 unpacks handed to the VU thread, and VU-thread kicks (locked adds on its semaphore).
+void OrbisEEStats(u64 out[6])
+{
+	out[0] = g_orbis_ee_evtests.load(std::memory_order_relaxed);
+	out[1] = g_orbis_ee_vif1ints.load(std::memory_order_relaxed);
+	out[2] = gifUnit.orbis_mtvu_fast;
+	out[3] = gifUnit.orbis_mtvu_slow;
+	out[4] = vu1Thread.OrbisUnpacks(); // on the EE thread's line of VU_Thread
+	out[5] = vu1Thread.OrbisKicks();
+}
+static s32 OrbisRingLimitWords(s32 buffer_words)
+{
+	u32 kb = g_orbis_mtvu_ring_kb.load(std::memory_order_relaxed);
+	kb = std::clamp<u32>(kb, 256u, 16384u);
+	return std::min<s32>(buffer_words, static_cast<s32>(kb * 256u)); // KB -> u32s
+}
 namespace
 {
 	struct OrbisMtvuHist
@@ -176,6 +199,8 @@ void VU_Thread::Reset()
 	m_cached_read_pos = 0; // vk-285-84
 	m_defer_kicks = false;
 	m_kick_pending = false;
+	m_orbis_batch = g_orbis_mtvu_batch.load(std::memory_order_relaxed) != 0; // vk-285-90
+	m_orbis_ring_limit = OrbisRingLimitWords(buffer_size);
 	std::memset(&vif, 0, sizeof(vif));
 	std::memset(&vifRegs, 0, sizeof(vifRegs));
 	for (size_t i = 0; i < 4; ++i)
@@ -445,7 +470,7 @@ void VU_Thread::ReserveSpace(s32 size)
 	pxAssert(size < buffer_size);
 	pxAssert(size > 0);
 
-	if (m_write_pos + size > (buffer_size - 1))
+	if (m_write_pos + size > (m_orbis_ring_limit - 1)) // vk-285-90: was buffer_size
 	{
 		WaitOnSize(1); // Size of MTVU_NULL_PACKET
 		Write(MTVU_NULL_PACKET);
@@ -454,6 +479,9 @@ void VU_Thread::ReserveSpace(s32 size)
 		CommitWritePos();
 		// vk-285-84: a fresh read position for the new lap (the cached one is only ever older).
 		m_cached_read_pos = GetReadPos();
+		// vk-285-90: the next lap's length. The VU thread may still be reading the last lap past a new,
+		// shorter limit: it wraps at the NULL packet above, and WaitOnSize sees it as ahead (room enough).
+		m_orbis_ring_limit = OrbisRingLimitWords(buffer_size);
 	}
 
 	WaitOnSize(size);
@@ -641,6 +669,7 @@ void VU_Thread::Get_MTVUChanges()
 void VU_Thread::KickStart()
 {
 	m_kick_pending = false; // vk-285-84
+	m_orbis_kicks++; // vk-285-90
 	semaEvent.NotifyOfWork();
 }
 
@@ -664,8 +693,13 @@ void VU_Thread::FlushKick()
 bool VU_Thread::BeginKickBatch()
 {
 	const bool was = m_defer_kicks;
-	m_defer_kicks = g_orbis_mtvu_batch.load(std::memory_order_relaxed) != 0;
+	m_defer_kicks = m_orbis_batch; // vk-285-90: refreshed per vsync (OrbisVsyncRefresh)
 	return was;
+}
+
+void VU_Thread::OrbisVsyncRefresh()
+{
+	m_orbis_batch = g_orbis_mtvu_batch.load(std::memory_order_relaxed) != 0;
 }
 
 void VU_Thread::EndKickBatch(bool was_deferring)
@@ -695,14 +729,25 @@ void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)
 	MTVU_LOG("MTVU - ExecuteVU!");
 	Get_MTVUChanges(); // Clear any pending interrupts
 	ReserveSpace(5);
-	Write(MTVU_VU_EXECUTE);
-	Write(vu_addr);
-	Write(vif_top);
-	Write(vif_itop);
-	Write(fbrst);
+	{
+		// vk-285-90: written through a local pointer; m_write_pos (which the stores might alias, as far as the
+		// compiler knows) was reloaded after every Write.
+		const s32 wp = m_write_pos;
+		u32* p = &buffer[wp];
+		p[0] = MTVU_VU_EXECUTE;
+		p[1] = vu_addr;
+		p[2] = vif_top;
+		p[3] = vif_itop;
+		p[4] = fbrst;
+		m_write_pos = wp + 5;
+	}
 	CommitWritePos();
-	gifUnit.TransferGSPacketData(GIF_TRANS_MTVU, NULL, 0);
+	// vk-285-90: the kick (a locked add on the semaphore state, which also waits for this thread's pending
+	// stores to reach the cache) before the MTGS packet, so the ring stores just written drain with it and
+	// the MTGS ring's stores drain in the background. The data packets before it (unpacks, memory and
+	// register writes) no longer kick on their own: this kick covers them.
 	KickAfterWrite(); // vk-285-84
+	gifUnit.TransferGSPacketData(GIF_TRANS_MTVU, NULL, 0);
 	// vk-285-84: the recent programs' cycles (four atomics the VU thread writes per program, so a
 	// cross-core miss) are only used by the EE cycle skip and by Instant VU1 off.
 	const u32 cycle_skip = EmuConfig.Speedhacks.EECycleSkip;
@@ -731,15 +776,33 @@ void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)
 void VU_Thread::VifUnpack(vifStruct& _vif, VIFregisters& _vifRegs, const u8* data, u32 size)
 {
 	MTVU_LOG("MTVU - VifUnpack!");
-	u32 vif_copy_size = (u32)((uptr)&_vif.StructEnd - (uptr)&_vif.tag);
-	ReserveSpace(1 + size_u32(vif_copy_size) + size_u32(sizeof(VIFregistersMTVU)) + 1 + size_u32(size));
-	Write(MTVU_VIF_UNPACK);
-	Write(&_vif.tag, vif_copy_size);
-	WriteRegs(&_vifRegs);
-	Write(size);
-	Write(data, size);
+	const u32 vif_copy_size = (u32)((uptr)&_vif.StructEnd - (uptr)&_vif.tag);
+	const s32 words = 1 + size_u32(vif_copy_size) + size_u32(sizeof(VIFregistersMTVU)) + 1 + size_u32(size);
+	ReserveSpace(words);
+	{
+		// vk-285-90: the same layout as Write/WriteRegs, through a local pointer.
+		const s32 wp = m_write_pos;
+		u32* p = &buffer[wp];
+		p[0] = MTVU_VIF_UNPACK;
+		p += 1;
+		std::memcpy(p, &_vif.tag, vif_copy_size);
+		p += size_u32(vif_copy_size);
+		VIFregistersMTVU* regs = reinterpret_cast<VIFregistersMTVU*>(p);
+		regs->cycle = _vifRegs.cycle;
+		regs->mode = _vifRegs.mode;
+		regs->num = _vifRegs.num;
+		regs->mask = _vifRegs.mask;
+		regs->top = _vifRegs.top;
+		regs->itop = _vifRegs.itop;
+		p += size_u32(sizeof(VIFregistersMTVU));
+		p[0] = size;
+		p += 1;
+		std::memcpy(p, data, size);
+		m_write_pos = wp + words;
+	}
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
+	m_orbis_unpacks++;
 }
 
 void VU_Thread::WriteMicroMem(u32 vu_micro_addr, const void* data, u32 size)
@@ -751,7 +814,7 @@ void VU_Thread::WriteMicroMem(u32 vu_micro_addr, const void* data, u32 size)
 	Write(size);
 	Write(data, size);
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }
 
 void VU_Thread::WriteDataMem(u32 vu_data_addr, const void* data, u32 size)
@@ -763,7 +826,7 @@ void VU_Thread::WriteDataMem(u32 vu_data_addr, const void* data, u32 size)
 	Write(size);
 	Write(data, size);
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }
 
 void VU_Thread::WriteVIRegs(REG_VI* viRegs)
@@ -773,7 +836,7 @@ void VU_Thread::WriteVIRegs(REG_VI* viRegs)
 	Write(MTVU_VU_WRITE_VIREGS);
 	Write(viRegs, size_u32(32));
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }
 
 void VU_Thread::WriteVFRegs(VECTOR* vfRegs)
@@ -783,7 +846,7 @@ void VU_Thread::WriteVFRegs(VECTOR* vfRegs)
 	Write(MTVU_VU_WRITE_VFREGS);
 	Write(vfRegs, size_u32(32*4));
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }
 
 void VU_Thread::WriteCol(vifStruct& _vif)
@@ -793,7 +856,7 @@ void VU_Thread::WriteCol(vifStruct& _vif)
 	Write(MTVU_VIF_WRITE_COL);
 	Write(&_vif.MaskCol, sizeof(_vif.MaskCol));
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }
 
 void VU_Thread::WriteRow(vifStruct& _vif)
@@ -803,5 +866,5 @@ void VU_Thread::WriteRow(vifStruct& _vif)
 	Write(MTVU_VIF_WRITE_ROW);
 	Write(&_vif.MaskRow, sizeof(_vif.MaskRow));
 	CommitWritePos();
-	KickAfterWrite(); // vk-285-84
+	OrbisDataKick(); // vk-285-90
 }

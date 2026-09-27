@@ -192,9 +192,22 @@ static __fi void incTag(u32& offset, u32& size, u32 incAmount)
 	offset += incAmount;
 }
 
+// PS5 port (vk-285-90): the MTVU fake-packet counts of the three paths (only PATH1's is ever non-zero), in
+// place of Gif_Path_MTVU::fakePackets, on a cache line of their own. The EE thread counts every VU1
+// program's packet up and down, and the old field shared its line with PATH1's gsPack and gifTag, which the
+// VU thread writes on every XGKICK: a cross-core miss per program in vk-285-89's Shadow of the Colossus EE
+// profile (~1.2 million programs a second). Only the EE thread (and the savestate code on it) touches them.
+// Gif_Path_MTVU keeps its (now unused) field, so Gif_Path's layout and the savestate format stay the same.
+struct alignas(64) OrbisGifFakeCounts
+{
+	u32 count[3];
+	u32 pad[13];
+};
+extern OrbisGifFakeCounts g_orbis_gif_fake;
+
 struct Gif_Path_MTVU
 {
-	u32 fakePackets; // Fake packets pending to be sent to MTGS
+	u32 fakePackets; // PS5 port (vk-285-90): unused, see g_orbis_gif_fake (kept for the layout)
 	GS_Packet fakePacket;
 	// Set a size based on MTGS but keep a factor 2 to avoid too waste to much
 	// memory overhead. Note the struct is instantied 3 times (for each gif
@@ -253,6 +266,8 @@ struct Gif_Path
 			return;
 		}
 		mtvu.Reset();
+		if (static_cast<u32>(idx) < 3) // vk-285-90 (idx is 0 when the constructor runs, before Init)
+			g_orbis_gif_fake.count[idx] = 0;
 		curSize = 0;
 		curOffset = 0;
 		readAmount = 0;
@@ -263,7 +278,7 @@ struct Gif_Path
 	bool isMTVU() const { return !idx && THREAD_VU1; }
 	s32 getReadAmount() { return readAmount.load(std::memory_order_acquire) + gsPack.readAmount; }
 	bool hasDataRemaining() const { return curOffset < curSize; }
-	bool isDone() const { return isMTVU() ? !mtvu.fakePackets : (!hasDataRemaining() && (state == GIF_PATH_IDLE || state == GIF_PATH_WAIT)); }
+	bool isDone() const { return isMTVU() ? !g_orbis_gif_fake.count[GIF_PATH_1] : (!hasDataRemaining() && (state == GIF_PATH_IDLE || state == GIF_PATH_WAIT)); }
 
 	// Waits on the MTGS to process gs packets
 	void mtgsReadWait()
@@ -337,9 +352,10 @@ struct Gif_Path
 	// MTVU: This function only should be called called on EE thread
 	GS_Packet ExecuteGSPacket(bool& done)
 	{
-		if (mtvu.fakePackets)
+		u32& fakePackets = g_orbis_gif_fake.count[idx]; // vk-285-90
+		if (fakePackets)
 		{ // For MTVU mode...
-			mtvu.fakePackets--;
+			fakePackets--;
 			done = true;
 			return mtvu.fakePacket;
 		}
@@ -614,13 +630,48 @@ struct Gif_Unit
 		}
 	}
 
+	// PS5 port (vk-285-90): a VU1 program's MTVU packet (VU_Thread::ExecuteVU, on the EE thread) when the GIF
+	// is idle, no other MTVU packet is pending and PATH2 and PATH3 have nothing to send (or PATH3 is masked):
+	// the steps Execute's arbitration takes in that case -- PATH1 takes the packet and hands it to the MTGS,
+	// the GIF goes idle again, VIF1 is rechecked if it waits on the GIF, and FINISH is raised if nothing is
+	// queued -- without its loop and without reading PATH1's fields, which the VU thread writes on every
+	// XGKICK (in MTVU mode PATH1's state never leaves IDLE, so the packet is always added). vk-285-89's
+	// Shadow of the Colossus EE profile: Execute and ExecuteGSPacket were ~7.5% of the EE thread at ~1.2
+	// million programs a second. Anything else takes Execute as before. Needs proper testing.
+	u64 orbis_mtvu_fast = 0, orbis_mtvu_slow = 0; // per-second counts for the [eestat] line (EE thread)
+	__fi bool OrbisMtvuFastPacket()
+	{
+		const tGIF_STAT s = stat; // one load; everything below reads this copy
+		if (s.APATH != 0 || s.PSE || s.DIR || gsSIGNAL.queued) // idle and CanDoGif()
+			return false;
+		if (g_orbis_gif_fake.count[GIF_PATH_1] != 0 || !gifPath[GIF_PATH_2].isDone())
+			return false;
+		const bool p3_done = gifPath[GIF_PATH_3].isDone();
+		if (!p3_done && !((s.M3R || s.M3P) && (gifPath[GIF_PATH_3].state == GIF_PATH_IDLE ||
+								gifPath[GIF_PATH_3].state == GIF_PATH_WAIT))) // Path3Masked()
+			return false;
+
+		gifPath[GIF_PATH_3].dmaRewind = 0;
+		// Execute: OPH set, PATH1 chosen (P1Q cleared), its packet added, then APATH and OPH cleared. Nothing
+		// in between reads or writes GIF_STAT (the MTGS send may wait on the GS thread, which doesn't touch it).
+		Gif_AddGSPacketMTVU(gifPath[GIF_PATH_1].mtvu.fakePacket, GIF_PATH_1); // the packet itself isn't read
+		tGIF_STAT ns = s;
+		ns.P1Q = 0;
+		ns.OPH = 0;
+		stat._u32 = ns._u32; // one store (no byte stores followed by a wider load)
+		if (vif1Regs.stat.VGW && !(cpuRegs.interrupt & (1 << DMAC_VIF1)))
+			CPU_INT(DMAC_VIF1, 1);
+		if (p3_done && !s.P2Q && !s.P3Q) // !checkPaths(1, 1, 1, true), P1Q now clear
+			Gif_FinishIRQ();
+		orbis_mtvu_fast++;
+		return true;
+	}
+
 	// Specify the transfer type you are initiating
 	// The return value is the amount of data (in bytes) that was processed
 	// If transfer cannot take place at this moment the return value is 0
 	u32 TransferGSPacketData(GIF_TRANSFER_TYPE tranType, u8* pMem, u32 size, bool aligned = false)
 	{
-		{ static bool logged = false; if (!logged) { logged = true; printf("[dbg] gifunit: TransferGSPacketData type=%d size=%u\n", (int)tranType, size); fflush(stdout); } }
-
 		if (THREAD_VU1)
 		{
 			Gif_Path& path1 = gifPath[GIF_PATH_1];
@@ -632,7 +683,10 @@ struct Gif_Unit
 			}
 			if (tranType == GIF_TRANS_MTVU)
 			{ // This is on the EE thread
-				path1.mtvu.fakePackets++;
+				if (OrbisMtvuFastPacket()) // vk-285-90
+					return 0;
+				orbis_mtvu_slow++;
+				g_orbis_gif_fake.count[GIF_PATH_1]++; // vk-285-90: was path1.mtvu.fakePackets
 				if (CanDoGif())
 					Execute(false, true);
 				return 0;
@@ -737,7 +791,6 @@ struct Gif_Unit
 	// on EOPs or on Path 3 Images when IMT is set.
 	int Execute(bool isPath3, bool isResume)
 	{
-		{ static bool logged = false; if (!logged) { logged = true; printf("[dbg] gifunit: Execute\n"); fflush(stdout); } }
 		if (!CanDoGif())
 		{
 			DevCon.Error("Gif Unit - Signal or PSE Set or Dir = GS to EE");

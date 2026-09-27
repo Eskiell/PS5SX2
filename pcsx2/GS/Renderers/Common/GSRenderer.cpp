@@ -427,6 +427,21 @@ static void OrbisPrintLoad()
 		}
 	}
 	{
+		// vk-285-90: EE-thread event rates this second (MTVU.cpp OrbisEEStats): event tests, VIF1 DMA
+		// interrupts, VU1 programs' MTVU packets through the GIF fast path / through Execute, VIF1 unpacks
+		// handed to the VU thread, and kicks of the VU thread.
+		extern void OrbisEEStats(u64 out[6]);
+		static u64 s_prev[6] = {};
+		u64 cur[6];
+		OrbisEEStats(cur);
+		printf("[eestat] per s: evtests=%llu vif1int=%llu gif fast/slow=%llu/%llu unpacks=%llu kicks=%llu\n",
+			static_cast<unsigned long long>(cur[0] - s_prev[0]), static_cast<unsigned long long>(cur[1] - s_prev[1]),
+			static_cast<unsigned long long>(cur[2] - s_prev[2]), static_cast<unsigned long long>(cur[3] - s_prev[3]),
+			static_cast<unsigned long long>(cur[4] - s_prev[4]), static_cast<unsigned long long>(cur[5] - s_prev[5]));
+		for (int i = 0; i < 6; i++)
+			s_prev[i] = cur[i];
+	}
+	{
 		// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
 		// rec_nocount switch.
 		extern std::atomic<u32> g_orbis_rec_compiles, g_orbis_rec_discards, g_orbis_rec_page_resets,
