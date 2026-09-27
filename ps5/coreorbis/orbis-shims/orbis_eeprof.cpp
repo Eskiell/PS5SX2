@@ -269,10 +269,28 @@ static void FollowAffinity()
 	std::fflush(stdout);
 }
 
+// vk-285-89: and at the highest game priority (256; the PS5's range is 256-767, lower first), since
+// vk-285-88's sampler on the EE's CPU hardly ever got it: 475 samples in a minute, taken only when the EE
+// blocked. At that priority its wake-up preempts the profiled thread at once, every millisecond.
+extern "C" int scePthreadGetprio(pthread_t thread, int* prio);
+extern "C" int scePthreadSetprio(pthread_t thread, int prio);
+static void RaisePriority()
+{
+	int target = -1, before = -1;
+	scePthreadGetprio(s_ee, &target);
+	scePthreadGetprio(pthread_self(), &before);
+	const int rc = scePthreadSetprio(pthread_self(), 256);
+	int after = -1;
+	scePthreadGetprio(pthread_self(), &after);
+	std::printf("[eeprof] sampler priority %d -> %d (rc=%d), profiled thread's %d\n", before, after, rc, target);
+	std::fflush(stdout);
+}
+
 void* SamplerThread(void*)
 {
 	const timespec period = {0, kPeriodUs * 1000};
 	unsigned tick = 0;
+	RaisePriority();
 	for (;;)
 	{
 		if ((tick++ & 255u) == 0)
