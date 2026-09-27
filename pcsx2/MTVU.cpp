@@ -207,16 +207,19 @@ void VU_Thread::ExecuteRingBuffer()
 					{
 						const u32* mem = reinterpret_cast<const u32*>(VU1.Mem);
 						const u32 top = vifRegs.top & 0x3ff;
-						const u32 nloop = ((top == 0x1a6) ? mem[0] : mem[top * 4]) & 0x7fff;
+						// vk-285-81: the program reads its count with ILWR.x vi03, 0(vi00): qword 0, whatever TOP is
+						// (vk-285-80 misread it as TOP). A count of 0 makes the loop go round 32768 times (~1M cycles),
+						// its stores sweeping all of VU1 memory.
+						const u32 nloop = mem[0] & 0x7fff;
 						g_orbis_vu1_b0_runs.store(g_orbis_vu1_b0_runs.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-						if (nloop & 1)
+						if ((nloop & 1) || nloop == 0)
 						{
 							g_orbis_vu1_b0_odd.store(g_orbis_vu1_b0_odd.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 							static u32 s_logged = 0;
 							if (s_logged < 10)
 							{
 								s_logged++;
-								printf("[vuodd] #%u MSCAL 00b0 top %03x itop %03x nloop %u | q[0] %08x %08x %08x %08x | q[top] %08x %08x %08x %08x | "
+								printf("[vuodd] #%u MSCAL 00b0 top %03x itop %03x nloop %u (odd or 0) | q[0] %08x %08x %08x %08x | q[top] %08x %08x %08x %08x | "
 									   "q[1a6] %08x %08x %08x %08x | last ring commands (oldest first):",
 									s_logged, top, vifRegs.itop & 0x3ff, nloop, mem[0], mem[1], mem[2], mem[3], mem[top * 4], mem[top * 4 + 1],
 									mem[top * 4 + 2], mem[top * 4 + 3], mem[0x1a6 * 4], mem[0x1a6 * 4 + 1], mem[0x1a6 * 4 + 2], mem[0x1a6 * 4 + 3]);
