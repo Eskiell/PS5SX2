@@ -29,6 +29,17 @@ class VU_Thread final {
 	// write of m_read_pos or the semaphore state pulled the line across cores: the first load in
 	// ReserveSpace stood out in the EE profile (vk-285-9). Needs proper testing.
 	alignas(__cachelinesize) int  m_write_pos; // temporary write pos (local to the EE thread)
+	// PS5 port (vk-285-84), EE-thread state on m_write_pos's line:
+	// - m_cached_read_pos: the last m_ato_read_pos this thread loaded. The VU thread only moves the
+	//   read position forward (ring positions never go back except in Reset), so an old value can only
+	//   under-state the free room: WaitOnSize checks it first and loads the shared line (a cross-core
+	//   miss per packet in vk-285-83's SotC profile) only when it says there's no room.
+	// - m_defer_kicks / m_kick_pending: inside a VIF1 transfer (Vif_Transfer.cpp) the packets' kicks
+	//   wait for its end (FlushKick), so the VU thread gets one wake-up per transfer instead of one
+	//   locked add per packet. Every EE wait on the VU or GS thread flushes first.
+	int  m_cached_read_pos;
+	bool m_defer_kicks;
+	bool m_kick_pending;
 	alignas(__cachelinesize) Threading::WorkSema semaEvent;
 	std::atomic_bool m_shutdown_flag{false};
 
@@ -72,6 +83,13 @@ public:
 
 	// Get MTVU to start processing its packets if it isn't already
 	void KickStart();
+
+	// PS5 port (vk-285-84): a producer's kick after it wrote a packet (deferred inside a VIF1
+	// transfer), the flush of a deferred one, and the VIF1 transfer's scope. EE thread only.
+	void KickAfterWrite();
+	void FlushKick();
+	bool BeginKickBatch();
+	void EndKickBatch(bool was_deferring);
 
 	// Used for assertions...
 	bool IsDone();

@@ -569,6 +569,22 @@ static bool orbis_vu1_speed_from(const SettingsInterface& si)
       printf("[boot] VIF1 queued program before the next unpack: %s (EmuCore/Gamefixes/OrbisVIF1ExecEarly)\n", early ? "on" : "off");
   }
 
+  // vk-285-84: EmuCore/Speedhacks/OrbisMTVUSpin (default on: the VU thread spins ~50 us for work before
+  // it sleeps) and OrbisMTVUBatch (default off: a VIF1 transfer wakes the VU thread once, at its end).
+  // pcsx2/MTVU.cpp; both take effect at once.
+  {
+    extern std::atomic<int> g_orbis_mtvu_spin;
+    extern std::atomic<int> g_orbis_mtvu_batch;
+    bool spin = true, batch = false;
+    si.GetBoolValue("EmuCore/Speedhacks", "OrbisMTVUSpin", &spin);
+    si.GetBoolValue("EmuCore/Speedhacks", "OrbisMTVUBatch", &batch);
+    const int old_spin = g_orbis_mtvu_spin.exchange(spin ? 1 : 0, std::memory_order_relaxed);
+    const int old_batch = g_orbis_mtvu_batch.exchange(batch ? 1 : 0, std::memory_order_relaxed);
+    if (old_spin != (spin ? 1 : 0) || old_batch != (batch ? 1 : 0))
+      printf("[boot] MTVU: VU thread spin %s, kick batching %s (EmuCore/Speedhacks/OrbisMTVUSpin, OrbisMTVUBatch)\n",
+        spin ? "on" : "off", batch ? "on" : "off");
+  }
+
   bool fast = false;
   si.GetBoolValue("EmuCore/CPU/Recompiler", "OrbisVUFastMinMax", &fast);
   const int prev = g_orbis_vu_fast_minmax.exchange(fast ? 1 : 0, std::memory_order_relaxed);
@@ -651,10 +667,15 @@ void orbis_reload_gs_ini_cpu()
   // re-reads them on its own when one of the patch switches changes.
   VMManager::ReloadPatches(true, true, false, true);
   g_orbis_live_reapply.store(1, std::memory_order_release);
-  printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d vu1Instant=%d vu1Speed=%u\n",
-    (int)EmuConfig.Speedhacks.EECycleRate, (double)EmuConfig.GS.FrameratePAL, (int)EmuConfig.GS.SWExtraThreads,
-    (int)EmuConfig.GS.TVShader, (int)EmuConfig.Speedhacks.vuThread, (int)EmuConfig.Speedhacks.vu1Instant,
-    g_orbis_vu1_speed.load(std::memory_order_relaxed));
+  {
+    extern std::atomic<int> g_orbis_mtvu_spin;
+    extern std::atomic<int> g_orbis_mtvu_batch;
+    printf("[gsini] applied: EECycleRate=%d FrameratePAL=%.2f extrathreads=%d TVShader=%d vuThread=%d vu1Instant=%d vu1Speed=%u mtvuSpin=%d mtvuBatch=%d\n",
+      (int)EmuConfig.Speedhacks.EECycleRate, (double)EmuConfig.GS.FrameratePAL, (int)EmuConfig.GS.SWExtraThreads,
+      (int)EmuConfig.GS.TVShader, (int)EmuConfig.Speedhacks.vuThread, (int)EmuConfig.Speedhacks.vu1Instant,
+      g_orbis_vu1_speed.load(std::memory_order_relaxed), g_orbis_mtvu_spin.load(std::memory_order_relaxed),
+      g_orbis_mtvu_batch.load(std::memory_order_relaxed)); // vk-285-84
+  }
   fflush(stdout);
   orbis_eventf(kept ? "live apply: applied in the running game; MTVU and the other relaunch-only options wait for the next launch" :
                       "live apply: applied in the running game");

@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
+#include "MTVU.h" // vk-285-84: VU_Thread kick batching
 
 //------------------------------------------------------------------
 // VifCode Transfer Interpreter (Vif0/Vif1)
@@ -57,6 +58,20 @@ _vifT void vifTransferLoop(u32* &data) {
 
 _vifT static __fi bool vifTransfer(u32 *data, int size, bool TTE) {
 	vifStruct& vifX = GetVifX;
+
+	// PS5 port (vk-285-84): with EmuCore/Speedhacks/OrbisMTVUBatch on, the MTVU packets this transfer
+	// writes (unpacks, MSCAL/MSCNT, STROW...) wake the VU thread once, at the end, instead of each doing
+	// a locked add on the semaphore state (MTVU.h, m_defer_kicks). Needs proper testing.
+	struct OrbisKickBatch
+	{
+		bool active = false, was = false;
+		~OrbisKickBatch() { if (active) vu1Thread.EndKickBatch(was); }
+	} orbis_batch;
+	if (idx && THREAD_VU1)
+	{
+		orbis_batch.was = vu1Thread.BeginKickBatch();
+		orbis_batch.active = true;
+	}
 
 	// irqoffset necessary to add up the right qws, or else will spin (spiderman)
 	int transferred = vifX.irqoffset.enabled ? vifX.irqoffset.value : 0;

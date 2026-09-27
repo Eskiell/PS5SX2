@@ -40,6 +40,16 @@ std::atomic<u32> g_orbis_vu1_run_max{0}, g_orbis_vu1_long_pc{0}, g_orbis_vu1_lon
 // (GSRenderer.cpp prints them on the [vuruns] line) and the first 10 odd starts of a launch, each with the
 // history. Needs proper testing.
 std::atomic<u32> g_orbis_vu1_b0_runs{0}, g_orbis_vu1_b0_odd{0};
+
+// vk-285-84: the EE thread's share of handing work to the VU thread (vk-285-83's SotC profile: about half
+// of the EE thread at ~26,000 VU1 programs a frame). Set by main-boot.cpp from the settings keys
+// EmuCore/Speedhacks/OrbisMTVUSpin and OrbisMTVUBatch (gs.ini or a game's settings file, live).
+// - spin: the VU thread spins up to ~50 us for new work before it sleeps, so the EE's kick is rarely a
+//   semaphore post (a system call; ~7% of the EE thread in that profile). Default on.
+// - batch: inside a VIF1 transfer the kicks wait for its end (VU_Thread::BeginKickBatch). Default off.
+// Needs proper testing.
+std::atomic<int> g_orbis_mtvu_spin{1};
+std::atomic<int> g_orbis_mtvu_batch{0};
 namespace
 {
 	struct OrbisMtvuHist
@@ -163,6 +173,9 @@ void VU_Thread::Reset()
 	m_write_pos = 0;
 	m_ato_read_pos = 0;
 	m_read_pos = 0;
+	m_cached_read_pos = 0; // vk-285-84
+	m_defer_kicks = false;
+	m_kick_pending = false;
 	std::memset(&vif, 0, sizeof(vif));
 	std::memset(&vifRegs, 0, sizeof(vifRegs));
 	for (size_t i = 0; i < 4; ++i)
@@ -179,7 +192,10 @@ void VU_Thread::ExecuteRingBuffer()
 		{
 			const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
 			g_orbis_vu_waiting.store(1, std::memory_order_relaxed); // vk-285-29
-			semaEvent.WaitForWork();
+			if (g_orbis_mtvu_spin.load(std::memory_order_relaxed)) // vk-285-84
+				semaEvent.WaitForWorkWithSpin();
+			else
+				semaEvent.WaitForWork();
 			g_orbis_vu_waiting.store(0, std::memory_order_relaxed);
 			g_orbis_vu_idle_ticks += __builtin_ia32_rdtsc() - t0;
 			OrbisCpuSample(2); // eerec-285
@@ -382,8 +398,16 @@ __ri void VU_Thread::WaitOnSize(s32 size)
 	// PS5 port (vk-285-9): every ReserveSpace comes through here, so test for room first; the [load]
 	// timer (two rdtsc) and the profiler's wait scope (two locked ops) cost ~2% of the EE thread at a
 	// fight's peak when they ran for every packet (vk-285-8 profile). Same conditions as the loop.
+	// vk-285-84: first against the last read position this thread loaded (see m_cached_read_pos in
+	// MTVU.h: an old value only under-states the room), then the shared one.
+	{
+		const s32 readPos = m_cached_read_pos;
+		if (readPos <= m_write_pos || readPos > m_write_pos + size + _4kb)
+			return;
+	}
 	{
 		const s32 readPos = GetReadPos();
+		m_cached_read_pos = readPos;
 		if (readPos <= m_write_pos || readPos > m_write_pos + size + _4kb)
 			return;
 	}
@@ -392,6 +416,7 @@ __ri void VU_Thread::WaitOnSize(s32 size)
 	for (;;)
 	{
 		s32 readPos = GetReadPos();
+		m_cached_read_pos = readPos; // vk-285-84
 		if (readPos <= m_write_pos)
 			break; // MTVU is reading in back of write_pos
 		// FIXME greg: there is a bug somewhere in the queue pointer
@@ -427,6 +452,8 @@ void VU_Thread::ReserveSpace(s32 size)
 		// Reset local write pointer/position
 		m_write_pos = 0;
 		CommitWritePos();
+		// vk-285-84: a fresh read position for the new lap (the cached one is only ever older).
+		m_cached_read_pos = GetReadPos();
 	}
 
 	WaitOnSize(size);
@@ -532,6 +559,11 @@ void VU_Thread::Get_MTVUChanges()
 	u32 interrupts = mtvuInterrupts.load(std::memory_order_relaxed);
 	if (!interrupts)
 		return;
+	// vk-285-84: the E-bit flag now stays set between programs (mVUEBit sets it only when it's clear,
+	// and it's cleared below only when there's a VU1 status bit for it to clear), so the line stays
+	// shared instead of bouncing between the threads twice per program. The common case ends here.
+	if (interrupts == InterruptFlagVUEBit && !(VU0.VI[REG_VPU_STAT].UL & 0xFF00))
+		return;
 
 	if (interrupts & InterruptFlagSignal)
 	{
@@ -584,15 +616,21 @@ void VU_Thread::Get_MTVUChanges()
 	}
 	if (interrupts & InterruptFlagVUEBit)
 	{
-		mtvuInterrupts.fetch_and(~InterruptFlagVUEBit, std::memory_order_relaxed);
-
-		if(INSTANT_VU1)
+		// vk-285-84: only clears VU1 status bits with Instant VU1 on (as before); the flag is left set
+		// while there are none to clear (see above). With Instant VU1 under MTVU only the T-bit below
+		// sets them.
+		if (INSTANT_VU1 && (VU0.VI[REG_VPU_STAT].UL & 0xFF00))
+		{
+			mtvuInterrupts.fetch_and(~InterruptFlagVUEBit, std::memory_order_relaxed);
 			VU0.VI[REG_VPU_STAT].UL &= ~0xFF00;
+		}
 		//DevCon.Warning("E-Bit registered %x", VU0.VI[REG_VPU_STAT].UL);
 	}
 	if (interrupts & InterruptFlagVUTBit)
 	{
-		mtvuInterrupts.fetch_and(~InterruptFlagVUTBit, std::memory_order_relaxed);
+		// vk-285-84: an E-bit flag already seen above goes with it, so a stale one can't clear the
+		// T-bit stop set here.
+		mtvuInterrupts.fetch_and(~(InterruptFlagVUTBit | (interrupts & InterruptFlagVUEBit)), std::memory_order_relaxed);
 		VU0.VI[REG_VPU_STAT].UL &= ~0xFF00;
 		VU0.VI[REG_VPU_STAT].UL |= 0x0400;
 		//DevCon.Warning("T-Bit registered %x", VU0.VI[REG_VPU_STAT].UL);
@@ -602,7 +640,39 @@ void VU_Thread::Get_MTVUChanges()
 
 void VU_Thread::KickStart()
 {
+	m_kick_pending = false; // vk-285-84
 	semaEvent.NotifyOfWork();
+}
+
+// vk-285-84: see m_defer_kicks in MTVU.h. The VIF1 transfer (Vif_Transfer.cpp) brackets its packets with
+// BeginKickBatch/EndKickBatch; WaitVU, WaitOnSize (KickStart), and MTGS's WaitGS, GenericStall and vsync
+// queue waits flush a deferred kick before they wait. Needs proper testing.
+__fi void VU_Thread::KickAfterWrite()
+{
+	if (m_defer_kicks)
+		m_kick_pending = true;
+	else
+		KickStart();
+}
+
+void VU_Thread::FlushKick()
+{
+	if (m_kick_pending)
+		KickStart();
+}
+
+bool VU_Thread::BeginKickBatch()
+{
+	const bool was = m_defer_kicks;
+	m_defer_kicks = g_orbis_mtvu_batch.load(std::memory_order_relaxed) != 0;
+	return was;
+}
+
+void VU_Thread::EndKickBatch(bool was_deferring)
+{
+	m_defer_kicks = was_deferring;
+	if (!was_deferring)
+		FlushKick();
 }
 
 bool VU_Thread::IsDone()
@@ -613,6 +683,7 @@ bool VU_Thread::IsDone()
 void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
+	FlushKick(); // vk-285-84: WaitForEmpty takes a spinning or sleeping thread as done
 	const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
 	OrbisEEWaitScope orbis_wait; // vk-285-8
 	semaEvent.WaitForEmpty();
@@ -631,14 +702,22 @@ void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)
 	Write(fbrst);
 	CommitWritePos();
 	gifUnit.TransferGSPacketData(GIF_TRANS_MTVU, NULL, 0);
-	KickStart();
-	u32 cycles = std::max(Get_vuCycles(), 4u);
-	u32 skip_cycles = std::min(cycles, 3000u);
-	cpuRegs.cycle += skip_cycles * EmuConfig.Speedhacks.EECycleSkip;
-	VU0.cycle += skip_cycles * EmuConfig.Speedhacks.EECycleSkip;
+	KickAfterWrite(); // vk-285-84
+	// vk-285-84: the recent programs' cycles (four atomics the VU thread writes per program, so a
+	// cross-core miss) are only used by the EE cycle skip and by Instant VU1 off.
+	const u32 cycle_skip = EmuConfig.Speedhacks.EECycleSkip;
+	const bool instant = INSTANT_VU1;
+	u32 cycles = 4;
+	if (cycle_skip || !instant)
+	{
+		cycles = std::max(Get_vuCycles(), 4u);
+		const u32 skip_cycles = std::min(cycles, 3000u);
+		cpuRegs.cycle += skip_cycles * cycle_skip;
+		VU0.cycle += skip_cycles * cycle_skip;
+	}
 	Get_MTVUChanges();
 
-	if (!INSTANT_VU1)
+	if (!instant)
 	{
 		// vk-285-75: OrbisVU1Speed scales the busy time (percent; 100 leaves it as counted).
 		const u32 speed = g_orbis_vu1_speed.load(std::memory_order_relaxed);
@@ -660,7 +739,7 @@ void VU_Thread::VifUnpack(vifStruct& _vif, VIFregisters& _vifRegs, const u8* dat
 	Write(size);
 	Write(data, size);
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteMicroMem(u32 vu_micro_addr, const void* data, u32 size)
@@ -672,7 +751,7 @@ void VU_Thread::WriteMicroMem(u32 vu_micro_addr, const void* data, u32 size)
 	Write(size);
 	Write(data, size);
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteDataMem(u32 vu_data_addr, const void* data, u32 size)
@@ -684,7 +763,7 @@ void VU_Thread::WriteDataMem(u32 vu_data_addr, const void* data, u32 size)
 	Write(size);
 	Write(data, size);
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteVIRegs(REG_VI* viRegs)
@@ -694,7 +773,7 @@ void VU_Thread::WriteVIRegs(REG_VI* viRegs)
 	Write(MTVU_VU_WRITE_VIREGS);
 	Write(viRegs, size_u32(32));
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteVFRegs(VECTOR* vfRegs)
@@ -704,7 +783,7 @@ void VU_Thread::WriteVFRegs(VECTOR* vfRegs)
 	Write(MTVU_VU_WRITE_VFREGS);
 	Write(vfRegs, size_u32(32*4));
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteCol(vifStruct& _vif)
@@ -714,7 +793,7 @@ void VU_Thread::WriteCol(vifStruct& _vif)
 	Write(MTVU_VIF_WRITE_COL);
 	Write(&_vif.MaskCol, sizeof(_vif.MaskCol));
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }
 
 void VU_Thread::WriteRow(vifStruct& _vif)
@@ -724,5 +803,5 @@ void VU_Thread::WriteRow(vifStruct& _vif)
 	Write(MTVU_VIF_WRITE_ROW);
 	Write(&_vif.MaskRow, sizeof(_vif.MaskRow));
 	CommitWritePos();
-	KickStart();
+	KickAfterWrite(); // vk-285-84
 }

@@ -286,6 +286,7 @@ void MTGS::PostVsyncStart(bool registers_written)
 	//Console.WriteLn( Color_Blue, "(EEcore Sleep) Vsync\t\tringpos=0x%06x, writepos=0x%06x", m_ReadPos.load(), m_WritePos.load() );
 
 	{
+		vu1Thread.FlushKick(); // vk-285-84: before the EE waits on the GS (which may wait on VU1)
 		const unsigned long long t0 = __builtin_ia32_rdtsc(); // eerec-281
 		OrbisEEWaitScope orbis_wait; // vk-285-8
 		s_sem_Vsync.Wait();
@@ -634,6 +635,11 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	if (!IsOpen()) [[unlikely]]
 		return;
 
+	// vk-285-84: a VU1 kick deferred inside a VIF1 transfer goes out before the EE waits on the GS,
+	// which may be waiting on that VU1 program's XGKICK. (From the MTVU thread, isMTVU, there's none.)
+	if (!isMTVU)
+		vu1Thread.FlushKick();
+
 	Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
 
 	// Both m_ReadPos and m_WritePos can be relaxed as we only want to test if the queue is empty but
@@ -740,7 +746,13 @@ void MTGS::GenericStall(uint size)
 	// But if not then we need to make sure the readpos is outside the scope of
 	// the block about to be written (writepos + size)
 
-	uint readpos = s_ReadPos.load(std::memory_order_acquire);
+	// PS5 port (vk-285-84): first against the last read position this thread loaded. The GS thread only
+	// moves s_ReadPos forward (ResetGS and the thread's exit jump it to s_WritePos, also forward), so an
+	// old value can only under-state the room; the shared line (written by the GS thread per packet, a
+	// cross-core miss per packet in vk-285-83's SotC profile, ~26,000 VU1 packets a frame) is loaded only
+	// when it says there's no room. Needs proper testing.
+	static uint s_orbis_cached_readpos = 0;
+	uint readpos = s_orbis_cached_readpos;
 	uint freeroom;
 
 	if (writepos < readpos)
@@ -750,6 +762,17 @@ void MTGS::GenericStall(uint size)
 
 	if (freeroom <= size)
 	{
+		readpos = s_ReadPos.load(std::memory_order_acquire);
+		s_orbis_cached_readpos = readpos;
+		if (writepos < readpos)
+			freeroom = readpos - writepos;
+		else
+			freeroom = RingBufferSize - (writepos - readpos);
+	}
+
+	if (freeroom <= size)
+	{
+		vu1Thread.FlushKick(); // vk-285-84: the GS may be waiting on a VU1 program's XGKICK
 		struct OrbisStallTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisStallTimer() { g_orbis_ee_stall_ticks += __builtin_ia32_rdtsc() - t0; ++g_orbis_ee_stall_n; } } orbis_stall_timer;
 		OrbisEEWaitScope orbis_wait; // vk-285-8
 		// writepos will overlap readpos if we commit the data, so we need to wait until
@@ -812,6 +835,7 @@ void MTGS::GenericStall(uint size)
 					break;
 			}
 		}
+		s_orbis_cached_readpos = readpos; // vk-285-84
 	}
 }
 

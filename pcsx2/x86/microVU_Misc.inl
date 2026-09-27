@@ -278,6 +278,11 @@ static void mVUTBit()
 
 static void mVUEBit()
 {
+	// PS5 port (vk-285-84): the EE leaves the flag set between programs now (Get_MTVUChanges clears it
+	// only when there are VU1 status bits to clear), so a locked or per program would pull the line
+	// across cores for nothing. Needs proper testing.
+	if (vu1Thread.mtvuInterrupts.load(std::memory_order_relaxed) & VU_Thread::InterruptFlagVUEBit)
+		return;
 	vu1Thread.mtvuInterrupts.fetch_or(VU_Thread::InterruptFlagVUEBit, std::memory_order_release);
 }
 
