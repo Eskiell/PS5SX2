@@ -623,6 +623,8 @@ public:
 	void OrbisGpStampPass(bool clear);
 	void OrbisGpCollect(u32 index);
 	void OrbisGpDescribe(const void* meta, char* out, size_t n) const;
+	// vk-285-95: DOWNSAMPLE_COPY with its factor and step compiled in (FilteredDownsampleTexture).
+	VkPipeline OrbisDownsamplePipeline(u32 factor, u32 step);
 #endif
 	void DrawMultiStretchRects(
 		const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvertSelector shader) override;

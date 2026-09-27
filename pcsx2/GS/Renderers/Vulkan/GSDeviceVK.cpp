@@ -1481,6 +1481,13 @@ void OrbisVkTraceTransfer(u8 kind, const GSTexture* tex, const GSVector4i& r)
 #endif
 
 #ifdef ORBIS_VULKAN
+// PS5 port (vk-285-95): DOWNSAMPLE_COPY pipelines with the factor and step compiled in, [factor][step]
+// (GSDeviceVK::OrbisDownsamplePipeline), and flags/ds_dynamic (read once a second by OrbisGpSecond), which
+// goes back to the original shader.
+static VkPipeline s_orbis_ds_pipe[9][3] = {};
+static bool s_orbis_ds_failed[9][3] = {};
+static bool s_orbis_ds_dynamic = false;
+
 // PS5 port (vk-285-94): the GPU profiler, with flags/gpuprof (live: OrbisGpSecond reads the flag once a
 // second; a command buffer started while it's there is profiled). A profiled command buffer gets a GPU
 // timestamp at its start, after each GS draw (RenderHW, all its passes), each utility draw (conversions,
@@ -1983,6 +1990,10 @@ void GSDeviceVK::OrbisGpDescribe(const void* meta, char* out, size_t n) const
 				snprintf(name, sizeof(name), "shadeboost");
 			if (p != VK_NULL_HANDLE && p == m_imgui_pipeline)
 				snprintf(name, sizeof(name), "imgui");
+			for (u32 f = 2; f < 9; f++) // vk-285-95
+				for (u32 st = 1; st < 3; st++)
+					if (p != VK_NULL_HANDLE && p == s_orbis_ds_pipe[f][st])
+						snprintf(name, sizeof(name), "downsample fixed %ux%u step %u", f, f, st);
 			snprintf(out, n, "util %s | dst %ux%u %s area %ux%u%s", name, m.rt_w, m.rt_h, OrbisGpFmt(m.rt_fmt), m.area_w,
 				m.area_h, m.prims > 1 ? " (multi)" : "");
 			break;
@@ -2010,6 +2021,12 @@ extern "C" uint32_t ps5vk_debug_timestamp_flush(uint32_t flush) __attribute__((w
 
 void GSDeviceVK::OrbisGpSecond()
 {
+	const bool ds_dynamic = OrbisFlag("ds_dynamic"); // vk-285-95
+	if (ds_dynamic != s_orbis_ds_dynamic)
+	{
+		printf("[vkhw] native-scaling downsample: %s (flags/ds_dynamic)\n", ds_dynamic ? "the original shader" : "the fixed-factor shaders");
+		s_orbis_ds_dynamic = ds_dynamic;
+	}
 	const bool want = OrbisFlag("gpuprof");
 	if (want != s_gp_want)
 	{
@@ -4517,9 +4534,18 @@ void GSDeviceVK::FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32
 	SetUtilityPushConstants(&uniforms, sizeof(uniforms));
 
 	const ShaderConvert shader = ShaderConvert::DOWNSAMPLE_COPY;
+	VkPipeline pipeline = GetConvertPipeline(shader);
+#ifdef ORBIS_VULKAN
+	// vk-285-95: the same sum with the factor and step known to the compiler (OrbisDownsamplePipeline).
+	if (!s_orbis_ds_dynamic)
+	{
+		if (const VkPipeline fixed = OrbisDownsamplePipeline(downsample_factor, uniforms.step_multiplier == 2.0f ? 2u : 1u))
+			pipeline = fixed;
+	}
+#endif
 	//const GSVector4 dRect = GSVector4(dTex->GetRect());
 	DoStretchRect(static_cast<GSTextureVK*>(sTex), GSVector4::zero(), static_cast<GSTextureVK*>(dTex), dRect,
-		GetConvertPipeline(shader), Nearest, true);
+		pipeline, Nearest, true);
 }
 
 void GSDeviceVK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
@@ -5447,6 +5473,107 @@ bool GSDeviceVK::CompileConvertPipelines()
 	return true;
 }
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-95): convert.glsl's ps_downsample_copy sums factor x factor texels in loops bounded by
+// a push constant. The compiler can't unroll them, so every texelFetch waits for the one before
+// (image_load, then s_waitcnt vmcnt(0), 36 times a pixel at 6x): vk-285-94's GPU profile had
+// Shadow of the Colossus's native-scaling downsamples at ~0.35 ms each for a 131x448 strip, 11-12 ms of a
+// 25 ms frame at 6x. The same code with the factor and step as constants unrolls, and the loads go out
+// in clauses. Same texels, same order of adds, same push constants. Made on first use; factors 2 to 8,
+// steps 1 and 2. Needs proper testing.
+VkPipeline GSDeviceVK::OrbisDownsamplePipeline(u32 factor, u32 step)
+{
+	if (factor < 2 || factor > 8 || step < 1 || step > 2)
+		return VK_NULL_HANDLE;
+	VkPipeline& slot = s_orbis_ds_pipe[factor][step];
+	if (slot != VK_NULL_HANDLE || s_orbis_ds_failed[factor][step])
+		return slot;
+	s_orbis_ds_failed[factor][step] = true; // until it's made
+
+	const std::optional<std::string> source = ReadShaderSource("shaders/vulkan/convert.glsl");
+	if (!source)
+		return VK_NULL_HANDLE;
+	VkShaderModule vs = GetUtilityVertexShader(*source);
+	if (vs == VK_NULL_HANDLE)
+		return VK_NULL_HANDLE;
+	ScopedGuard vs_guard([this, &vs]() { vkDestroyShaderModule(m_device, vs, nullptr); });
+
+	const ShaderConvertSelector shader(ShaderConvert::DOWNSAMPLE_COPY);
+	std::string text;
+	text += fmt::format("#define PRIMID_MAX {}\n", GSShader::PRIMID_MAX);
+	text += fmt::format("#define PRIMID_MIN {}\n", GSShader::PRIMID_MIN);
+	text += fmt::format("#define HAS_BILN {}\n", static_cast<int>(shader.Biln()));
+	text += fmt::format("#define HAS_STENCIL_OUTPUT {}\n", static_cast<int>(shader.StencilOutput()));
+	text += fmt::format("#define HAS_INTEGER_OUTPUT {}\n", static_cast<int>(shader.IntegerOutputBpp() != 0));
+	text += fmt::format("#define HAS_DEPTH_OUTPUT {}\n", static_cast<int>(shader.DepthOutput()));
+	text += fmt::format("#define HAS_FLOAT32_INPUT {}\n", static_cast<int>(shader.Float32Input()));
+	text += fmt::format("#define HAS_FLOAT32_OUTPUT {}\n", static_cast<int>(shader.Float32Output()));
+	text += fmt::format("#define ORBIS_DS_FACTOR {}\n#define ORBIS_DS_STEP {}\n", factor, step);
+	text += *source;
+	text += R"(
+#ifdef FRAGMENT_SHADER
+layout(push_constant) uniform cb10
+{
+	ivec2 ClampMin;
+	int DownsampleFactor;
+	int pad0;
+	float Weight;
+	float step_multiplier;
+	vec2 pad1;
+};
+void orbis_downsample_fixed()
+{
+	ivec2 coord = max(ivec2(gl_FragCoord.xy) * ORBIS_DS_FACTOR, ClampMin);
+	vec4 result = vec4(0);
+	for (int yoff = 0; yoff < ORBIS_DS_FACTOR; yoff++)
+	{
+		for (int xoff = 0; xoff < ORBIS_DS_FACTOR; xoff++)
+		{
+			result += texelFetch(samp0, coord + ivec2(xoff * ORBIS_DS_STEP, yoff * ORBIS_DS_STEP), 0);
+		}
+	}
+	OUTPUT = result / Weight;
+}
+#endif
+)";
+	VkShaderModule ps = GetUtilityFragmentShader(text, "orbis_downsample_fixed");
+	if (ps == VK_NULL_HANDLE)
+		return VK_NULL_HANDLE;
+	ScopedGuard ps_guard([this, &ps]() { vkDestroyShaderModule(m_device, ps, nullptr); });
+
+	const VkRenderPass rp = GetRenderPass(LookupNativeFormat(shader.OutputFormat()),
+		LookupNativeFormat(GSTexture::Format::Invalid), VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	if (!rp)
+		return VK_NULL_HANDLE;
+
+	Vulkan::GraphicsPipelineBuilder gpb;
+	SetPipelineProvokingVertex(m_features, gpb);
+	AddUtilityVertexAttributes(gpb);
+	gpb.SetPipelineLayout(m_utility_pipeline_layout);
+	gpb.SetDynamicViewportAndScissorState();
+	gpb.AddDynamicState(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
+	gpb.AddDynamicState(VK_DYNAMIC_STATE_LINE_WIDTH);
+	gpb.SetNoCullRasterizationState();
+	gpb.SetNoBlendingState();
+	gpb.SetVertexShader(vs);
+	gpb.SetRenderPass(rp, 0);
+	gpb.SetDepthState(false, false, VK_COMPARE_OP_ALWAYS);
+	gpb.SetNoStencilState();
+	gpb.SetColorWriteMask(0, shader.Mask());
+	gpb.SetFragmentShader(ps);
+	slot = gpb.Create(m_device, g_vulkan_shader_cache->GetPipelineCache(true), false);
+	if (slot == VK_NULL_HANDLE)
+	{
+		printf("[vkhw] downsample pipeline %ux%u step %u: failed, the original shader stays\n", factor, factor, step);
+		return VK_NULL_HANDLE;
+	}
+	s_orbis_ds_failed[factor][step] = false;
+	Vulkan::SetObjectName(m_device, slot, "Downsample pipeline (factor %u, step %u)", factor, step);
+	printf("[vkhw] downsample pipeline %ux%u step %u made\n", factor, factor, step);
+	return slot;
+}
+#endif
+
 bool GSDeviceVK::CompilePresentPipelines()
 {
 	// we may not have a swap chain if running in headless mode.
@@ -6104,6 +6231,16 @@ void GSDeviceVK::DestroyResources()
 		vkDestroyQueryPool(m_device, m_timestamp_query_pool, nullptr);
 #ifdef ORBIS_VULKAN
 	OrbisGpDestroy(); // vk-285-94
+	for (u32 f = 0; f < 9; f++) // vk-285-95
+	{
+		for (u32 st = 0; st < 3; st++)
+		{
+			if (s_orbis_ds_pipe[f][st] != VK_NULL_HANDLE)
+				vkDestroyPipeline(m_device, s_orbis_ds_pipe[f][st], nullptr);
+			s_orbis_ds_pipe[f][st] = VK_NULL_HANDLE;
+			s_orbis_ds_failed[f][st] = false;
+		}
+	}
 #endif
 
 	if (m_pipeline_statistics_query_pool != VK_NULL_HANDLE)
