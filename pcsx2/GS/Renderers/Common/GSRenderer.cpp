@@ -429,16 +429,20 @@ static void OrbisPrintLoad()
 	{
 		// vk-285-90: EE-thread event rates this second (MTVU.cpp OrbisEEStats): event tests, VIF1 DMA
 		// interrupts, VU1 programs' MTVU packets through the GIF fast path / through Execute, VIF1 unpacks
-		// handed to the VU thread, and kicks of the VU thread.
-		extern void OrbisEEStats(u64 out[6]);
-		static u64 s_prev[6] = {};
-		u64 cur[6];
+		// handed to the VU thread, and kicks of the VU thread. vk-285-93: and the MTVU ring's wraps, and the
+		// wraps that had to wait for the VU thread to leave the lap's first packet (each one a ring
+		// overwritten before vk-285-93).
+		extern void OrbisEEStats(u64 out[8]);
+		static u64 s_prev[8] = {};
+		u64 cur[8];
 		OrbisEEStats(cur);
-		printf("[eestat] per s: evtests=%llu vif1int=%llu gif fast/slow=%llu/%llu unpacks=%llu kicks=%llu\n",
+		printf("[eestat] per s: evtests=%llu vif1int=%llu gif fast/slow=%llu/%llu unpacks=%llu kicks=%llu | mtvu wraps=%llu lapwaits=%llu (total %llu)\n",
 			static_cast<unsigned long long>(cur[0] - s_prev[0]), static_cast<unsigned long long>(cur[1] - s_prev[1]),
 			static_cast<unsigned long long>(cur[2] - s_prev[2]), static_cast<unsigned long long>(cur[3] - s_prev[3]),
-			static_cast<unsigned long long>(cur[4] - s_prev[4]), static_cast<unsigned long long>(cur[5] - s_prev[5]));
-		for (int i = 0; i < 6; i++)
+			static_cast<unsigned long long>(cur[4] - s_prev[4]), static_cast<unsigned long long>(cur[5] - s_prev[5]),
+			static_cast<unsigned long long>(cur[6] - s_prev[6]), static_cast<unsigned long long>(cur[7] - s_prev[7]),
+			static_cast<unsigned long long>(cur[7]));
+		for (int i = 0; i < 8; i++)
 			s_prev[i] = cur[i];
 	}
 	{

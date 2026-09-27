@@ -24,16 +24,19 @@ class VU_Thread final {
 	alignas(__cachelinesize) std::atomic<int> m_ato_read_pos; // Only modified by VU thread
 	alignas(__cachelinesize) std::atomic<int> m_ato_write_pos;    // Only modified by EE thread
 	alignas(__cachelinesize) int  m_read_pos; // temporary read pos (local to the VU thread)
+	u32  m_orbis_rlaps = 0; // vk-285-93: MTVU_NULL_PACKETs the VU thread followed (VU thread only)
 	// PS5 port (vk-285-10): each thread's position, and the semaphore both threads update on every
 	// packet, get their own cache line. Sharing one, every EE write of m_write_pos and every VU-thread
 	// write of m_read_pos or the semaphore state pulled the line across cores: the first load in
 	// ReserveSpace stood out in the EE profile (vk-285-9). Needs proper testing.
 	alignas(__cachelinesize) int  m_write_pos; // temporary write pos (local to the EE thread)
 	// PS5 port (vk-285-84), EE-thread state on m_write_pos's line:
-	// - m_cached_read_pos: the last m_ato_read_pos this thread loaded. The VU thread only moves the
-	//   read position forward (ring positions never go back except in Reset), so an old value can only
-	//   under-state the free room: WaitOnSize checks it first and loads the shared line (a cross-core
-	//   miss per packet in vk-285-83's SotC profile) only when it says there's no room.
+	// - m_cached_read_pos: the last m_ato_read_pos this thread loaded. Within one of this thread's laps
+	//   the read position only moves forward, except once back to 0 when the VU thread follows the NULL
+	//   packet into this lap (behind the write position: more room), and ReserveSpace reloads it at each
+	//   wrap (vk-285-93: corrected; an earlier note here said positions never go back), so an old value
+	//   can only under-state the free room: WaitOnSize checks it first and loads the shared line (a
+	//   cross-core miss per packet in vk-285-83's SotC profile) only when it says there's no room.
 	// - m_defer_kicks / m_kick_pending: inside a VIF1 transfer (Vif_Transfer.cpp) the packets' kicks
 	//   wait for its end (FlushKick), so the VU thread gets one wake-up per transfer instead of one
 	//   locked add per packet. Every EE wait on the VU or GS thread flushes first.
@@ -51,6 +54,10 @@ class VU_Thread final {
 	// - the [eestat] counts (OrbisEEStats): unpacks handed over, and kicks.
 	u64  m_orbis_unpacks = 0; // cumulative (not cleared by Reset)
 	u64  m_orbis_kicks = 0;
+	// - vk-285-93: wraps (MTVU_NULL_PACKETs written), and the wraps that waited for the VU thread to leave
+	//   the lap's first packet (OrbisWaitLapStart). Cumulative.
+	u64  m_orbis_wraps = 0;
+	u64  m_orbis_lap_waits = 0;
 	alignas(__cachelinesize) Threading::WorkSema semaEvent;
 	std::atomic_bool m_shutdown_flag{false};
 
@@ -111,6 +118,8 @@ public:
 	void OrbisVsyncRefresh();
 	u64 OrbisUnpacks() const { return m_orbis_unpacks; }
 	u64 OrbisKicks() const { return m_orbis_kicks; }
+	u64 OrbisWraps() const { return m_orbis_wraps; }
+	u64 OrbisLapWaits() const { return m_orbis_lap_waits; }
 
 	// Used for assertions...
 	bool IsDone();
@@ -143,6 +152,8 @@ private:
 
 	void WaitOnSize(s32 size);
 	void ReserveSpace(s32 size);
+	void OrbisWaitLapStart(s32 null_pos); // vk-285-93
+	[[noreturn]] void OrbisBadCommand(u32 tag); // vk-285-93
 
 	s32 GetReadPos();
 	s32 GetWritePos();

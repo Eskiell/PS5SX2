@@ -57,8 +57,9 @@ std::atomic<u32> g_orbis_mtvu_ring_kb{16384};
 extern std::atomic<u64> g_orbis_ee_evtests; // R5900.cpp
 extern std::atomic<u64> g_orbis_ee_vif1ints; // Vif1_Dma.cpp
 // Cumulative counts: event tests, VIF1 DMA interrupts, MTVU packets through the GIF fast path and through
-// Execute, VIF1 unpacks handed to the VU thread, and VU-thread kicks (locked adds on its semaphore).
-void OrbisEEStats(u64 out[6])
+// Execute, VIF1 unpacks handed to the VU thread, VU-thread kicks (locked adds on its semaphore), and
+// (vk-285-93) ring wraps and the wraps that waited for the VU thread to leave the lap's first packet.
+void OrbisEEStats(u64 out[8])
 {
 	out[0] = g_orbis_ee_evtests.load(std::memory_order_relaxed);
 	out[1] = g_orbis_ee_vif1ints.load(std::memory_order_relaxed);
@@ -66,6 +67,8 @@ void OrbisEEStats(u64 out[6])
 	out[3] = gifUnit.orbis_mtvu_slow;
 	out[4] = vu1Thread.OrbisUnpacks(); // on the EE thread's line of VU_Thread
 	out[5] = vu1Thread.OrbisKicks();
+	out[6] = vu1Thread.OrbisWraps();
+	out[7] = vu1Thread.OrbisLapWaits();
 }
 static s32 OrbisRingLimitWords(s32 buffer_words)
 {
@@ -86,6 +89,24 @@ namespace
 	{
 		s_orbis_hist[s_orbis_hist_pos % 24] = {type, a, b, c, d};
 		s_orbis_hist_pos++;
+	}
+	// The history, oldest first, on the current line (the caller ends it).
+	void OrbisPrintHist()
+	{
+		for (u32 i = 0; i < 24; i++)
+		{
+			const OrbisMtvuHist& h = s_orbis_hist[(s_orbis_hist_pos + i) % 24];
+			switch (h.type)
+			{
+				case 1: printf(" [EXEC pc %04x top %03x at %u]", h.a, h.b, h.c); break;
+				case 2: printf(" [UNPACK to %03x cmd %02x num %u size %u]", h.a, h.b, h.c, h.d); break;
+				case 3: printf(" [DATA to %03x %u B]", h.a, h.b); break;
+				case 4: printf(" [MICRO to %04x %u B]", h.a, h.b); break;
+				case 5: printf(" [REGS]"); break;
+				case 6: printf(" [WRAP at %u, lap %u]", h.a, h.b); break;
+				default: break;
+			}
+		}
 	}
 } // namespace
 
@@ -264,25 +285,13 @@ void VU_Thread::ExecuteRingBuffer()
 									   "q[1a6] %08x %08x %08x %08x | last ring commands (oldest first):",
 									s_logged, top, vifRegs.itop & 0x3ff, nloop, mem[0], mem[1], mem[2], mem[3], mem[top * 4], mem[top * 4 + 1],
 									mem[top * 4 + 2], mem[top * 4 + 3], mem[0x1a6 * 4], mem[0x1a6 * 4 + 1], mem[0x1a6 * 4 + 2], mem[0x1a6 * 4 + 3]);
-								for (u32 i = 0; i < 24; i++)
-								{
-									const OrbisMtvuHist& h = s_orbis_hist[(s_orbis_hist_pos + i) % 24];
-									switch (h.type)
-									{
-										case 1: printf(" [EXEC pc %04x top %03x]", h.a, h.b); break;
-										case 2: printf(" [UNPACK to %03x cmd %02x num %u size %u]", h.a, h.b, h.c, h.d); break;
-										case 3: printf(" [DATA to %03x %u B]", h.a, h.b); break;
-										case 4: printf(" [MICRO to %04x %u B]", h.a, h.b); break;
-										case 5: printf(" [REGS]"); break;
-										default: break;
-									}
-								}
+								OrbisPrintHist();
 								printf("\n");
 								fflush(stdout);
 							}
 						}
 					}
-					OrbisHist(1, addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, vifRegs.top & 0x3ff, 0, 0);
+					OrbisHist(1, addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, vifRegs.top & 0x3ff, static_cast<u32>(m_read_pos - 5), 0);
 					// vk-285-82: the state each run starts from, for the long-run log after it.
 					const u32 orbis_start_tpc = (VU1.VI[REG_TPC].UL & 0x7ff) * 8;
 					const u16 orbis_start_vi3 = VU1.VI[3].US[0], orbis_start_vi4 = VU1.VI[4].US[0];
@@ -404,9 +413,14 @@ void VU_Thread::ExecuteRingBuffer()
 					break;
 				}
 				case MTVU_NULL_PACKET:
+					m_orbis_rlaps++; // vk-285-93
+					OrbisHist(6, static_cast<u32>(m_read_pos - 1), m_orbis_rlaps, 0, 0);
 					m_read_pos = 0;
 					break;
-					jNO_DEFAULT;
+				default:
+					// vk-285-93: was jNO_DEFAULT (a bad command jumped through the switch's table into the
+					// weeds; vk-285-92's crashes at 6x). Now a report, then a stop.
+					OrbisBadCommand(tag);
 			}
 
 			CommitReadPos();
@@ -462,6 +476,61 @@ __ri void VU_Thread::WaitOnSize(s32 size)
 	}
 }
 
+// PS5 port (vk-285-93): the wrap's missing wait. Ring positions don't say which lap they're in, and the
+// checks above take a read position at or behind the write position as "the VU thread is behind, in this
+// lap". That's wrong for one value: a read position of 0 when the write position goes back to 0. The VU
+// thread then stands at the start of the lap just written (on its first packet, whose end it hasn't stored
+// yet), with the whole lap unread, and both sides see an empty ring: WaitOnSize finds room at 0 and the new
+// lap's first packets go over the old lap's; the VU thread, done with its packet, reads on at the new lap's
+// data. It happens when the ring runs full (the EE a lap ahead, waiting in WaitOnSize), which is SotC's
+// heavy view at 6x (vuring 100..300 ms a second): when the VU thread wraps, the EE is only the 4K-word
+// safety margin from its own wrap, and a VU1 program at the lap's start (it may wait for the GS thread in its
+// XGKICK) can outlast the EE's writing of those 16 KB. Both of vk-285-92's crashes read their bad command at position 5,
+// right after a 5-word MTVU_VU_EXECUTE at 0. (Upstream's "FIXME greg" above is likely this bug; its 4 KB
+// net only narrows the window.)
+// So before the write position goes back to 0, wait for the read position to be past this lap's first
+// packet and not past the NULL packet at null_pos (still in this lap: a lap cut shorter by OrbisMTVURingKB
+// can leave the VU thread in the one before, beyond null_pos). The VU thread can't be at 0 again until it
+// follows that NULL packet, which it can't see before the new write position is stored.
+void VU_Thread::OrbisWaitLapStart(s32 null_pos)
+{
+	s32 readPos = GetReadPos();
+	if (readPos != 0 && readPos <= null_pos) [[likely]]
+		return;
+	m_orbis_lap_waits++;
+	struct OrbisRingTimer { unsigned long long t0 = __builtin_ia32_rdtsc(); ~OrbisRingTimer() { g_orbis_ee_vuring_ticks += __builtin_ia32_rdtsc() - t0; } } orbis_ring_timer;
+	OrbisEEWaitScope orbis_wait;
+	do
+	{
+		KickStart();
+		std::this_thread::yield();
+		readPos = GetReadPos();
+	} while (readPos == 0 || readPos > null_pos);
+	m_cached_read_pos = readPos;
+}
+
+// PS5 port (vk-285-93): a ring command the VU thread doesn't know. A report on boot.log (the command, where,
+// both positions, the laps each side went round, the ring's words around it, and the last 24 commands run),
+// then a stop: carrying on would leave the GS thread waiting for XGKICKs of programs never run.
+void VU_Thread::OrbisBadCommand(u32 tag)
+{
+	const s32 pos = m_read_pos - 1;
+	printf("[mtvubad] unknown ring command %08x at %d | read pos %d (stored %d), write pos stored %d (EE's own %d), limit %d words | "
+		   "VU thread laps %u, EE wraps %llu, EE lap-start waits %llu\n",
+		tag, pos, m_read_pos, m_ato_read_pos.load(std::memory_order_relaxed), m_ato_write_pos.load(std::memory_order_relaxed),
+		m_write_pos, m_orbis_ring_limit, m_orbis_rlaps, static_cast<unsigned long long>(m_orbis_wraps),
+		static_cast<unsigned long long>(m_orbis_lap_waits));
+	const s32 from = std::max<s32>(0, pos - 24), to = std::min<s32>(buffer_size, pos + 40);
+	printf("[mtvubad] ring words %d..%d:", from, to - 1);
+	for (s32 i = from; i < to; i++)
+		printf(i == pos ? " <%08x>" : " %08x", buffer[i]);
+	printf("\n[mtvubad] last ring commands run (oldest first):");
+	OrbisPrintHist();
+	printf("\n");
+	fflush(stdout);
+	__builtin_trap();
+}
+
 // Makes sure theres enough room in the ring buffer
 // to write a continuous 'size * sizeof(u32)' bytes
 void VU_Thread::ReserveSpace(s32 size)
@@ -474,9 +543,12 @@ void VU_Thread::ReserveSpace(s32 size)
 	{
 		WaitOnSize(1); // Size of MTVU_NULL_PACKET
 		Write(MTVU_NULL_PACKET);
+		// vk-285-93: not before the VU thread has left this lap's first packet (see OrbisWaitLapStart).
+		OrbisWaitLapStart(m_write_pos - 1);
 		// Reset local write pointer/position
 		m_write_pos = 0;
 		CommitWritePos();
+		m_orbis_wraps++;
 		// vk-285-84: a fresh read position for the new lap (the cached one is only ever older).
 		m_cached_read_pos = GetReadPos();
 		// vk-285-90: the next lap's length. The VU thread may still be reading the last lap past a new,
