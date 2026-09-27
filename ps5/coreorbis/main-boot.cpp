@@ -559,6 +559,16 @@ static bool orbis_vu1_speed_from(const SettingsInterface& si)
     printf("[boot] VU1 speed %u%% (EmuCore/Speedhacks/OrbisVU1Speed; with Instant VU1 off)\n", speed);
   g_orbis_vu1_speed.store(speed, std::memory_order_relaxed);
 
+  // vk-285-79: EmuCore/Gamefixes/OrbisVIF1ExecEarly (bool, default off): a program queued by VIF1's MSCAL
+  // runs before the next unpack instead of after up to 3 (pcsx2/Vif_Unpack.cpp). Takes effect at once.
+  {
+    extern std::atomic<int> g_orbis_vif1_exec_early;
+    bool early = false;
+    si.GetBoolValue("EmuCore/Gamefixes", "OrbisVIF1ExecEarly", &early);
+    if (g_orbis_vif1_exec_early.exchange(early ? 1 : 0, std::memory_order_relaxed) != (early ? 1 : 0))
+      printf("[boot] VIF1 queued program before the next unpack: %s (EmuCore/Gamefixes/OrbisVIF1ExecEarly)\n", early ? "on" : "off");
+  }
+
   bool fast = false;
   si.GetBoolValue("EmuCore/CPU/Recompiler", "OrbisVUFastMinMax", &fast);
   const int prev = g_orbis_vu_fast_minmax.exchange(fast ? 1 : 0, std::memory_order_relaxed);

@@ -183,13 +183,22 @@ alignas(16) const UNPACKFUNCTYPE VIFfuncTable[2][4][4 * 4 * 2 * 2] =
 // Unpack Setup Code
 //----------------------------------------------------------------------------
 
+// PS5 port (vk-285-79): per-game "run the queued VU1 program before the next unpack"
+// (EmuCore/Gamefixes/OrbisVIF1ExecEarly, read by main-boot.cpp). PCSX2 starts a program queued by
+// VIF1's MSCAL only after up to 3 more unpacks (for games that expect VIF to fill memory behind a running
+// program). Shadow of the Colossus's lighting program reads its vertex count from qword 0 early on, and
+// the next batch's unpack rewrites qword 0 before the program starts: with an odd count the loop never
+// ends and runs the whole 3M-cycle budget, hundreds of times a second (vk-285-77/78). Needs proper
+// testing.
+std::atomic<int> g_orbis_vif1_exec_early{0};
+
 _vifT void vifUnpackSetup(const u32 *data) {
 
 	vifStruct& vifX = GetVifX;
 
 	GetVifX.unpackcalls++;
 
-	if (GetVifX.unpackcalls > 3)
+	if (GetVifX.unpackcalls > ((idx && g_orbis_vif1_exec_early.load(std::memory_order_relaxed)) ? 0 : 3))
 	{
 		vifExecQueue(idx);
 	}
