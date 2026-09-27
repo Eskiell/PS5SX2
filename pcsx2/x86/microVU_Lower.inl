@@ -1211,7 +1211,20 @@ mVUop(mVU_ILWR)
 		else
 		{
 			const xRegister32& regT = mVU.regAlloc->allocGPR(-1, _It_, mVUlow.backupVI);
-			xMOVZX(regT, ptr16[ptr]);
+			if ((sptr)ptr != (s32)(sptr)ptr)
+			{
+				// PS5 port (vk-285-83): VU memory lives above 4GB here, and ptr16[ptr] is emitted as a
+				// disp32 absolute address, truncated ("[sibwarn] TRUNCATED absolute memref" in boot.log).
+				// ILWR with vi00 as its base then read a word of the MTVU ring (vu1Thread) instead of VU
+				// memory. Shadow of the Colossus reads its lighting loop's count that way (ILWR.x vi03,
+				// (vi00)), so the loop went round 32768 times or never ended, its stores sweeping VU1
+				// memory. movabs the address like the other VU memory accesses in this file.
+				// Needs proper testing.
+				xMOV64(gprT2q, (sptr)ptr);
+				xMOVZX(regT, ptr16[gprT2q]);
+			}
+			else
+				xMOVZX(regT, ptr16[ptr]);
 			mVU.regAlloc->clearNeeded(regT);
 		}
 		mVU.profiler.EmitOp(opILWR);
