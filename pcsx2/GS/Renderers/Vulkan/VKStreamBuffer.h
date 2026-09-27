@@ -50,6 +50,7 @@ private:
 	u32 m_current_gpu_position = 0;
 
 	VmaAllocation m_allocation = VK_NULL_HANDLE;
+	bool m_orbis_coherent = false; // PS5 port (vk-285-85): see Create()
 	VkBuffer m_buffer = VK_NULL_HANDLE;
 	u8* m_host_pointer = nullptr;
 

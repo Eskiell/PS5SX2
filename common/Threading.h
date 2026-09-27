@@ -250,5 +250,15 @@ namespace Threading
 				;
 			return counter > 0;
 		}
+
+		/// PS5 port (vk-285-85): takes every post there is at once and returns how many (0 if none), for a
+		/// single consumer that counts them down itself (MTGS's VU1 XGKICK packets).
+		int32_t TryWaitAll()
+		{
+			int32_t counter = m_counter.load(std::memory_order_relaxed);
+			while (counter > 0 && !m_counter.compare_exchange_weak(counter, 0, std::memory_order_acquire, std::memory_order_relaxed))
+				;
+			return counter > 0 ? counter : 0;
+		}
 	};
 } // namespace Threading

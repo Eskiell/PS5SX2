@@ -337,8 +337,22 @@ void MTGS::MainLoop()
 
 	std::unique_lock mtvu_lock(s_mtx_RingBufferBusy2);
 
+	// PS5 port (vk-285-85): see Command::MTVUGSPacket. XGKICK posts claimed ahead, and PATH1 bytes read
+	// but not yet given back to readAmount (the VU thread's room check); given back before this thread
+	// waits on anything, so the VU thread never waits on bytes this thread already read.
+	s32 orbis_xgkick_credits = 0;
+	u32 orbis_path1_read = 0;
+	const auto orbis_flush_path1_read = [&orbis_path1_read]() {
+		if (orbis_path1_read)
+		{
+			gifUnit.gifPath[GIF_PATH_1].readAmount.fetch_sub(orbis_path1_read, std::memory_order_acq_rel);
+			orbis_path1_read = 0;
+		}
+	};
+
 	while (true)
 	{
+		orbis_flush_path1_read(); // vk-285-85: before an idle present or a wait for work
 		if (s_run_idle_flag.load(std::memory_order_acquire) && VMManager::GetState() != VMState::Running && GSHasDisplayWindow())
 		{
 			if (!s_sem_event.CheckForWork())
@@ -479,18 +493,45 @@ void MTGS::MainLoop()
 				case Command::MTVUGSPacket:
 				{
 					MTVU_LOG("MTGS - Waiting on semaXGkick!");
-					if (!vu1Thread.semaXGkick.TryWait())
+					// PS5 port (vk-285-85): the per-packet handoff from the VU thread (~26,000 packets a
+					// frame in Shadow of the Colossus; ~3.5% of the GS thread in vk-285-84's profile, in
+					// atomics on lines the VU thread writes per program). Only this thread takes XGKICK
+					// posts, so it claims every post there is at once and counts them down itself; a post
+					// means the VU thread pushed its packet first, so the queue needs no empty check then.
+					// PATH1's readAmount is given back in batches (orbis_flush_path1_read, before any
+					// wait). Before sleeping on a post it spins ~20 us with the lock released.
+					// Needs proper testing.
+					if (orbis_xgkick_credits > 0)
+						orbis_xgkick_credits--;
+					else
 					{
-						mtvu_lock.unlock();
-						// Wait for MTVU to complete vu1 program
-						vu1Thread.semaXGkick.Wait();
-						mtvu_lock.lock();
+						s32 got = vu1Thread.semaXGkick.TryWaitAll();
+						if (got == 0)
+						{
+							orbis_flush_path1_read();
+							mtvu_lock.unlock();
+							for (u32 waited = 0; waited < 20000 && got == 0;)
+							{
+								waited += ShortSpin();
+								got = vu1Thread.semaXGkick.TryWaitAll();
+							}
+							if (got == 0)
+							{
+								// Wait for MTVU to complete vu1 program
+								vu1Thread.semaXGkick.Wait();
+								got = 1;
+							}
+							mtvu_lock.lock();
+						}
+						orbis_xgkick_credits = got - 1;
 					}
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
-					GS_Packet gsPack = path.GetGSPacketMTVU(); // Get vu1 program's xgkick packet(s)
+					GS_Packet gsPack = path.mtvu.gsPackQueue.front(); // vu1 program's xgkick packet(s)
 					if (gsPack.size)
 						GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
-					path.readAmount.fetch_sub(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
+					orbis_path1_read += gsPack.size + gsPack.readAmount;
+					if (orbis_path1_read >= (64u << 10))
+						orbis_flush_path1_read();
 					path.PopGSPacketMTVU(); // Should be done last, for proper Gif_MTGS_Wait()
 					break;
 				}

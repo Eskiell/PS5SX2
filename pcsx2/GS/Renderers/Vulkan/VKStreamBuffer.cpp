@@ -17,6 +17,7 @@ VKStreamBuffer::VKStreamBuffer(VKStreamBuffer&& move)
 	, m_current_space(move.m_current_space)
 	, m_current_gpu_position(move.m_current_gpu_position)
 	, m_allocation(move.m_allocation)
+	, m_orbis_coherent(move.m_orbis_coherent)
 	, m_buffer(move.m_buffer)
 	, m_host_pointer(move.m_host_pointer)
 	, m_tracked_fences(std::move(move.m_tracked_fences))
@@ -47,6 +48,7 @@ VKStreamBuffer& VKStreamBuffer::operator=(VKStreamBuffer&& move)
 	std::swap(m_current_gpu_position, move.m_current_gpu_position);
 	std::swap(m_buffer, move.m_buffer);
 	std::swap(m_host_pointer, move.m_host_pointer);
+	std::swap(m_orbis_coherent, move.m_orbis_coherent); // vk-285-85
 	std::swap(m_tracked_fences, move.m_tracked_fences);
 
 	return *this;
@@ -84,6 +86,14 @@ bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
 	m_allocation = new_allocation;
 	m_buffer = new_buffer;
 	m_host_pointer = static_cast<u8*>(ai.pMappedData);
+	// PS5 port (vk-285-85): a host-coherent mapping needs no flush, and vmaFlushAllocation still cost
+	// ~2% of the GS thread per commit in vk-285-84's Shadow of the Colossus profile (the PS5 driver's
+	// one memory type is coherent). Needs proper testing.
+	{
+		VkMemoryPropertyFlags props = 0;
+		vmaGetMemoryTypeProperties(GSDeviceVK::GetInstance()->GetAllocator(), ai.memoryType, &props);
+		m_orbis_coherent = (props & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+	}
 	return true;
 }
 
@@ -181,7 +191,8 @@ void VKStreamBuffer::CommitMemory(u32 final_num_bytes)
 	pxAssert(final_num_bytes <= m_current_space);
 
 	// For non-coherent mappings, flush the memory range
-	vmaFlushAllocation(GSDeviceVK::GetInstance()->GetAllocator(), m_allocation, m_current_offset, final_num_bytes);
+	if (!m_orbis_coherent) // vk-285-85
+		vmaFlushAllocation(GSDeviceVK::GetInstance()->GetAllocator(), m_allocation, m_current_offset, final_num_bytes);
 
 	m_current_offset += final_num_bytes;
 	m_current_space -= final_num_bytes;

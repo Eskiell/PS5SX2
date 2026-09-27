@@ -461,6 +461,10 @@ private:
 	std::unordered_map<GSHWDrawConfig::PSSelector, VkShaderModule, GSHWDrawConfig::PSSelectorHash>
 		m_tfx_fragment_shaders;
 	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_pipelines;
+#ifdef ORBIS_VULKAN
+	PipelineSelector m_orbis_last_selector{}; // vk-285-85: GetTFXPipeline's last lookup
+	VkPipeline m_orbis_last_pipeline = VK_NULL_HANDLE;
+#endif
 
 	VkRenderPass m_utility_color_render_pass_load = VK_NULL_HANDLE;
 	VkRenderPass m_utility_color_render_pass_clear = VK_NULL_HANDLE;

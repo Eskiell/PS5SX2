@@ -5286,6 +5286,9 @@ void GSDeviceVK::DestroyResources()
 
 	for (auto& it : m_tfx_pipelines)
 		vkDestroyPipeline(m_device, it.second, nullptr);
+#ifdef ORBIS_VULKAN
+	m_orbis_last_pipeline = VK_NULL_HANDLE; // vk-285-85
+#endif
 	for (auto& it : m_tfx_fragment_shaders)
 		vkDestroyShaderModule(m_device, it.second, nullptr);
 	for (auto& it : m_tfx_vertex_shaders)
@@ -5659,12 +5662,28 @@ VkPipeline GSDeviceVK::CreateTFXPipeline(const PipelineSelector& p)
 
 VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 {
+#ifdef ORBIS_VULKAN
+	// PS5 port (vk-285-85): consecutive draws often repeat the selector; the hash and map lookup were
+	// ~1.3% of the GS thread in vk-285-84's Shadow of the Colossus profile. Needs proper testing.
+	if (m_orbis_last_pipeline != VK_NULL_HANDLE && p == m_orbis_last_selector)
+		return m_orbis_last_pipeline;
+#endif
 	const auto it = m_tfx_pipelines.find(p);
 	if (it != m_tfx_pipelines.end())
+	{
+#ifdef ORBIS_VULKAN
+		m_orbis_last_selector = p;
+		m_orbis_last_pipeline = it->second;
+#endif
 		return it->second;
+	}
 
 	VkPipeline pipeline = CreateTFXPipeline(p);
 	m_tfx_pipelines.emplace(p, pipeline);
+#ifdef ORBIS_VULKAN
+	m_orbis_last_selector = p;
+	m_orbis_last_pipeline = pipeline;
+#endif
 	return pipeline;
 }
 
