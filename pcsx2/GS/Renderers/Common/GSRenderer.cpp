@@ -328,6 +328,10 @@ static void OrbisPrintLoad()
 			if (h[6] || h[7])
 				printf(" last long: start %04x top %04x stopped at %04x", g_orbis_vu1_long_pc.load(std::memory_order_relaxed),
 					g_orbis_vu1_long_top.load(std::memory_order_relaxed), g_orbis_vu1_long_tpc.load(std::memory_order_relaxed));
+			// vk-285-80: MSCAL 0x00b0 runs (SotC's lighting program) and how many started with an odd count.
+			extern std::atomic<u32> g_orbis_vu1_b0_runs, g_orbis_vu1_b0_odd;
+			printf(" | b0 runs %u odd %u", g_orbis_vu1_b0_runs.exchange(0, std::memory_order_relaxed),
+				g_orbis_vu1_b0_odd.exchange(0, std::memory_order_relaxed));
 			printf("\n");
 		}
 	}

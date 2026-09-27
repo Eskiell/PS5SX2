@@ -34,6 +34,28 @@ std::atomic<u32> g_orbis_vu1_speed{100};
 std::atomic<u32> g_orbis_vu1_run_hist[8];
 std::atomic<u32> g_orbis_vu1_run_max{0}, g_orbis_vu1_long_pc{0}, g_orbis_vu1_long_top{0}, g_orbis_vu1_long_tpc{0};
 
+// vk-285-80: the last 24 ring commands the MTVU thread ran (what reached VU1 memory before a program),
+// and Shadow of the Colossus's lighting program (MSCAL 0xb0) checked at its start: it reads NLOOP at TOP
+// (after copying qword 0 to 0x1a6) and counts down by 2, so an odd value can never end. Counts per second
+// (GSRenderer.cpp prints them on the [vuruns] line) and the first 10 odd starts of a launch, each with the
+// history. Needs proper testing.
+std::atomic<u32> g_orbis_vu1_b0_runs{0}, g_orbis_vu1_b0_odd{0};
+namespace
+{
+	struct OrbisMtvuHist
+	{
+		u8 type;
+		u32 a, b, c, d;
+	};
+	OrbisMtvuHist s_orbis_hist[24];
+	u32 s_orbis_hist_pos = 0;
+	__fi void OrbisHist(u8 type, u32 a, u32 b, u32 c, u32 d)
+	{
+		s_orbis_hist[s_orbis_hist_pos % 24] = {type, a, b, c, d};
+		s_orbis_hist_pos++;
+	}
+} // namespace
+
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
 
@@ -180,6 +202,43 @@ void VU_Thread::ExecuteRingBuffer()
 					vuFBRST = Read();
 					if (addr != -1)
 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
+					// vk-285-80: the lighting program's count, checked before it runs.
+					if (addr != -1 && (addr & 0x7ff) == (0xb0 >> 3))
+					{
+						const u32* mem = reinterpret_cast<const u32*>(VU1.Mem);
+						const u32 top = vifRegs.top & 0x3ff;
+						const u32 nloop = ((top == 0x1a6) ? mem[0] : mem[top * 4]) & 0x7fff;
+						g_orbis_vu1_b0_runs.store(g_orbis_vu1_b0_runs.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+						if (nloop & 1)
+						{
+							g_orbis_vu1_b0_odd.store(g_orbis_vu1_b0_odd.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+							static u32 s_logged = 0;
+							if (s_logged < 10)
+							{
+								s_logged++;
+								printf("[vuodd] #%u MSCAL 00b0 top %03x itop %03x nloop %u | q[0] %08x %08x %08x %08x | q[top] %08x %08x %08x %08x | "
+									   "q[1a6] %08x %08x %08x %08x | last ring commands (oldest first):",
+									s_logged, top, vifRegs.itop & 0x3ff, nloop, mem[0], mem[1], mem[2], mem[3], mem[top * 4], mem[top * 4 + 1],
+									mem[top * 4 + 2], mem[top * 4 + 3], mem[0x1a6 * 4], mem[0x1a6 * 4 + 1], mem[0x1a6 * 4 + 2], mem[0x1a6 * 4 + 3]);
+								for (u32 i = 0; i < 24; i++)
+								{
+									const OrbisMtvuHist& h = s_orbis_hist[(s_orbis_hist_pos + i) % 24];
+									switch (h.type)
+									{
+										case 1: printf(" [EXEC pc %04x top %03x]", h.a, h.b); break;
+										case 2: printf(" [UNPACK to %03x cmd %02x num %u size %u]", h.a, h.b, h.c, h.d); break;
+										case 3: printf(" [DATA to %03x %u B]", h.a, h.b); break;
+										case 4: printf(" [MICRO to %04x %u B]", h.a, h.b); break;
+										case 5: printf(" [REGS]"); break;
+										default: break;
+									}
+								}
+								printf("\n");
+								fflush(stdout);
+							}
+						}
+					}
+					OrbisHist(1, addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, vifRegs.top & 0x3ff, 0, 0);
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 					CpuVU1->Execute(vu1RunCycles);
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
@@ -246,6 +305,7 @@ void VU_Thread::ExecuteRingBuffer()
 				{
 					u32 vu_micro_addr = Read();
 					u32 size = Read();
+					OrbisHist(4, vu_micro_addr, size, 0, 0); // vk-285-80
 					CpuVU1->Clear(vu_micro_addr, size);
 					Read(&VU1.Micro[vu_micro_addr], size);
 					break;
@@ -254,13 +314,16 @@ void VU_Thread::ExecuteRingBuffer()
 				{
 					u32 vu_data_addr = Read();
 					u32 size = Read();
+					OrbisHist(3, vu_data_addr >> 4, size, 0, 0); // vk-285-80
 					Read(&VU1.Mem[vu_data_addr], size);
 					break;
 				}
 				case MTVU_VU_WRITE_VIREGS:
+					OrbisHist(5, 0, 0, 0, 0); // vk-285-80
 					Read(&VU1.VI, size_u32(32));
 					break;
 				case MTVU_VU_WRITE_VFREGS:
+					OrbisHist(5, 1, 0, 0, 0); // vk-285-80
 					Read(&VU1.VF, size_u32(4*32));
 					break;
 				case MTVU_VIF_WRITE_COL:
@@ -275,6 +338,7 @@ void VU_Thread::ExecuteRingBuffer()
 					Read(&vif.tag, vif_copy_size);
 					ReadRegs(&vifRegs);
 					u32 size = Read();
+					OrbisHist(2, (vif.tag.addr >> 4) & 0x3ff, vif.tag.cmd & 0xff, vifRegs.num, size); // vk-285-80
 					MTVU_Unpack(&buffer[m_read_pos], vifRegs);
 					m_read_pos += size_u32(size);
 					break;
