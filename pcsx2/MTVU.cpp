@@ -242,6 +242,10 @@ void VU_Thread::ExecuteRingBuffer()
 						}
 					}
 					OrbisHist(1, addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, vifRegs.top & 0x3ff, 0, 0);
+					// vk-285-82: the state each run starts from, for the long-run log after it.
+					const u32 orbis_start_tpc = (VU1.VI[REG_TPC].UL & 0x7ff) * 8;
+					const u16 orbis_start_vi3 = VU1.VI[3].US[0], orbis_start_vi4 = VU1.VI[4].US[0];
+					const u32 orbis_start_q0 = reinterpret_cast<const u32*>(VU1.Mem)[0];
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 					CpuVU1->Execute(vu1RunCycles);
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
@@ -262,6 +266,18 @@ void VU_Thread::ExecuteRingBuffer()
 							g_orbis_vu1_run_max.store(c32, std::memory_order_relaxed);
 						if (b >= 6)
 						{
+							// vk-285-82: every run of 1M cycles or more, the first 40 of a launch: where and with what it
+							// started (a continuation starts at its TPC with the VI registers the last run left).
+							static u32 s_long_logged = 0;
+							if (s_long_logged < 40)
+							{
+								s_long_logged++;
+								printf("[vulong] #%u %s %04x -> stop %04x, %llu cycles | at start: vi03 %04x vi04 %04x q0.x %08x top %03x | at stop: vi03 %04x vi04 %04x\n",
+									s_long_logged, addr == -1 ? "MSCNT from" : "MSCAL", orbis_start_tpc, VU1.VI[REG_TPC].UL * 8,
+									static_cast<unsigned long long>(c), orbis_start_vi3, orbis_start_vi4, orbis_start_q0, vifRegs.top & 0x3ff,
+									VU1.VI[3].US[0], VU1.VI[4].US[0]);
+								fflush(stdout);
+							}
 							g_orbis_vu1_long_pc.store(addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, std::memory_order_relaxed);
 							g_orbis_vu1_long_top.store(vifRegs.top, std::memory_order_relaxed);
 							g_orbis_vu1_long_tpc.store(VU1.VI[REG_TPC].UL * 8, std::memory_order_relaxed);
