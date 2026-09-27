@@ -27,6 +27,12 @@ void OrbisVU1Dump();
 // key EmuCore/Speedhacks/OrbisVU1Speed (gs.ini or a game's settings file; 25..800, default 100).
 // Needs proper testing.
 std::atomic<u32> g_orbis_vu1_speed{100};
+// vk-285-77: how long VU1 programs run. Per second (GSRenderer.cpp prints "[vuruns]" and resets them):
+// runs by length in VU1 cycles (<1k, <4k, <16k, <64k, <256k, <1M, <2.9M, and the rest, which is the
+// 3M-cycle budget of one Execute: a program that didn't reach its E-bit), the longest run, and the start
+// PC (bytes; 0xffff = continued, MSCNT) and VIF1 TOP of the last run of 1M cycles or more.
+std::atomic<u32> g_orbis_vu1_run_hist[8];
+std::atomic<u32> g_orbis_vu1_run_max{0}, g_orbis_vu1_long_pc{0}, g_orbis_vu1_long_top{0}, g_orbis_vu1_long_tpc{0};
 
 #define MTVU_ALWAYS_KICK 0
 #define MTVU_SYNC_MODE 0
@@ -183,6 +189,22 @@ void VU_Thread::ExecuteRingBuffer()
 					// vk-285-74: only this thread writes them, so no locked adds.
 					g_orbis_vu1_cycles.store(g_orbis_vu1_cycles.load(std::memory_order_relaxed) + VU1.cycle, std::memory_order_relaxed);
 					g_orbis_vu1_runs.store(g_orbis_vu1_runs.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					{
+						// vk-285-77: the run's length (the GS thread reads and resets these once a second).
+						const u64 c = VU1.cycle;
+						const int b = c < 1024 ? 0 : c < 4096 ? 1 : c < 16384 ? 2 : c < 65536 ? 3 : c < 262144 ? 4 :
+							c < 1048576 ? 5 : c < 2900000 ? 6 : 7;
+						g_orbis_vu1_run_hist[b].store(g_orbis_vu1_run_hist[b].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+						const u32 c32 = static_cast<u32>(std::min<u64>(c, 0xffffffffu));
+						if (c32 > g_orbis_vu1_run_max.load(std::memory_order_relaxed))
+							g_orbis_vu1_run_max.store(c32, std::memory_order_relaxed);
+						if (b >= 6)
+						{
+							g_orbis_vu1_long_pc.store(addr == -1 ? 0xffffu : static_cast<u32>(addr & 0x7ff) * 8, std::memory_order_relaxed);
+							g_orbis_vu1_long_top.store(vifRegs.top, std::memory_order_relaxed);
+							g_orbis_vu1_long_tpc.store(VU1.VI[REG_TPC].UL * 8, std::memory_order_relaxed);
+						}
+					}
 					if (g_orbis_vu1_dump_request.load(std::memory_order_relaxed)) [[unlikely]]
 					{
 						g_orbis_vu1_dump_request.store(0, std::memory_order_relaxed);

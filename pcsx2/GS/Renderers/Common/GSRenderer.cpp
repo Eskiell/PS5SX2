@@ -310,6 +310,28 @@ static void OrbisPrintLoad()
 	OrbisPrintCpu(); // eerec-285
 	printf("\n");
 	{
+		// vk-285-77: VU1 program lengths this second (MTVU.cpp).
+		extern std::atomic<u32> g_orbis_vu1_run_hist[8];
+		extern std::atomic<u32> g_orbis_vu1_run_max, g_orbis_vu1_long_pc, g_orbis_vu1_long_top, g_orbis_vu1_long_tpc;
+		u32 h[8];
+		u32 total = 0;
+		for (int i = 0; i < 8; i++)
+		{
+			h[i] = g_orbis_vu1_run_hist[i].exchange(0, std::memory_order_relaxed);
+			total += h[i];
+		}
+		if (total)
+		{
+			const u32 max = g_orbis_vu1_run_max.exchange(0, std::memory_order_relaxed);
+			printf("[vuruns] cycles <1k/<4k/<16k/<64k/<256k/<1M/<2.9M/budget: %u/%u/%u/%u/%u/%u/%u/%u max=%uk", h[0], h[1], h[2],
+				h[3], h[4], h[5], h[6], h[7], max / 1000);
+			if (h[6] || h[7])
+				printf(" last long: start %04x top %04x stopped at %04x", g_orbis_vu1_long_pc.load(std::memory_order_relaxed),
+					g_orbis_vu1_long_top.load(std::memory_order_relaxed), g_orbis_vu1_long_tpc.load(std::memory_order_relaxed));
+			printf("\n");
+		}
+	}
+	{
 		// vk-285-27: the EE recompiler's churn this second (iR5900.cpp, vtlb.cpp), and the
 		// rec_nocount switch.
 		extern std::atomic<u32> g_orbis_rec_compiles, g_orbis_rec_discards, g_orbis_rec_page_resets,
