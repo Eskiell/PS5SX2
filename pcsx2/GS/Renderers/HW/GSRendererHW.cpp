@@ -11,6 +11,12 @@
 #include "common/BitUtils.h"
 #include "common/StringUtil.h"
 #include <bit>
+// PS5 port (vk-285-107): this file's printf/fflush(stdout) go to the deferred log (OrbisDeferredLog.h), which the
+// ticker thread writes out: the [gsout] line's printf+fflush every 200 frames left the GS thread asleep ~33 ms in a
+// write now and then (vk-285-106's [vsslow], the "output" phase).
+#include "OrbisDeferredLog.h"
+#define printf OrbisDeferredPrintf
+#define fflush OrbisDeferredFlush
 
 using PS_ATST  = GSShader::PS_ATST;
 using PS_AFAIL = GSShader::PS_AFAIL;
@@ -2832,23 +2838,23 @@ struct OrbisHwDrawTimer
 					++printed;
 					auto rel = [&](unsigned long long m) { return m ? (m - t0) / 1596.0 : -1.0; };
 					const GSDrawingContext* dc = g_orbis_ctx;
-					std::printf("[earlydraw] us=%.0f badframe=%.0f old_rt=%.0f/%.0f sprite=%.0f m_r=%.0f texminmax=%.0f src=%.0f ds=%.0f rt=%.0f prims=%.0f | tme=%u prim=%u verts=%u fbp=%05x fbw=%u psm=%u zbp=%05x fbmsk=%08x\n",
+					printf("[earlydraw] us=%.0f badframe=%.0f old_rt=%.0f/%.0f sprite=%.0f m_r=%.0f texminmax=%.0f src=%.0f ds=%.0f rt=%.0f prims=%.0f | tme=%u prim=%u verts=%u fbp=%05x fbw=%u psm=%u zbp=%05x fbmsk=%08x\n",
 						(end - t0) / 1596.0, rel(g_orbis_m2[0]), rel(g_orbis_m2[1]), rel(g_orbis_m2[2]), rel(g_orbis_m2[3]), rel(g_orbis_m2[4]),
 						rel(g_orbis_mark[3]), rel(g_orbis_mark[0]), rel(g_orbis_mark[2]), rel(g_orbis_mark[1]), rel(g_orbis_mark[4]),
 						g_orbis_tme, g_orbis_prim, g_orbis_verts,
 						dc ? (unsigned)dc->FRAME.Block() : 0u, dc ? (unsigned)dc->FRAME.FBW : 0u, dc ? (unsigned)dc->FRAME.PSM : 0u,
 						dc ? (unsigned)dc->ZBUF.Block() : 0u, dc ? (unsigned)dc->FRAME.FBMSK : 0u);
-					std::fflush(stdout);
+					fflush(stdout);
 				}
 			}
 			if (end - t0 > 159600000ull)
 			{
 				auto rel = [&](unsigned long long m) { return m ? (m - t0) / 1596000.0 : -1.0; };
-				std::printf("[slowdraw] total_ms=%.1f texminmax_end=%.1f src_end=%.1f ds_end=%.1f rt_end=%.1f drawprims_end=%.1f (-1 = not reached)\n",
+				printf("[slowdraw] total_ms=%.1f texminmax_end=%.1f src_end=%.1f ds_end=%.1f rt_end=%.1f drawprims_end=%.1f (-1 = not reached)\n",
 					(end - t0) / 1596000.0, rel(g_orbis_mark[3]), rel(g_orbis_mark[0]), rel(g_orbis_mark[2]), rel(g_orbis_mark[1]), rel(g_orbis_mark[4]));
-				std::printf("[slowdraw2] badframe_chk=%.1f before_old_rt=%.1f after_old_rt=%.1f sprite_tex=%.1f m_r=%.1f\n",
+				printf("[slowdraw2] badframe_chk=%.1f before_old_rt=%.1f after_old_rt=%.1f sprite_tex=%.1f m_r=%.1f\n",
 					rel(g_orbis_m2[0]), rel(g_orbis_m2[1]), rel(g_orbis_m2[2]), rel(g_orbis_m2[3]), rel(g_orbis_m2[4]));
-				std::fflush(stdout);
+				fflush(stdout);
 			}
 		}
 		const unsigned long long orbis_dt = ORBIS_TSC() - t0;
@@ -2857,22 +2863,22 @@ struct OrbisHwDrawTimer
 		if (orbis_dt > 1596000ull) ++g_orbis_draw_slow;
 		if ((++g_orbis_hwdraw_n % 20000) == 0)
 		{
-			std::printf("[hwprof] draws=%llu hwdraw_us=%.1f renderhw_us=%.1f (renderhw calls=%llu) pcsx2_only_us=%.1f\n",
+			printf("[hwprof] draws=%llu hwdraw_us=%.1f renderhw_us=%.1f (renderhw calls=%llu) pcsx2_only_us=%.1f\n",
 				g_orbis_hwdraw_n, g_orbis_hwdraw_ticks / 1596.0 / 20000.0,
 				g_orbis_renderhw_n ? g_orbis_renderhw_ticks / 1596.0 / (double)g_orbis_renderhw_n : 0.0, g_orbis_renderhw_n,
 				(g_orbis_hwdraw_ticks - g_orbis_renderhw_ticks) / 1596.0 / 20000.0);
-			std::fflush(stdout);
-			std::printf("[drawsec] us/draw: lookup_src=%.1f lookup_rt=%.1f lookup_ds=%.1f texminmax=%.1f drawprims=%.1f\n",
+			fflush(stdout);
+			printf("[drawsec] us/draw: lookup_src=%.1f lookup_rt=%.1f lookup_ds=%.1f texminmax=%.1f drawprims=%.1f\n",
 				g_orbis_sec[0] / 1596.0 / 20000.0, g_orbis_sec[1] / 1596.0 / 20000.0, g_orbis_sec[2] / 1596.0 / 20000.0,
 				g_orbis_sec[3] / 1596.0 / 20000.0, g_orbis_sec[4] / 1596.0 / 20000.0);
-			std::printf("[readprof] reads=%llu read_us/draw=%.1f read_avg_us=%.1f | draw_max_ms=%.2f draws_over_1ms=%llu\n",
+			printf("[readprof] reads=%llu read_us/draw=%.1f read_avg_us=%.1f | draw_max_ms=%.2f draws_over_1ms=%llu\n",
 				g_orbis_read_n, g_orbis_read_ticks / 1596.0 / 20000.0,
 				g_orbis_read_n ? g_orbis_read_ticks / 1596.0 / (double)g_orbis_read_n : 0.0,
 				g_orbis_draw_max / 1596000.0, g_orbis_draw_slow);
 			g_orbis_read_ticks = g_orbis_read_n = g_orbis_draw_max = g_orbis_draw_slow = 0;
 			{
 				const double gn = g_orbis_gap_n ? (double)g_orbis_gap_n : 1.0;
-				std::printf("[drawgap] full=%llu us: prefix=%.1f pre_src=%.1f src_to_rt=%.1f rt_to_prims=%.1f tail=%.1f | early=%llu early_avg_us=%.1f\n",
+				printf("[drawgap] full=%llu us: prefix=%.1f pre_src=%.1f src_to_rt=%.1f rt_to_prims=%.1f tail=%.1f | early=%llu early_avg_us=%.1f\n",
 					g_orbis_gap_n, g_orbis_gap[0] / 1596.0 / gn, g_orbis_gap[1] / 1596.0 / gn, g_orbis_gap[2] / 1596.0 / gn,
 					g_orbis_gap[3] / 1596.0 / gn, g_orbis_gap[4] / 1596.0 / gn, g_orbis_early_n,
 					g_orbis_early_n ? g_orbis_early_ticks / 1596.0 / (double)g_orbis_early_n : 0.0);

@@ -48,19 +48,31 @@ namespace OrbisEEDiag
 	u64 vif1_codes[128] = {};
 } // namespace OrbisEEDiag
 
-std::atomic<int> g_orbis_vif1_fuse{1};
-std::atomic<int> g_orbis_hle_flush{0};
-std::atomic<int> g_orbis_pfw{0};
+// PS5 port (vk-285-107): the switches (read by the EE, GS and VU threads, written once a second by the GS thread)
+// and the EE thread's counters (written up to ~2.5 million times a second) on cache lines of their own. In
+// vk-285-106 g_orbis_nt_store, which the GS thread reads a few times a draw, shared a line with g_orbis_vif1_fused,
+// which the fused VIF1 loop increments at every pass: the EE profile's hottest vif1Interrupt instruction (0.7% of
+// the EE thread) sat right after that increment. Each group starts a line, and a 64-byte fence ends it so nothing
+// the linker puts next shares its last line. Needs proper testing.
+// Initialised data (.data): the EE's switches, then the GS thread's (on a line of its own), then the GetThreadId
+// cache (a whole line: OrbisEEHle.h) and a fence.
+alignas(64) std::atomic<int> g_orbis_vif1_fuse{1};
 std::atomic<int> g_orbis_hle_tid{1}; // vk-285-105: on by default (flags/nohletid)
 std::atomic<int> g_orbis_eret_fast{1}; // vk-285-105: on by default (flags/noeretfast)
 std::atomic<int> g_orbis_vif_fast{1};
+alignas(64) std::atomic<int> g_orbis_gs_pfw{1}; // vk-285-103: flags/gspfw; vk-285-107: on unless flags/nogspfw (VKStreamBuffer.cpp)
+OrbisTidCache g_orbis_tid; // vk-285-102 (OrbisEEHle.h)
+alignas(64) char g_orbis_ee_data_fence[64] = {1};
+// Zeroed data (.bss): the switches that start off (read, not written, by the EE and GS threads), then the EE
+// thread's counters and a fence.
+std::atomic<int> g_orbis_hle_flush{0};
+std::atomic<int> g_orbis_pfw{0};
 std::atomic<int> g_orbis_nt_store{0};
-u64 g_orbis_vif1_fused = 0;
+alignas(64) u64 g_orbis_vif1_fused = 0;
 u64 g_orbis_hle_flushes = 0;
 u64 g_orbis_tid_hits = 0, g_orbis_tid_checks = 0, g_orbis_tid_mismatches = 0, g_orbis_eret_skips = 0;
-OrbisTidCache g_orbis_tid; // vk-285-102 (OrbisEEHle.h)
 u64 g_orbis_eret_block[4] = {}; // vk-285-103: ERETs whose event test flags/eretfast kept: INTC, DMAC, timer, VU0
-std::atomic<int> g_orbis_gs_pfw{0}; // vk-285-103: flags/gspfw (VKStreamBuffer.cpp)
+alignas(64) char g_orbis_ee_counters_fence[64] = {};
 
 // The EE core's cycles per TSC tick, x1e6, measured on the EE thread every 300 vsyncs (0: not yet).
 static std::atomic<u64> s_orbis_ee_ratio_u{0};
@@ -173,7 +185,7 @@ void OrbisEEDiagSecond(bool print)
 		{g_orbis_eret_fast, OrbisHasFlag("noeretfast") ? 0 : 1, "ERET without event test"},
 		{g_orbis_vif_fast, OrbisHasFlag("vifslow") ? 0 : 1, "VIF simple codes in the loop"},
 		{g_orbis_nt_store, OrbisHasFlag("ntstore") ? 1 : 0, "GS streaming stores"},
-		{g_orbis_gs_pfw, OrbisHasFlag("gspfw") ? 1 : 0, "GS stream prefetch"},
+		{g_orbis_gs_pfw, OrbisHasFlag("nogspfw") ? 0 : 1, "GS stream prefetch"}, // vk-285-107: on unless flags/nogspfw
 	};
 	bool changed = diag != was_diag;
 	for (Switch& sw : switches)

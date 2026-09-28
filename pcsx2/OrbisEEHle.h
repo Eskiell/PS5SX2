@@ -26,7 +26,8 @@
 #include "R5900.h"
 #include "OrbisEEDiag.h"
 
-struct OrbisTidCache
+// vk-285-107: a cache line of its own (the EE thread writes it at every exception and ERET).
+struct alignas(64) OrbisTidCache
 {
 	u64 seq = 1;
 	u64 valid_seq = 0; // seq at which value is the running thread's id (0: never)

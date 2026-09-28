@@ -68,11 +68,16 @@ public:
 	bool ReserveMemory(u32 num_bytes, u32 alignment);
 	void CommitMemory(u32 final_num_bytes);
 
+	// PS5 port (vk-285-106): the buffer is written with streaming stores (the vertex buffer: GSVector4i::storent),
+	// so flags/gspfw's write prefetches skip it (a streaming store to a line in the cache costs more, not less).
+	__fi void OrbisSetStreamed(bool streamed) { m_orbis_streamed = streamed; }
+
 private:
 	bool AllocateBuffer(VkBufferUsageFlags usage, u32 size);
 	void UpdateCurrentFencePosition();
 	void UpdateGPUPosition();
 	void OrbisMaterializeFence(); // PS5 port (vk-285-97)
+	void OrbisPrefetchAhead(); // PS5 port (vk-285-106), with flags/gspfw
 
 	// Waits for as many fences as needed to allocate num_bytes bytes from the buffer.
 	bool WaitForClearSpace(u32 num_bytes);
@@ -92,6 +97,8 @@ private:
 	u64 m_orbis_fence_counter = 0;
 	u32 m_orbis_fence_offset = 0;
 	bool m_orbis_fence_pending = false;
+	u32 m_orbis_pf_next = 0; // PS5 port (vk-285-106): the next line OrbisPrefetchAhead hasn't asked for
+	bool m_orbis_streamed = false; // PS5 port (vk-285-106): OrbisSetStreamed
 
 	// List of fences and the corresponding positions in the buffer
 	std::deque<std::pair<u64, u32>, OrbisLineAllocator<std::pair<u64, u32>>> m_tracked_fences; // vk-285-91

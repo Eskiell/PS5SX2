@@ -141,11 +141,60 @@ void GSDumpBase::Transfer(int index, const u8* mem, size_t size)
   (void)size;
 }
 
-// Orbis: libpng is absent, so the PNG/DDS replacement-texture loaders are not
-// built. Replacement loading is disabled by default; report "no loader".
+// PS5 port (vk-285-107): texture replacements. PCSX2's loaders (GSTextureReplacementLoaders.cpp) need libpng,
+// which isn't built for the PS5, so until now every file in textures/<serial>/replacements was skipped. This
+// loads PNG files with stb_image, the decoder the shelf already uses for covers, the way PCSX2's PNG loader does:
+// 8-bit RGBA, and alpha 0x80 (the PS2's opaque) for a file without an alpha channel. (PCSX2's loader handles
+// only 8-bit RGB and RGBA files; stb also takes grey, palette and 16-bit ones, converted to 8-bit RGBA.) DDS
+// files aren't loaded: the driver has no BC formats, and the uncompressed DDS kinds are rare in packs. Dumping
+// textures stays off (SavePNGImage below). Needs proper testing.
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#include "../../frontend/third_party/stb_image.h"
+#include "common/FileSystem.h"
+#include "common/Path.h"
+#include "common/StringUtil.h"
+#include <climits>
+
+static bool OrbisPNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
+{
+  (void)only_base_image; // a PNG holds one level; the mip levels are files of their own
+  std::optional<std::vector<u8>> file = FileSystem::ReadBinaryFile(filename.c_str());
+  if (!file || file->empty() || file->size() > static_cast<size_t>(INT_MAX))
+    return false;
+  int w = 0, h = 0, comp = 0;
+  stbi_uc* const px = stbi_load_from_memory(file->data(), static_cast<int>(file->size()), &w, &h, &comp, 4);
+  if (!px)
+    return false;
+  if (w <= 0 || h <= 0)
+  {
+    stbi_image_free(px);
+    return false;
+  }
+  const u32 pitch = static_cast<u32>(w) * 4u;
+  tex->width = static_cast<u32>(w);
+  tex->height = static_cast<u32>(h);
+  tex->format = GSTexture::Format::Color;
+  tex->pitch = pitch;
+  tex->data.assign(px, px + static_cast<size_t>(pitch) * static_cast<size_t>(h));
+  stbi_image_free(px);
+  if (comp == 1 || comp == 3) // no alpha in the file: opaque, as PCSX2's loader makes RGB files
+  {
+    for (size_t i = 3; i < tex->data.size(); i += 4)
+      tex->data[i] = 0x80;
+  }
+  return true;
+}
+
 GSTextureReplacements::ReplacementTextureLoader GSTextureReplacements::GetLoader(const std::string_view filename)
 {
-  (void)filename;
+  const std::string_view ext = Path::GetExtension(filename);
+  if (ext.size() == 3 && StringUtil::Strncasecmp(ext.data(), "png", 3) == 0)
+    return OrbisPNGLoader;
   return nullptr;
 }
 bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)

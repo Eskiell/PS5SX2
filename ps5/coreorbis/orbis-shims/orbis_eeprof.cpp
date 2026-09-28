@@ -38,6 +38,7 @@
 
 #include "Memory.h"
 #include "OrbisPaths.h" // vk-285-33
+#include "OrbisDeferredLog.h" // vk-285-107: OrbisEEProfMark's line
 
 #include <atomic>
 #include <cerrno>
@@ -562,11 +563,12 @@ void OrbisEEProfMark()
 	if (!s_running.load(std::memory_order_relaxed))
 		return;
 	const int err = s_kill_error.load(std::memory_order_relaxed);
-	std::printf("[%s] n=%u sent=%u skipped=%u dropped=%u", s_mode == 2 ? "vuprof" : s_gs_mode ? "gsprof" : "eeprof",
-		s_count.load(std::memory_order_relaxed),
-		s_sent.load(std::memory_order_relaxed), s_skipped.load(std::memory_order_relaxed),
-		s_dropped.load(std::memory_order_relaxed));
+	// vk-285-107: through the deferred log, as one line. This runs on the GS thread once a second, and a direct
+	// printf there waited on stdout's lock while the ticker thread wrote to /data (vk-285-106's [vsslow], ~33 ms).
+	char kill[32] = "";
 	if (err)
-		std::printf(" kill_error=%d", err);
-	std::printf("\n");
+		std::snprintf(kill, sizeof(kill), " kill_error=%d", err);
+	OrbisDeferredPrintf("[%s] n=%u sent=%u skipped=%u dropped=%u%s\n", s_mode == 2 ? "vuprof" : s_gs_mode ? "gsprof" : "eeprof",
+		s_count.load(std::memory_order_relaxed), s_sent.load(std::memory_order_relaxed),
+		s_skipped.load(std::memory_order_relaxed), s_dropped.load(std::memory_order_relaxed), kill);
 }

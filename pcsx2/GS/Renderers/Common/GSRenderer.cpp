@@ -77,7 +77,11 @@ int g_orbis_perf = 0; // eerec-280: perf OSD + [perf] klog line every second (li
 #include <sys/param.h> // vk-285-87: cpuset_setaffinity (pin_all)
 #include <sys/cpuset.h>
 #include <cerrno>
+#include <x86intrin.h> // vk-285-106: __rdtsc for [vsslow]
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
+#ifdef ORBIS_VULKAN
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-106: the Vulkan waits inside a slow vsync
+#endif
 // PS5 port (vk-285-104): this file's printf/fflush(stdout) go to the deferred log (OrbisDeferredLog.h); the
 // ticker thread writes them out, so the GS thread never waits on /data or on stdout's lock.
 #include "OrbisDeferredLog.h"
@@ -808,7 +812,7 @@ static void OrbisPerfMinute(unsigned fps, float speed, float ee, float gs, float
 			"perf, last %u s: %.1f fps (min %u, max %u), speed %.0f%%, below 95%% for %u s; EE %.0f%% GS %.0f%% VU %.0f%%; %dx",
 			s_n, s_fps / s_n, s_min, s_max, s_speed / s_n, s_slow, s_ee / s_n, s_gs / s_n, s_vu / s_n,
 			static_cast<int>(GSConfig.UpscaleMultiplier));
-		orbis_event_log(line);
+		OrbisDeferredEvent(line); // vk-285-107: the ticker writes it (a file write here held the GS thread)
 	}
 	s_n = s_slow = s_max = 0;
 	s_min = ~0u;
@@ -1008,6 +1012,112 @@ void GSRenderer::UpdateRenderFixes()
 {
 }
 
+// PS5 port (vk-285-106): a slow vsync's time, phase by phase. vk-285-101 to 105 logged a ~33 ms GS-thread stall
+// in ~6% of the [vstime] windows (and a ~16.7 ms one in ~9%), inside the merge or the present, which no
+// per-second counter explained; vk-285-104's deferred log did not remove it. VSync stamps the TSC at the end of
+// each phase and keeps the GS thread's Vulkan waits by kind (VKOrbisTiming.h, cumulative) from its start; a vsync
+// over 20 ms prints a [vsslow] line: its total, the gap since the previous vsync ended (the frame's GS work, and
+// any wait for the EE), each phase's time, and each Vulkan wait kind's time (calls) inside it. A phase that
+// didn't run shows no time. Cheap when nothing is slow: ~12 TSC reads and two 160-byte copies a vsync.
+// Needs proper testing.
+namespace
+{
+enum OrbisVsPhase : int
+{
+	ORBIS_VS_TUNE, // OrbisLiveTune (live.ini, gs.ini, the game's ini)
+	ORBIS_VS_DUMP, // the dump checks and the duplicate-frame check
+	ORBIS_VS_OUTPUT, // Merge's GetOutput calls (the texture cache's lookups for the displayed frame)
+	ORBIS_VS_MERGE, // the rest of Merge (the merge draws)
+	ORBIS_VS_CAPTURE, // OrbisFrameCapture and the diagnostics
+	ORBIS_VS_PREP, // AgePool, the perfmon, CAS
+	ORBIS_VS_BEGIN, // BeginPresentFrame (the swapchain acquire)
+	ORBIS_VS_RECT, // PresentRect
+	ORBIS_VS_OSD, // the watermark and the OSD
+	ORBIS_VS_END, // EndPresentFrame (the submit and the present)
+	ORBIS_VS_AFTER, // the GPU time, [vstime] and PerformanceMetrics::Update
+	ORBIS_VS_PHASES
+};
+constexpr const char* s_orbis_vs_names[ORBIS_VS_PHASES] = {
+	"tune", "dump", "output", "merge", "capture", "prep", "begin", "rect", "osd", "end", "after"};
+#ifdef ORBIS_VULKAN
+constexpr const char* s_orbis_vkw_names[ORBIS_VKW_KINDS] = {
+	"reuse", "sync", "counter", "acquire", "submit", "present", "idle", "pipelines", "glsl", "k9"};
+#endif
+struct OrbisVsTrace
+{
+	u64 t0 = 0, prev_end = 0;
+	u64 cpu0 = 0; // the GS thread's CPU time at the start, us (Threading::GetThreadCpuTime; 0 if unknown)
+	u64 mark[ORBIS_VS_PHASES] = {};
+	u64 vsyncs = 0, slow = 0;
+#ifdef ORBIS_VULKAN
+	unsigned long long vkw_ns[ORBIS_VKW_KINDS] = {}, vkw_n[ORBIS_VKW_KINDS] = {};
+#endif
+};
+OrbisVsTrace s_orbis_vs;
+constexpr double kOrbisTscPerMs = 1596300.0; // the PS5's TSC, 1596.30 MHz (vk-285-101's [cpuclk])
+
+__fi void OrbisVsMark(int phase)
+{
+	s_orbis_vs.mark[phase] = __rdtsc();
+}
+
+void OrbisVsBegin()
+{
+	OrbisVsTrace& v = s_orbis_vs;
+	v.t0 = __rdtsc();
+	v.cpu0 = Threading::GetThreadCpuTime();
+	std::memset(v.mark, 0, sizeof(v.mark));
+#ifdef ORBIS_VULKAN
+	std::memcpy(v.vkw_ns, g_orbis_vkw_ns, sizeof(v.vkw_ns));
+	std::memcpy(v.vkw_n, g_orbis_vkw_n, sizeof(v.vkw_n));
+#endif
+}
+
+void OrbisVsEnd()
+{
+	OrbisVsTrace& v = s_orbis_vs;
+	const u64 end = __rdtsc();
+	const double gap_ms = v.prev_end ? static_cast<double>(v.t0 - v.prev_end) / kOrbisTscPerMs : 0.0;
+	v.prev_end = end;
+	v.vsyncs++;
+	const double total_ms = static_cast<double>(end - v.t0) / kOrbisTscPerMs;
+	if (total_ms < 20.0)
+		return;
+	v.slow++;
+	// The thread's own CPU time over the vsync: near the total when it ran (work or a spin), well under it when
+	// it slept in a wait or wasn't scheduled.
+	const u64 cpu1 = v.cpu0 ? Threading::GetThreadCpuTime() : 0;
+	char cpu[32] = "n/a";
+	if (cpu1 > v.cpu0)
+		std::snprintf(cpu, sizeof(cpu), "%.1f ms", static_cast<double>(cpu1 - v.cpu0) / 1000.0);
+	char phases[320], waits[320];
+	int pl = 0, wl = 0;
+	phases[0] = waits[0] = '\0';
+	u64 prev = v.t0;
+	for (int p = 0; p < ORBIS_VS_PHASES; p++)
+	{
+		const u64 m = (v.mark[p] && v.mark[p] >= prev) ? v.mark[p] : prev;
+		const double ms = static_cast<double>(m - prev) / kOrbisTscPerMs;
+		if (ms >= 0.05 && pl < static_cast<int>(sizeof(phases)) - 24)
+			pl += std::snprintf(phases + pl, sizeof(phases) - pl, " %s=%.1f", s_orbis_vs_names[p], ms);
+		prev = m;
+	}
+#ifdef ORBIS_VULKAN
+	for (int k = 0; k < ORBIS_VKW_KINDS; k++)
+	{
+		const unsigned long long n = g_orbis_vkw_n[k] - v.vkw_n[k];
+		if (!n || wl >= static_cast<int>(sizeof(waits)) - 32)
+			continue;
+		wl += std::snprintf(waits + wl, sizeof(waits) - wl, " %s=%.1f(%llu)", s_orbis_vkw_names[k],
+			static_cast<double>(g_orbis_vkw_ns[k] - v.vkw_ns[k]) / 1e6, n);
+	}
+#endif
+	printf("[vsslow] #%llu %.1f ms (thread cpu %s), gap before %.1f ms:%s | vk:%s\n",
+		static_cast<unsigned long long>(v.vsyncs), total_ms, cpu, gap_ms, phases, wl ? waits : " none");
+}
+} // namespace
+#define ORBIS_VS_MARK(phase) OrbisVsMark(phase)
+
 bool GSRenderer::Merge(int field)
 {
 	{
@@ -1060,6 +1170,8 @@ bool GSRenderer::Merge(int field)
 		if (feedback_merge)
 			tex[2] = GetFeedbackOutput(tex_scale[2]);
 	}
+
+	ORBIS_VS_MARK(ORBIS_VS_OUTPUT); // vk-285-106
 
 	if (!tex[0] && !tex[1])
 	{
@@ -1738,13 +1850,16 @@ static void OrbisFrameCapture(GSTexture* current)
 	std::memcpy(c.hdr, hdr, sizeof(hdr));
 }
 
+
 void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 {
 	// Orbis: Null renderer has no GSDevice; skip presentation/merge entirely.
 	if (!g_gs_device)
 		return;
 
+	OrbisVsBegin(); // vk-285-106
 	OrbisLiveTune(); // eerec-278
+	ORBIS_VS_MARK(ORBIS_VS_TUNE);
 	const auto orbis_vs_t0 = std::chrono::steady_clock::now();
 	double orbis_merge_ms = 0.0;
 	double orbis_present_ms = 0.0;
@@ -1800,13 +1915,16 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		}
 	}
 
+	ORBIS_VS_MARK(ORBIS_VS_DUMP);
 	const bool blank_frame = !Merge(field);
+	ORBIS_VS_MARK(ORBIS_VS_MERGE);
 	OrbisFrameCapture(blank_frame ? nullptr : g_gs_device->GetCurrent()); // vk-285-25
 	{
 		static unsigned s_d = 0;
 		if (g_orbis_diag && (s_d++ % 250) == 7 && s_orbis_gl) // eerec-280
 			OrbisDiagTexture("current", g_gs_device->GetCurrent());
 	} // eerec-279
+	ORBIS_VS_MARK(ORBIS_VS_CAPTURE);
 	orbis_merge_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - orbis_vs_t0).count();
 
 	// Orbis: bring-up - which presentation branch is taken?
@@ -1828,10 +1946,16 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	// Skip presentation when running uncapped while vsync is on.
 	if (skip_frame || g_gs_device->ShouldSkipPresentingFrame())
 	{
-		if (BeginPresentFrame(true))
+		const bool began = BeginPresentFrame(true);
+		ORBIS_VS_MARK(ORBIS_VS_BEGIN);
+		if (began)
+		{
 			EndPresentFrame();
+			ORBIS_VS_MARK(ORBIS_VS_END);
+		}
 
 		PerformanceMetrics::Update(registers_written, fb_sprite_frame, skip_frame);
+		ORBIS_VS_MARK(ORBIS_VS_AFTER);
 	}
 	else
 	{
@@ -1881,7 +2005,10 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			}
 		}
 
-		if (BeginPresentFrame(false))
+		ORBIS_VS_MARK(ORBIS_VS_PREP);
+		const bool began = BeginPresentFrame(false);
+		ORBIS_VS_MARK(ORBIS_VS_BEGIN);
+		if (began)
 		{
 			if (current && !blank_frame)
 			{
@@ -1892,6 +2019,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
 					s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
 			}
+			ORBIS_VS_MARK(ORBIS_VS_RECT);
 
 #ifdef ORBIS_VULKAN
 			OrbisWatermark(); // test build 1 (vk-285-55): under the FPS box
@@ -1899,7 +2027,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			OrbisGLOSD(); // eerec-278
 			if (s_orbis_gl && g_orbis_diag) // eerec-280
 				OrbisSampleWindow(); // eerec-279 (every 120th call)
+			ORBIS_VS_MARK(ORBIS_VS_OSD);
 			EndPresentFrame();
+			ORBIS_VS_MARK(ORBIS_VS_END);
 
 			const float gpu_time = g_gs_device->GetAndResetAccumulatedGPUTime();
 			GPUPipelineStatistics gpu_stats = g_gs_device->GetAndResetAccumulatedGPUPipelineStatistics();
@@ -1927,7 +2057,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		}
 
 		PerformanceMetrics::Update(registers_written, fb_sprite_frame, false);
+		ORBIS_VS_MARK(ORBIS_VS_AFTER);
 	}
+	OrbisVsEnd(); // vk-285-106: [vsslow]
 
 	// snapshot
 	if (!m_snapshot.empty())

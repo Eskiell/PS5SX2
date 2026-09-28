@@ -93,6 +93,7 @@ bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
 	m_orbis_fence_pending = false; // vk-285-97
+	m_orbis_pf_next = 0; // vk-285-106
 	m_allocation = new_allocation;
 	m_buffer = new_buffer;
 	m_host_pointer = static_cast<u8*>(ai.pMappedData);
@@ -122,6 +123,7 @@ void VKStreamBuffer::Destroy(bool defer)
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
 	m_orbis_fence_pending = false; // vk-285-97
+	m_orbis_pf_next = 0; // vk-285-106
 	m_buffer = VK_NULL_HANDLE;
 	m_allocation = VK_NULL_HANDLE;
 	m_host_pointer = nullptr;
@@ -228,20 +230,30 @@ void VKStreamBuffer::CommitMemory(u32 final_num_bytes)
 
 	m_current_offset += final_num_bytes;
 	m_current_space -= final_num_bytes;
-	// PS5 port (vk-285-103): with flags/gspfw (live), the two lines 2 KB past the new offset asked for with write
-	// intent, so the draws a little later find them in the cache: the copies into these buffers write lines last
-	// touched a lap of the ring ago, and vk-285-102's GS profile had ~6% of the thread in stalls behind the
-	// store queue those misses fill (UpdateCurrentFencePosition's and CommitMemory's own stores). An A/B.
-	if (g_orbis_gs_pfw.load(std::memory_order_relaxed))
-	{
-		const u32 ahead = m_current_offset + 2048;
-		if (ahead + 128 <= m_size)
-		{
-			__builtin_prefetch(m_host_pointer + ahead, 1, 3);
-			__builtin_prefetch(m_host_pointer + ahead + 64, 1, 3);
-		}
-	}
+	// PS5 port (vk-285-103): with flags/gspfw (live), lines ahead of the new offset asked for with write intent, so
+	// the draws a little later find them in the cache: the copies into these buffers write lines last touched a
+	// lap of the ring ago, and vk-285-102's GS profile had ~6% of the thread in stalls behind the store queue
+	// those misses fill (UpdateCurrentFencePosition's and CommitMemory's own stores). An A/B.
+	if (!m_orbis_streamed && g_orbis_gs_pfw.load(std::memory_order_relaxed))
+		OrbisPrefetchAhead();
 	UpdateCurrentFencePosition();
+}
+
+// PS5 port (vk-285-106): every line up to 2 KB past the offset, each asked for once (m_orbis_pf_next), at most 16 a
+// commit. vk-285-103/104 asked for the two lines at +2 KB, which skipped the lines a commit of more than 128 bytes
+// stepped over; even so it cut the GS thread's busy time ~3% in vk-285-104's A/B at Shadow of the Colossus's spot.
+// Needs proper testing.
+void VKStreamBuffer::OrbisPrefetchAhead()
+{
+	constexpr u32 kAhead = 2048, kLine = 64, kMaxLines = 16;
+	const u32 cur = m_current_offset & ~(kLine - 1);
+	u32 next = m_orbis_pf_next;
+	if (next <= cur || next > cur + kAhead) // behind the writes, or the offset went back to the start
+		next = cur + kLine;
+	const u32 limit = std::min(cur + kAhead, m_size);
+	for (u32 n = 0; next < limit && n < kMaxLines; next += kLine, n++)
+		__builtin_prefetch(m_host_pointer + next, 1, 3);
+	m_orbis_pf_next = next;
 }
 
 void VKStreamBuffer::UpdateCurrentFencePosition()

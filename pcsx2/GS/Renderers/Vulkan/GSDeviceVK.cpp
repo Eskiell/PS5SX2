@@ -4771,6 +4771,28 @@ static __fi void OrbisUploadCopy(void* dst, const void* src, size_t size)
 	else
 		std::memcpy(dst, src, size);
 }
+
+// PS5 port (vk-285-106): a constant buffer into its uniform stream buffer. With flags/ntstore (live), whole lines of
+// streaming stores: the copy is padded with zeros to a multiple of 64 bytes, which stays inside the slot (the
+// uniform buffers' offsets are 256-aligned, minUniformBufferOffsetAlignment, and nothing else is written in a slot's
+// tail). vk-285-102's plain streaming copy left the VS buffer's 48 bytes and the PS buffer's last 16 as part-written
+// lines, which a streaming store flushes as partial writes. `dst` must be 64-byte aligned. Needs proper testing.
+template <typename T>
+static __fi void OrbisUploadUniform(void* dst, const T& src)
+{
+	constexpr size_t size = sizeof(T), padded = (sizeof(T) + 63) & ~static_cast<size_t>(63);
+	if (g_orbis_nt_store.load(std::memory_order_relaxed) && (reinterpret_cast<uintptr_t>(dst) & 63) == 0)
+	{
+		alignas(64) u8 line[padded];
+		std::memcpy(line, &src, size);
+		std::memset(line + size, 0, padded - size);
+		OrbisStreamCopy(dst, line, padded);
+	}
+	else
+	{
+		std::memcpy(dst, &src, size);
+	}
+}
 #endif
 
 void GSDeviceVK::IASetVertexBuffer(const void* vertex, size_t stride, size_t count, size_t align_multiplier)
@@ -5237,6 +5259,7 @@ bool GSDeviceVK::CreateBuffers()
 	}
 #ifdef ORBIS_VULKAN
 	OrbisMemBench(m_vertex_stream_buffer.GetHostPointer(), VERTEX_BUFFER_SIZE); // vk-285-97
+	m_vertex_stream_buffer.OrbisSetStreamed(true); // vk-285-106: IASetVertexBuffer's GSVector4i::storent
 #endif
 
 	if (!m_index_stream_buffer.Create(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, INDEX_BUFFER_SIZE))
@@ -7220,7 +7243,7 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		}
 
 #ifdef ORBIS_VULKAN
-		OrbisUploadCopy(m_vertex_uniform_stream_buffer.GetCurrentHostPointer(), &m_vs_cb_cache, sizeof(m_vs_cb_cache)); // vk-285-98, vk-285-102
+		OrbisUploadUniform(m_vertex_uniform_stream_buffer.GetCurrentHostPointer(), m_vs_cb_cache); // vk-285-98, 102, 106
 #else
 		std::memcpy(m_vertex_uniform_stream_buffer.GetCurrentHostPointer(), &m_vs_cb_cache, sizeof(m_vs_cb_cache));
 #endif
@@ -7245,7 +7268,7 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		}
 
 #ifdef ORBIS_VULKAN
-		OrbisUploadCopy(m_fragment_uniform_stream_buffer.GetCurrentHostPointer(), &m_ps_cb_cache, sizeof(m_ps_cb_cache)); // vk-285-98, vk-285-102
+		OrbisUploadUniform(m_fragment_uniform_stream_buffer.GetCurrentHostPointer(), m_ps_cb_cache); // vk-285-98, 102, 106
 #else
 		std::memcpy(m_fragment_uniform_stream_buffer.GetCurrentHostPointer(), &m_ps_cb_cache, sizeof(m_ps_cb_cache));
 #endif

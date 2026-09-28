@@ -17,9 +17,25 @@
 // OrbisDeferredFlush(stdout) does nothing (the ticker flushes); other streams are flushed as before. The crash
 // printer writes the buffer out first (orbis_log_drain). At most 1 MB waits; beyond that lines are dropped and
 // counted. Needs proper testing.
+//
+// vk-285-107: vk-285-106's [vsslow] lines found the remaining ~33 ms stalls (one every ~6 s at the spot): the GS
+// thread asleep in a direct write -- GSRendererHW's [gsout] printf+fflush every 200 frames, the profiler's
+// once-a-second line, and the Vulkan driver's own stderr lines (from the GS thread, its recorder or its queue
+// worker, whose waits the GS thread then shares). So there is a second buffer for stderr: OrbisDeferredFprintf
+// takes either stream, and the driver hands its lines over through ps5vk_log_hook (below).
 
+#include <cstddef>
 #include <cstdio>
 
 int OrbisDeferredPrintf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// stdout or stderr: into that stream's buffer; any other stream: written as before.
+int OrbisDeferredFprintf(FILE* stream, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 int OrbisDeferredFlush(FILE* stream);
-extern "C" void orbis_log_drain(); // the buffer to stdout, and stdout flushed (the ticker; the crash printer)
+extern "C" void orbis_log_drain(); // both buffers out, and both streams flushed (the ticker; the crash printer)
+// vk-285-107: the Vulkan driver's lines for stdout (stream 1) and stderr (2) (ps5vk_private.h's log routing calls
+// it; weak there).
+extern "C" void ps5vk_log_hook(int stream, const char* text, size_t len);
+// vk-285-107: a line for the settings log (the frontend's orbis_event_log opens, appends and closes the file),
+// written by the ticker thread with the next drain. For lines from the emulation threads (the GS thread's
+// once-a-minute perf line).
+void OrbisDeferredEvent(const char* line);
