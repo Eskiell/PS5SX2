@@ -307,7 +307,7 @@ SHIM_ASM := ./orbis-shims/ProsperoTLS.S
 FE_DIR := ../frontend
 FE_SRCS := $(FE_DIR)/fe_app.cpp $(FE_DIR)/fe_covers.cpp $(FE_DIR)/fe_games.cpp \
   $(FE_DIR)/fe_renderer.cpp $(FE_DIR)/fe_sound.cpp $(FE_DIR)/fe_text.cpp $(FE_DIR)/fe_vk.cpp $(FE_DIR)/fe_ps5.cpp \
-  $(FE_DIR)/fe_web.cpp
+  $(FE_DIR)/fe_web.cpp $(FE_DIR)/fe_i18n.cpp
 # vk-285-50: Project Nayuki's QR Code generator (MIT, C) for the shelf's QR tile, and the files
 # fe_ps5.cpp embeds from frontend/assets (the settings page, its icons, Font Awesome's brands font).
 FE_CSRCS := $(FE_DIR)/third_party/qrcodegen/qrcodegen.c

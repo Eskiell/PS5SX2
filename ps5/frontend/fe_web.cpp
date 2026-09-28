@@ -353,8 +353,19 @@ std::string ListJson(const std::vector<std::string>& v)
 	return out + "]";
 }
 
+// vk-285-110: PS5SX2/ keys (the game language) are the player's own choices, not tuning: the Recommended
+// button keeps them, and they don't stop a file from counting as the recommended one.
+bool IsPlayerKey(const std::string& key)
+{
+	return key.compare(0, 7, "PS5SX2/") == 0;
+}
+
 bool SameState(IniState a, IniState b)
 {
+	for (IniState* st : {&a, &b})
+		st->kv.erase(std::remove_if(st->kv.begin(), st->kv.end(),
+						 [](const std::pair<std::string, std::string>& p) { return IsPlayerKey(p.first); }),
+			st->kv.end());
 	std::sort(a.kv.begin(), a.kv.end());
 	std::sort(b.kv.begin(), b.kv.end());
 	std::sort(a.enabled.begin(), a.enabled.end());
@@ -1270,7 +1281,17 @@ void WebServer::ApiRecommended(const Request& req, const GameInfo* g, const std:
 	const bool existed = ReadFile(path, old);
 	if (existed && !WriteFileAtomic(path + ".before-recommended", old))
 		std::printf("[web] could not keep a copy of %s (errno %d)\n", path.c_str(), errno);
-	const std::string text = header + "\n" + preset;
+	std::string text = header + "\n" + preset;
+	// vk-285-110: the player's own choices (PS5SX2/GameLanguage) stay.
+	if (existed)
+	{
+		std::string keep;
+		for (const auto& kv : ReadState(old).kv)
+			if (IsPlayerKey(kv.first))
+				keep += kv.first + "=" + kv.second + "\n";
+		if (!keep.empty())
+			text += (text.empty() || text.back() == '\n' ? "" : "\n") + keep;
+	}
 	if (!WriteFileAtomic(path, text))
 	{
 		res.status = 500;

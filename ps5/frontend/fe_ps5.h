@@ -70,6 +70,14 @@ void orbis_event_log_init(const std::string& path);
 int orbis_hide_splash();
 extern "C" void orbis_event_log(const char* line);
 
+// vk-285-110: the PS5's system language (system parameter 1: 0 Japanese, 1 English, 2 French, 3 Spanish,
+// ...; English when the call fails), read once.
+int orbis_ps5_language();
+
+// vk-285-110: the shelf's and the notifications' text in that language (fe_i18n.h). `lang_dir` holds
+// testers' fixes (<code>.txt); empty reads none (before the jailbreak /data isn't readable).
+void orbis_frontend_set_language(const std::string& lang_dir);
+
 // Shows the shelf and returns the picked image's path. *ran is false when the frontend could not
 // start (no Vulkan display, say): the caller then shows the plain list instead. With no images the
 // result is empty. One image opens the shelf too (vk-285-69, for its QR code); the caller's nomenu

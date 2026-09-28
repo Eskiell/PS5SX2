@@ -280,7 +280,16 @@ const GROUPS = [
       hint: "Above 100% can smooth out slowdown the PS2 had; some games dislike it." },
     { key: "EmuCore/Speedhacks/EECycleSkip", label: "EE cycle skip", type: "seg", def: "0", short: "Cycle skip %",
       options: [["0","Off"],["1","Mild"],["2","Moderate"],["3","Max"]] },
-    { key: "EmuCore/Speedhacks/vuThread", label: "MTVU (VU1 on its own thread)", type: "toggle", def: "false", restart: true, short: "MTVU %" },
+    { key: "EmuCore/Speedhacks/vuThread", label: "MTVU (VU1 on its own thread)", type: "toggle", def: "false", restart: true, later: "MTVU",
+      short: "MTVU %" },
+  ]},
+  // vk-285-110: the PS2 system language games are told (main-boot.cpp, pcsx2/CDVD/CDVD.cpp). Read when the game starts.
+  { title: "Game", items: [
+    { key: "PS5SX2/GameLanguage", label: "Game language", type: "seg", def: "-1", restart: true, later: "the language", cols: 3,
+      short: "Language %",
+      options: [["-1","Auto (PS5)"],["0","Japanese"],["1","English"],["2","French"],["3","Spanish"],["4","German"],["5","Italian"],
+                ["6","Dutch"],["7","Portuguese"]],
+      hint: "The language the PS2 tells games. PAL games with several languages start in it; most US games are English only. Auto follows the PS5's language." },
   ]},
 ];
 
@@ -462,7 +471,7 @@ function render() {
       } else {
         html += '<div class="row"><div class="head"><div class="label">' + esc(it.label) + tag + '</div><div class="from">' + from + '</div></div>';
         if (it.hint) html += '<div class="hint">' + esc(it.hint) + "</div>";
-        html += '<div class="seg' + (it.options.length >= 6 ? " many" : "") + '" style="--n:' + it.options.length + '">' + it.options.map((o) => {
+        html += '<div class="seg' + (it.options.length >= 6 ? " many" : "") + '" style="--n:' + (it.cols || it.options.length) + '">' + it.options.map((o) => {
           const cur = o[0] === eff.v || parseFloat(o[0]) === parseFloat(eff.v);
           return '<button class="' + (cur ? (eff.from === "own" ? "cur" : "cur inh") : "") + '" data-key="' + esc(it.key) +
                  '" data-val="' + esc(o[0]) + '">' + esc(o[1]) + "</button>";
@@ -532,20 +541,20 @@ function queueSave() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 350
 async function save() {
   if (!pending.size) return;
   const id = current, lines = [];
-  let restart = false;
+  const later = []; // what applies at the next launch (vk-285-110: not only MTVU)
   for (const [k, v] of pending) {
     if (k.startsWith("patch:")) lines.push((v ? "patch+ " : "patch- ") + k.slice(6));
     else if (v === null) lines.push("unset " + k);
     else lines.push("set " + k + "=" + v);
     const it = GROUPS.flatMap((g) => g.items).find((x) => x.key === k);
-    if (it && it.restart) restart = true;
+    if (it && it.restart && !later.includes(it.later || it.label)) later.push(it.later || it.label);
   }
   pending.clear();
   try {
     const d = await api("/api/settings?id=" + encodeURIComponent(id), { method: "POST", body: lines.join("\n") + "\n", headers: { "Content-Type": "text/plain" } });
     if (current === id) { data = d; render(); }
     const live = state.playing && (id === "@global" || state.playing.id === id);
-    toast(live ? (restart ? "Saved · the rest applies now, MTVU at next launch" : "Saved · applying in the game") : "Saved");
+    toast(live ? (later.length ? "Saved \u00b7 the rest applies now, " + later.join(" and ") + " at next launch" : "Saved \u00b7 applying in the game") : "Saved");
     refreshGames();
   } catch (e) { if (e.message !== "unauthorized") toast("Not saved: " + e.message); }
 }

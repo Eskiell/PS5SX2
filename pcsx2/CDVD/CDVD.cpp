@@ -311,9 +311,20 @@ static void cdvdWriteMAC(const u8* num)
 	cdvdWriteNVM(num, getNvmLayout()->mac, 8);
 }
 
+// PS5 port (vk-285-110): the PS2 system language games are told (0 Japanese, 1 English, 2 French, 3 Spanish,
+// 4 German, 5 Italian, 6 Dutch, 7 Portuguese), set by main-boot.cpp from the PS5's language or the
+// PS5SX2/GameLanguage setting; -1 leaves the NVM's own. PAL games with several languages pick theirs from it,
+// and PCSX2 makes a new .nvm with English, which nothing on the PS5 changes. It's applied where the language
+// is read (the fast-boot GetOsdConfigParam HLE below, and the BIOS's own read of the config block), so the
+// .nvm file itself is never rewritten.
+int g_orbis_ps2_language = -1;
+
 void cdvdReadLanguageParams(u8* config)
 {
 	cdvdReadNVM(config, getNvmLayout()->config1 + 0xF, 16);
+	// config[2] is config1 + 0x11: the OSD version (top 3 bits) and the language (low 5 bits).
+	if (g_orbis_ps2_language >= 0 && g_orbis_ps2_language <= 7)
+		config[2] = static_cast<u8>((config[2] & 0xE0) | g_orbis_ps2_language);
 }
 
 s32 cdvdReadConfig(u8* config)
@@ -355,6 +366,9 @@ s32 cdvdReadConfig(u8* config)
 				// HACK: Set the "initialized" flag when fast booting, otherwise some games crash (e.g. Jak 1).
 				config[2] |= 0x80;
 			}
+			// PS5 port (vk-285-110): the same language byte (config1 + 0x11) for a full BIOS boot's own read.
+			if (cdvd.CBlockIndex == 1 && g_orbis_ps2_language >= 0 && g_orbis_ps2_language <= 7)
+				config[1] = static_cast<u8>((config[1] & 0xE0) | g_orbis_ps2_language);
 
 			cdvd.CBlockIndex++;
 		}

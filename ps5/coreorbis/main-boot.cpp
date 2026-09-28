@@ -27,6 +27,7 @@
 #include "GS/Renderers/Vulkan/VKOrbisTiming.h"
 #ifdef ORBIS_VULKAN
 #include "../frontend/fe_ps5.h"
+#include "../frontend/fe_i18n.h" // vk-285-110: the notifications' text
 #endif // vk-285-36/38: [vkwait], [shaders]
 extern volatile unsigned long long g_orbis_map_addr;
 #include "vtlb.h"
@@ -1021,7 +1022,7 @@ static void orbis_back_to_menu()
       usleep(100000);
   printf("[menu] LoadExec(%s) returned %x and we're still here: back to the game\n", path, (unsigned)rc);
   fflush(stdout);
-  sys_notify("PS5SX2: couldn't open the menu, back to the game");
+  sys_notify(fe::Tr(fe::Str::NotifyMenuFailed));
   FileMcd_EmuOpen();
   SPU2::SetOutputPaused(false);
   g_orbis_menu_request.store(false);
@@ -1284,7 +1285,10 @@ int main()
 
   // On-screen debug overlay (VideoOut canvas, separate thread).
   ps5::debug::set_line(1, "main started");
-  sys_notify(g_orbis_test_build > 0 ? "PS5SX2 (testing build): starting" : "PS5SX2: starting"); // vk-285-50: the new name
+  // vk-285-110: the shelf's and the notifications' text in the PS5's language (fe_i18n.cpp), with testers'
+  // fixes from lang/<code>.txt when /data is readable here (again after the jailbreak).
+  orbis_frontend_set_language(OrbisDir("lang"));
+  sys_notify(fe::Tr(g_orbis_test_build > 0 ? fe::Str::NotifyStartingTest : fe::Str::NotifyStarting)); // vk-285-50: the new name
   // vk-285-44: only the cover downloads run before the HEN jailbreak. HTTPS from the frontend
   // failed after it (vk-285-41/42: the handshake to raw.githubusercontent.com hung, or ended in
   // 0x8095F00C, "unknown CA") and worked before it (vk-285-43, and the user's Twiso, which fetches
@@ -1314,6 +1318,7 @@ int main()
 #ifdef ORBIS_VULKAN
   orbis_log_flag_access("after the jailbreak");
 #endif
+  orbis_frontend_set_language(OrbisDir("lang")); // vk-285-110: lang/<code>.txt may only be readable now
   // Test build 1 (vk-285-55): what the console is, in boot.log and the settings log.
   s_console_info = orbis_console_survey();
   orbis_eventf("console: %s", s_console_info.c_str());
@@ -1457,7 +1462,7 @@ int main()
     // e.g. games only on a USB drive not mounted yet). Now it says so and closes without the crash.
     printf("[boot] no game to start: closing\n");
     orbis_eventf("no game to start (no disc image found, or none picked): the app closed");
-    sys_notify("PS5SX2: no game to start. Put your .iso or .chd files in /data/PCSX2/games/ or on a USB drive, then start PS5SX2 again.");
+    sys_notify(fe::Tr(fe::Str::NotifyNoGame));
     orbis_exit_quietly(0);
   }
   {
@@ -1566,6 +1571,18 @@ int main()
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
   orbis_vu1_speed_from(s_base_si); // vk-285-75
+  {
+    // vk-285-110: the PS2 system language games are told (pcsx2/CDVD/CDVD.cpp): the PS5SX2/GameLanguage
+    // setting (0 Japanese .. 7 Portuguese, from gs.ini or the game's settings file), else the PS5's own
+    // language, mapped by fe::Ps2LanguageFor. PAL games with several languages start in it.
+    extern int g_orbis_ps2_language;
+    const int ps5 = orbis_ps5_language();
+    const int set = s_base_si.GetIntValue("PS5SX2", "GameLanguage", -1);
+    const bool fixed = set >= 0 && set <= 7;
+    g_orbis_ps2_language = fixed ? set : fe::Ps2LanguageFor(ps5);
+    printf("[boot] game language: %s (%s; PS5 language %d)\n", fe::Ps2LanguageName(g_orbis_ps2_language),
+      fixed ? "PS5SX2/GameLanguage" : "the PS5's", ps5);
+  }
 
   {
     Error pf_err;
@@ -1750,21 +1767,22 @@ int main()
     const GSRendererType renderer = EmuConfig.GS.Renderer;
     const char* api = renderer == GSRendererType::VK ? "Vulkan" : renderer == GSRendererType::OGL ? "OpenGL" : nullptr;
     char how[64];
+    // vk-285-110: in the PS5's language (fe_i18n.cpp).
     if (!api)
-      snprintf(how, sizeof(how), "software renderer");
+      snprintf(how, sizeof(how), "%s", fe::Tr(fe::Str::HowSoftware));
     else if (EmuConfig.GS.UpscaleMultiplier > 1.0f)
       snprintf(how, sizeof(how), "%gx %s", EmuConfig.GS.UpscaleMultiplier, api);
     else
-      snprintf(how, sizeof(how), "native %s", api);
+      snprintf(how, sizeof(how), fe::Tr(fe::Str::HowNative), api);
     char msg[512];
-    snprintf(msg, sizeof(msg), "Now playing: %s\n%s \xC2\xB7 have fun!", title.c_str(), how);
+    snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNowPlaying), title.c_str(), how);
     sys_notify(msg);
   }
   else
   {
     // vk-285-109: the reason too (a missing or unreadable image, an unknown disc type).
     char msg[512];
-    snprintf(msg, sizeof(msg), "PS5SX2: the game didn't start.\n%s", err.GetDescription().c_str());
+    snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNotStarted), err.GetDescription().c_str()); // vk-285-110
     sys_notify(msg);
     orbis_eventf("the game didn't start: VM init failed (%s)", err.GetDescription().c_str()); // vk-285-51
   }
@@ -2068,7 +2086,7 @@ int main()
 
   printf("[boot] smoke test window done - keeping emulator running\n");
   fflush(stdout);
-  sys_notify("PS5SX2: the game stopped");
+  sys_notify(fe::Tr(fe::Str::NotifyStopped));
   ps5::debug::set_line(2, "GAME RUNNING");
   ps5::debug::set_line(3, "keep-alive (no shutdown)");
   // Keep the VM running: VMManager::Shutdown would stop the emulation.

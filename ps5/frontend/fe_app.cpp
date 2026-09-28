@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "fe_app.h"
+#include "fe_i18n.h"
 
 #include <algorithm>
 #include <cmath>
@@ -40,15 +41,10 @@ uint32_t Rgba(float r, float g, float b, float a = 1.0f)
 	return c(r) | (c(g) << 8) | (c(b) << 16) | (c(a) << 24);
 }
 
+// vk-285-110: in the PS5's language ("4,2 Go"; fe_i18n.cpp).
 std::string SizeText(uint64_t bytes)
 {
-	char buf[32];
-	const double gb = static_cast<double>(bytes) / 1e9;
-	if (gb >= 1.0)
-		std::snprintf(buf, sizeof(buf), "%.1f GB", gb);
-	else
-		std::snprintf(buf, sizeof(buf), "%.0f MB", static_cast<double>(bytes) / 1e6);
-	return buf;
+	return Size(bytes);
 }
 
 // Screen position (0..1) of a world point.
@@ -452,7 +448,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		// the address beside it.
 	}
 	else if (m_web_known)
-		m_fonts->AddText(ui, "Game settings: no network", W - margin, H - 170.0f * k, 32.0f * k, faint, 0.1f, Fonts::Right);
+		m_fonts->AddText(ui, Tr(Str::NoNetwork), W - margin, H - 170.0f * k, 32.0f * k, faint, 0.1f, Fonts::Right);
 
 	if (n > 0)
 	{
@@ -474,7 +470,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			info += s;
 		};
 		add(g.serial);
-		add(g.region);
+		add(Region(g.region)); // vk-285-110: the region names in the PS5's language
 		add(SizeText(g.bytes));
 		const float info_px = 44.0f * k, badge_px = 36.0f * k;
 		const float pad = 20.0f * k, gap = 16.0f * k;
@@ -494,7 +490,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		}
 	}
 	else
-		m_fonts->AddText(ui, "No games in /data/PCSX2/games", W * 0.5f, H * 0.5f, 64.0f * k, white, 0.4f, Fonts::Center);
+		m_fonts->AddText(ui, Tr(Str::NoGames), W * 0.5f, H * 0.5f, 64.0f * k, white, 0.4f, Fonts::Center);
 
 	// Button hints.
 	const float hy = H - 88.0f * k, ipx = 64.0f * k, tpx = 40.0f * k;
@@ -522,13 +518,13 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		hx += m_fonts->AddText(ui, label, hx, hy, tpx, dim, 0.1f);
 		hx += 56.0f * k;
 	};
-	hint(icon::Cross, nullptr, "Play");
+	hint(icon::Cross, nullptr, Tr(Str::HintPlay)); // vk-285-110: hints in the PS5's language
 	// vk-285-69: the shelf opens with one game too (its QR code leads to the settings page and the
 	// logs); browsing needs two.
 	if (n > 1)
 	{
-		hint(icon::DpadLeftRight, nullptr, "Browse");
-		hint("#L1", "#R1", "Jump");
+		hint(icon::DpadLeftRight, nullptr, Tr(Str::HintBrowse));
+		hint("#L1", "#R1", Tr(Str::HintJump));
 	}
 
 	std::string status = m_covers ? m_covers->Status() : std::string();

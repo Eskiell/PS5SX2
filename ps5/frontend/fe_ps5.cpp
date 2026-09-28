@@ -11,6 +11,7 @@
 #include "fe_app.h"
 #include "fe_covers.h"
 #include "fe_games.h"
+#include "fe_i18n.h"
 #include "fe_renderer.h"
 #include "fe_sound.h"
 #include "fe_text.h"
@@ -775,6 +776,25 @@ int orbis_hide_splash()
 	return s_result.load();
 }
 
+int orbis_ps5_language()
+{
+	static int s_lang = -2;
+	if (s_lang == -2)
+	{
+		int v = 1;
+		const int rc = sceSystemServiceParamGetInt(1 /* language */, &v);
+		s_lang = rc == 0 ? v : 1;
+		std::printf("[i18n] system language: rc=%x value=%d\n", static_cast<unsigned>(rc), v);
+		std::fflush(stdout);
+	}
+	return s_lang;
+}
+
+void orbis_frontend_set_language(const std::string& lang_dir)
+{
+	fe::SetLanguage(orbis_ps5_language(), lang_dir);
+}
+
 static char g_event_log_path[256];
 
 void orbis_event_log_init(const std::string& path)
@@ -884,7 +904,8 @@ int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budge
 	if (notify)
 	{
 		char buf[96];
-		std::snprintf(buf, sizeof(buf), "PS5SX2: downloading %zu cover%s", missing.size(), missing.size() == 1 ? "" : "s");
+		std::snprintf(buf, sizeof(buf), fe::Tr(missing.size() == 1 ? fe::Str::NotifyCoversOne : fe::Str::NotifyCoversMany),
+			static_cast<int>(missing.size())); // vk-285-110
 		notify(buf);
 	}
 	const int saved = CoverService::Prefetch(games, missing, cc,

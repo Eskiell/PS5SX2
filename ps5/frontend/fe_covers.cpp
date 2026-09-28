@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "fe_covers.h"
+#include "fe_i18n.h"
 
 #include <algorithm>
 #include <cmath>
@@ -329,7 +330,7 @@ void CoverService::PaintPlaceholder(const Fonts& fonts, const GameInfo& g, Cover
 	}
 	std::string foot = g.serial;
 	if (!g.region.empty())
-		foot += (foot.empty() ? "" : "  \xC2\xB7  ") + g.region;
+		foot += (foot.empty() ? "" : "  \xC2\xB7  ") + Region(g.region); // vk-285-110: in the PS5's language
 	if (!foot.empty())
 	{
 		fonts.Raster(foot.c_str(), 18.0f, a, tw, th, base);
@@ -410,7 +411,7 @@ std::string CoverService::Status() const
 	if (m_busy && m_download_total > 0)
 	{
 		char buf[96];
-		std::snprintf(buf, sizeof(buf), "Downloading covers  %d / %d", m_download_done, m_download_total);
+		std::snprintf(buf, sizeof(buf), Tr(Str::DownloadingCovers), m_download_done, m_download_total); // vk-285-110
 		return buf;
 	}
 	return {};
