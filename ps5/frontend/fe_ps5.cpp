@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -235,6 +236,21 @@ struct Http
 	bool tried = false, ok = false, netctl = false;
 	int pool = -1, ssl = -1, ctx = -1, tmpl = -1;
 	std::atomic<int> active{-1}; // the request in flight, for Abort from the main thread
+	// vk-285-110: set by Abort, so a request that was still being set up when it ran doesn't start
+	// (Abort only reaches a request once `active` holds it).
+	std::atomic<bool> stopping{false};
+	// vk-285-110: Abort's call and the worker's delete of the same request never overlap.
+	std::mutex abort_mutex;
+
+	// The worker, done with `req`: out of `active` (after any Abort call on it), then deleted.
+	void Release(int req)
+	{
+		{
+			std::lock_guard<std::mutex> lock(abort_mutex);
+			active = -1;
+		}
+		sceHttp2DeleteRequest(req);
+	}
 
 	bool Init()
 	{
@@ -274,6 +290,8 @@ struct Http
 	// Main thread, at shutdown: fails the request in flight so the worker can finish.
 	void Abort()
 	{
+		stopping.store(true); // before reading `active`: Get stores `active`, then reads this
+		std::lock_guard<std::mutex> lock(abort_mutex);
 		const int req = active.load();
 		if (req >= 0)
 		{
@@ -298,13 +316,14 @@ struct Http
 			sceNetCtlTerm();
 		tmpl = ctx = ssl = pool = -1;
 		tried = ok = netctl = false;
+		stopping = false;
 	}
 
 	// The HTTP status, or -1 when the request could not be made at all. Every step is logged with
 	// its time: vk-285-41's first request never returned, and the log could not say where.
 	int Get(const std::string& url, std::vector<uint8_t>& out)
 	{
-		if (!Init())
+		if (stopping || !Init())
 			return -1;
 		const double t0 = Now();
 		auto ms = [&] { return (Now() - t0) * 1000.0; };
@@ -326,6 +345,13 @@ struct Http
 			static_cast<unsigned>(t_total), static_cast<unsigned>(redirect));
 		std::fflush(stdout);
 		active = req;
+		if (stopping) // Abort ran while this request was being set up, before `active` held it
+		{
+			Release(req);
+			std::printf("[frontend] get: stopped before sending\n");
+			std::fflush(stdout);
+			return -1;
+		}
 		int status = -1;
 		const int sent = sceHttp2SendRequest(req, nullptr, 0);
 		const int got = sent == 0 ? sceHttp2GetStatusCode(req, &status) : -1;
@@ -358,8 +384,7 @@ struct Http
 			std::printf("[frontend] get: %zu bytes in %.0f ms\n", out.size(), ms());
 			std::fflush(stdout);
 		}
-		active = -1;
-		sceHttp2DeleteRequest(req);
+		Release(req);
 		return status;
 	}
 };
@@ -1000,6 +1025,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	cc.cache_dir = paths.cache_dir;
 	cc.url_template = kCoverUrl;
 	cc.allow_download = paths.allow_download;
+	cc.download_usb_only = true; // vk-285-110: the rest came from the prefetch, before the jailbreak
 	covers->Start(games, fonts, cc, [](const std::string& url, std::vector<uint8_t>& out) { return g_http.Get(url, out); });
 
 	// The key sounds (vk-285-47). Without an audio port the shelf is simply quiet.

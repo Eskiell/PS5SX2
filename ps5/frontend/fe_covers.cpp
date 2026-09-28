@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -73,6 +74,32 @@ void MakeDirs(const std::string& path)
 		if ((path[i] == '/' && i > 0) || i + 1 == path.size())
 			mkdir(cur.c_str(), 0777);
 	}
+}
+
+// vk-285-110: for CoverFinder.
+constexpr const char* kImageExts[] = {".jpg", ".png", ".jpeg"};
+
+std::string LowerAscii(std::string s)
+{
+	for (char& c : s)
+		if (c >= 'A' && c <= 'Z')
+			c = static_cast<char>(c - 'A' + 'a');
+	return s;
+}
+
+// A file with something in it (not a folder, not an empty file from a copy that failed).
+bool IsCoverFile(const std::string& path)
+{
+	struct stat st = {};
+	return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+// A 404 from the cover server in the last two weeks (<serial>.missing in the cache).
+bool RecentlyMissing(const std::string& cache_dir, const std::string& serial)
+{
+	struct stat st = {};
+	return stat((cache_dir + "/" + serial + ".missing").c_str(), &st) == 0 &&
+		   std::time(nullptr) - st.st_mtime < 14 * 24 * 3600;
 }
 
 // The glow colour: the dominant saturated hue of the cover, brightened.
@@ -219,6 +246,143 @@ std::vector<std::string> Wrap(const Fonts& fonts, const std::string& text, float
 	return lines;
 }
 } // namespace
+
+// ---- vk-285-110: covers on USB drives ----
+
+std::string UsbDriveRoot(const std::string& path)
+{
+	// "/mnt/usb<n>/..." (fe_ps5.cpp lists /mnt/usb0 to /mnt/usb7)
+	if (path.compare(0, 8, "/mnt/usb") != 0)
+		return {};
+	size_t i = 8;
+	while (i < path.size() && path[i] >= '0' && path[i] <= '9')
+		i++;
+	if (i == 8 || i >= path.size() || path[i] != '/')
+		return {};
+	return path.substr(0, i);
+}
+
+std::string OplGameId(const std::string& serial)
+{
+	// SYSTEM.CNF's "SLUS_213.51" is the serial "SLUS-21351" (fe_games.cpp); OPL names ART files after the former.
+	if (serial.size() != 10 || serial[4] != '-')
+		return {};
+	for (size_t i = 0; i < 4; i++)
+		if (serial[i] < 'A' || serial[i] > 'Z')
+			return {};
+	for (size_t i = 5; i < 10; i++)
+		if (serial[i] < '0' || serial[i] > '9')
+			return {};
+	return serial.substr(0, 4) + "_" + serial.substr(5, 3) + "." + serial.substr(8, 2);
+}
+
+CoverFinder::CoverFinder(std::string manual_dir, std::string cache_dir)
+	: m_manual_dir(std::move(manual_dir))
+	, m_cache_dir(std::move(cache_dir))
+{
+}
+
+// The folder's names, listed on first use. A folder that can't be opened lists as empty.
+const CoverFinder::Names& CoverFinder::List(const std::string& dir)
+{
+	const auto it = m_lists.find(dir);
+	if (it != m_lists.end())
+		return it->second;
+	Names& names = m_lists[dir]; // references into an unordered_map survive later insertions
+	if (DIR* d = opendir(dir.c_str()))
+	{
+		while (const dirent* e = readdir(d))
+			if (e->d_name[0] != '.')
+				names.emplace(LowerAscii(e->d_name), e->d_name);
+		closedir(d);
+	}
+	return names;
+}
+
+// `dir`'s entry named `lower_name` in any letter case, as a path, or "".
+std::string CoverFinder::Subdir(const std::string& dir, const char* lower_name)
+{
+	if (dir.empty())
+		return {};
+	const Names& names = List(dir);
+	const auto it = names.find(lower_name);
+	return it == names.end() ? std::string() : dir + "/" + it->second;
+}
+
+// Adds `dir`/<base>.jpg/.png/.jpeg, in any letter case, when it's there.
+bool CoverFinder::Lookup(const std::string& dir, const std::string& base, const char* source, std::vector<CoverFile>& out)
+{
+	if (dir.empty() || base.empty())
+		return false;
+	const Names& names = List(dir);
+	if (names.empty())
+		return false;
+	const std::string lower = LowerAscii(base);
+	for (const char* ext : kImageExts)
+	{
+		const auto it = names.find(lower + ext);
+		if (it != names.end() && IsCoverFile(dir + "/" + it->second))
+		{
+			out.push_back({dir + "/" + it->second, source});
+			return true;
+		}
+	}
+	return false;
+}
+
+std::vector<CoverFile> CoverFinder::Find(const GameInfo& g)
+{
+	return Search(g, false);
+}
+
+CoverFile CoverFinder::Best(const GameInfo& g)
+{
+	std::vector<CoverFile> first = Search(g, true);
+	return first.empty() ? CoverFile() : std::move(first.front());
+}
+
+std::vector<CoverFile> CoverFinder::Search(const GameInfo& g, bool first_only)
+{
+	std::vector<CoverFile> out;
+	auto done = [&] { return first_only && !out.empty(); };
+	// The names a cover may have in a covers folder: the serial, the image's name, the title.
+	std::vector<std::string> names;
+	for (const std::string& n : {g.serial, g.stem, g.title})
+		if (!n.empty() && std::find(names.begin(), names.end(), n) == names.end())
+			names.push_back(n);
+	// 1. The covers folder, exact names (as before vk-285-110).
+	if (!m_manual_dir.empty())
+		for (const std::string& n : names)
+			for (const char* ext : kImageExts)
+				if (!done() && IsCoverFile(m_manual_dir + "/" + n + ext))
+					out.push_back({m_manual_dir + "/" + n + ext, "manual"});
+	if (done())
+		return out;
+	// 2. Beside the disc image, under its name. (A game from cache/usb-games.txt has no path.)
+	const size_t slash = g.path.rfind('/');
+	if (slash != std::string::npos && slash > 0 && Lookup(g.path.substr(0, slash), g.stem, "beside", out) && first_only)
+		return out;
+	// 3. A covers folder at the root of the game's USB drive.
+	const std::string drive = UsbDriveRoot(g.path);
+	const std::string drive_covers = Subdir(drive, "covers");
+	if (!drive_covers.empty())
+		for (const std::string& n : names)
+			if (!done())
+				Lookup(drive_covers, n, "drive", out);
+	if (done())
+		return out;
+	// 4. A download.
+	if (!g.serial.empty() && !m_cache_dir.empty() && IsCoverFile(m_cache_dir + "/" + g.serial + ".jpg"))
+		out.push_back({m_cache_dir + "/" + g.serial + ".jpg", "cache"});
+	if (done())
+		return out;
+	// 5. Open PS2 Loader's ART folder on the drive.
+	const std::string opl = OplGameId(g.serial);
+	const std::string art = opl.empty() ? std::string() : Subdir(drive, "art");
+	if (!art.empty())
+		Lookup(art, opl + "_COV", "art", out);
+	return out;
+}
 
 bool CoverService::Decode(const std::vector<uint8_t>& bytes, int max_h, CoverImage& out)
 {
@@ -434,42 +598,40 @@ int CoverService::NextGame(const std::vector<bool>& done) const
 	return best;
 }
 
-bool CoverService::FindCover(int index, CoverImage& out)
+bool CoverService::FindLocalCover(CoverFinder& finder, int index, CoverImage& out, bool& upgrade)
 {
 	const GameInfo& g = m_games[static_cast<size_t>(index)];
 	std::vector<uint8_t> bytes;
-	// 1. The user's own covers.
-	if (!m_cfg.manual_dir.empty())
-	{
-		std::vector<std::string> names;
-		if (!g.serial.empty())
-			names.push_back(g.serial);
-		names.push_back(g.stem);
-		names.push_back(g.title);
-		for (const std::string& n : names)
-			for (const char* ext : {".jpg", ".png", ".jpeg"})
-				if (ReadFile(m_cfg.manual_dir + "/" + n + ext, bytes) && Decode(bytes, 1024, out))
-				{
-					out.source = "manual";
-					return true;
-				}
-	}
-	if (g.serial.empty())
+	// The first file that decodes, best place first (CoverFinder).
+	for (const CoverFile& f : finder.Find(g))
+		if (ReadFile(f.path, bytes) && Decode(bytes, 1024, out))
+		{
+			out.source = f.source;
+			upgrade = std::strcmp(f.source, "art") == 0;
+			return true;
+		}
+	upgrade = true;
+	return false;
+}
+
+// A download for the game is worth a try: a serial, downloads allowed (on the shelf only for games on
+// USB drives), and no 404 for it in the last two weeks. (The network being down is checked as the
+// downloads go: m_offline.)
+bool CoverService::MayDownload(int index) const
+{
+	const GameInfo& g = m_games[static_cast<size_t>(index)];
+	return !g.serial.empty() && m_cfg.allow_download && m_download && !m_cfg.url_template.empty() &&
+		   (!m_cfg.download_usb_only || !UsbDriveRoot(g.path).empty()) && !RecentlyMissing(m_cfg.cache_dir, g.serial);
+}
+
+bool CoverService::DownloadCover(int index, CoverImage& out)
+{
+	const GameInfo& g = m_games[static_cast<size_t>(index)];
+	if (m_offline || m_stop)
 		return false;
-	// 2. A cover downloaded before.
 	const std::string cached = m_cfg.cache_dir + "/" + g.serial + ".jpg";
-	if (ReadFile(cached, bytes) && Decode(bytes, 1024, out))
-	{
-		out.source = "cache";
-		return true;
-	}
-	// 3. A download, unless the last try said there is none (for two weeks) or the network is down.
-	if (!m_cfg.allow_download || !m_download || m_offline || m_cfg.url_template.empty())
-		return false;
 	const std::string missing = m_cfg.cache_dir + "/" + g.serial + ".missing";
-	struct stat st = {};
-	if (stat(missing.c_str(), &st) == 0 && std::time(nullptr) - st.st_mtime < 14 * 24 * 3600)
-		return false;
+	std::vector<uint8_t> bytes;
 	std::string url = m_cfg.url_template;
 	const size_t at = url.find("${serial}");
 	if (at != std::string::npos)
@@ -492,7 +654,10 @@ bool CoverService::FindCover(int index, CoverImage& out)
 	else if (status < 0)
 		m_offline = true;
 	std::printf("[frontend] cover %s: %s -> %d%s\n", g.serial.c_str(), url.c_str(), status,
-		ok ? " (saved)" : (status < 0 ? " (network down; no more downloads this session)" : ""));
+		ok ? " (saved)" :
+		status >= 0 ? "" :
+		m_stop ? " (stopped: the shelf closed)" :
+				 " (network down; no more downloads this session)");
 	std::fflush(stdout);
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -504,22 +669,16 @@ bool CoverService::FindCover(int index, CoverImage& out)
 std::vector<int> CoverService::MissingCovers(const std::vector<GameInfo>& games, const CoverConfig& cfg)
 {
 	std::vector<int> missing;
-	struct stat st = {};
+	CoverFinder finder(cfg.manual_dir, cfg.cache_dir);
 	for (size_t i = 0; i < games.size(); i++)
 	{
 		const GameInfo& g = games[i];
 		if (g.serial.empty())
 			continue;
 		bool have = false;
-		if (!cfg.manual_dir.empty())
-			for (const std::string& n : {g.serial, g.stem, g.title})
-				for (const char* ext : {".jpg", ".png", ".jpeg"})
-					have = have || stat((cfg.manual_dir + "/" + n + ext).c_str(), &st) == 0;
-		have = have || stat((cfg.cache_dir + "/" + g.serial + ".jpg").c_str(), &st) == 0;
-		if (!have && stat((cfg.cache_dir + "/" + g.serial + ".missing").c_str(), &st) == 0 &&
-			std::time(nullptr) - st.st_mtime < 14 * 24 * 3600)
-			have = true;
-		if (!have)
+		for (const CoverFile& f : finder.Find(g))
+			have = have || std::strcmp(f.source, "art") != 0; // an OPL ART cover is worth replacing
+		if (!have && !RecentlyMissing(cfg.cache_dir, g.serial))
 			missing.push_back(static_cast<int>(i));
 	}
 	return missing;
@@ -586,31 +745,63 @@ void CoverService::Run()
 		m_results.push_back(std::move(spine));
 		m_results.push_back(std::move(hold));
 	}
-	// Then the covers, nearest the selection first. How many may need downloading is counted for
-	// the status line.
-	{
+	// Then the covers already on disk, nearest the selection first (vk-285-110: all of them before any
+	// download, so a slow or failing download never holds one back).
+	auto deliver = [this](int i, CoverImage& cover) {
+		cover.game = i;
+		cover.kind = CoverImage::Cover;
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_download_total = 0;
-		for (const GameInfo& g : m_games)
-		{
-			struct stat st = {};
-			if (!g.serial.empty() && stat((m_cfg.cache_dir + "/" + g.serial + ".jpg").c_str(), &st) != 0)
-				m_download_total++;
-		}
-	}
+		m_results.push_back(std::move(cover));
+	};
+	CoverFinder finder(m_cfg.manual_dir, m_cfg.cache_dir);
+	std::vector<bool> want(n, false); // a download is worth a try
+	int found = 0, wanted = 0;
+	std::string sources; // " (cache 11, beside 1)" for the log
+	std::vector<std::pair<std::string, int>> by_source;
 	done.assign(n, false);
 	for (size_t k = 0; k < n && !m_stop; k++)
 	{
 		const int i = NextGame(done);
 		done[static_cast<size_t>(i)] = true;
 		CoverImage cover;
-		if (FindCover(i, cover))
+		bool upgrade = true;
+		if (FindLocalCover(finder, i, cover, upgrade))
 		{
-			cover.game = i;
-			cover.kind = CoverImage::Cover;
-			std::lock_guard<std::mutex> lock(m_mutex);
-			m_results.push_back(std::move(cover));
+			found++;
+			auto it = std::find_if(by_source.begin(), by_source.end(), [&](const auto& s) { return s.first == cover.source; });
+			if (it == by_source.end())
+				by_source.emplace_back(cover.source, 1);
+			else
+				it->second++;
+			deliver(i, cover);
 		}
+		want[static_cast<size_t>(i)] = upgrade && MayDownload(i);
+		wanted += want[static_cast<size_t>(i)] ? 1 : 0;
+	}
+	for (const auto& s : by_source)
+		sources += (sources.empty() ? " (" : ", ") + s.first + " " + std::to_string(s.second);
+	if (!sources.empty())
+		sources += ")";
+	std::printf("[frontend] covers on disk: %d of %zu%s; %d to download%s\n", found, n, sources.c_str(), wanted,
+		m_cfg.allow_download ? "" : " (downloads off here)");
+	std::fflush(stdout);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_download_total = wanted;
+	}
+	// Then the downloads, nearest the selection first, until the network fails. After the HEN jailbreak
+	// HTTPS failed on vk-285-41/42; when it still does, the next start's prefetch fetches these.
+	for (size_t i = 0; i < n; i++)
+		done[i] = !want[i];
+	for (int k = 0; k < wanted && !m_stop && !m_offline; k++)
+	{
+		const int i = NextGame(done);
+		if (i < 0)
+			break;
+		done[static_cast<size_t>(i)] = true;
+		CoverImage cover;
+		if (DownloadCover(i, cover))
+			deliver(i, cover);
 	}
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_busy = false;

@@ -287,20 +287,10 @@ std::vector<PatchGroup> PatchGroups(const std::string& dir, const std::string& s
 	return out;
 }
 
-std::string CoverPath(const GameInfo& g, const std::string& manual_dir, const std::string& cache_dir)
+// The cover the shelf shows first (vk-285-110: CoverFinder, which also looks on the game's USB drive).
+std::string CoverPath(CoverFinder& finder, const GameInfo& g)
 {
-	if (!manual_dir.empty())
-		for (const std::string& n : {g.serial, g.stem, g.title})
-		{
-			if (n.empty())
-				continue;
-			for (const char* ext : {".jpg", ".png", ".jpeg"})
-				if (Exists(manual_dir + "/" + n + ext))
-					return manual_dir + "/" + n + ext;
-		}
-	if (!g.serial.empty() && Exists(cache_dir + "/" + g.serial + ".jpg"))
-		return cache_dir + "/" + g.serial + ".jpg";
-	return {};
+	return finder.Best(g).path;
 }
 
 // ---- recommended settings (vk-285-51) -------------------------------------------------------
@@ -971,6 +961,16 @@ std::vector<GameInfo> WebServer::Games()
 	return m_games;
 }
 
+CoverFinder& WebServer::Covers()
+{
+	if (!m_covers || Now() - m_covers_time > 10.0) // a picture copied in shows up within seconds
+	{
+		m_covers = std::make_unique<CoverFinder>(m_cfg.covers_dir, m_cfg.cache_dir);
+		m_covers_time = Now();
+	}
+	return *m_covers;
+}
+
 const GameInfo* WebServer::FindGame(const std::string& id, std::vector<GameInfo>& games)
 {
 	games = Games();
@@ -1008,6 +1008,7 @@ void WebServer::ApiGames(Response& res)
 		playing = m_now_playing;
 	}
 	std::string out = "[";
+	CoverFinder& finder = Covers();
 	for (const GameInfo& g : Games())
 	{
 		if (out.size() > 1)
@@ -1018,7 +1019,7 @@ void WebServer::ApiGames(Response& res)
 		badges += "]";
 		out += "{\"id\":" + Json(g.file) + ",\"title\":" + Json(g.title) + ",\"region\":" + Json(g.region) +
 		       ",\"serial\":" + Json(g.serial) + ",\"size\":" + std::to_string(g.bytes) + ",\"badges\":" + badges +
-		       ",\"cover\":" + (CoverPath(g, m_cfg.covers_dir, m_cfg.cache_dir).empty() ? "false" : "true") +
+		       ",\"cover\":" + (CoverPath(finder, g).empty() ? "false" : "true") +
 		       ",\"settings\":" + (Exists(m_cfg.settings_dir + "/" + g.stem + ".ini") ? "true" : "false") +
 		       ",\"playing\":" + (g.file == playing ? "true" : "false") + "}";
 	}
@@ -1029,7 +1030,7 @@ void WebServer::ApiCover(const Request& req, Response& res)
 {
 	std::vector<GameInfo> games;
 	const GameInfo* g = FindGame(QueryValue(req.query, "id"), games);
-	const std::string path = g ? CoverPath(*g, m_cfg.covers_dir, m_cfg.cache_dir) : std::string();
+	const std::string path = g ? CoverPath(Covers(), *g) : std::string();
 	if (path.empty() || !ReadFile(path, res.body))
 	{
 		res.status = 404;

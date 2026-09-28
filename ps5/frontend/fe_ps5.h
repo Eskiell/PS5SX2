@@ -18,6 +18,8 @@ struct OrbisFrontendPaths
 	std::string patches_dir;  // *.pnach, for the 16:9 badge
 	std::string covers_dir;   // covers the user supplies (PCSX2's covers folder)
 	std::string cache_dir;    // downloaded covers
+	// The prefetch's downloads; on the shelf (vk-285-110), a try at the covers of games on USB drives
+	// that are still missing after the jailbreak. Off with the nocoverdl flag.
 	bool allow_download = true;
 	bool sound = true;        // the shelf's key sounds (vk-285-47; off with the nomenusound flag)
 	std::string settings_log; // vk-285-51: logs/settings.log, what the settings page changed
@@ -48,7 +50,8 @@ bool orbis_frontend_watermark(const char* line1, const char* line2, const char* 
 // Before the HEN jailbreak: downloads the covers the cache lacks, for at most `budget_s` seconds.
 // HTTPS works there and failed after the jailbreak (vk-285-41/42). `notify` (may be null) is told
 // how many are coming before the first request. Returns how many it saved (0 when none were
-// missing, or with downloads off).
+// missing, or with downloads off). The covers of the games on USB drives come from
+// cache/usb-games.txt, the list the shelf wrote last time: the drives appear only after the jailbreak.
 int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budget_s, void (*notify)(const char*));
 
 // vk-285-50: the settings page's web server (fe_web.cpp), for phones and PCs on the LAN. Start it

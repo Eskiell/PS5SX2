@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <pthread.h>
+#include <unordered_map>
 #include <vector>
 
 namespace fe
@@ -46,11 +47,61 @@ struct CoverConfig
 	std::string cache_dir;  // downloads: <serial>.jpg, and <serial>.missing after a 404
 	std::string url_template; // "${serial}" is replaced
 	bool allow_download = true;
+	// vk-285-110: the shelf downloads only for games on USB drives (the prefetch before the jailbreak
+	// can't see those); every other cover comes from the prefetch, as before.
+	bool download_usb_only = false;
 };
 
 // Fetches `url` into `out`; returns the HTTP status (200 on success), or a negative value when the
 // network failed.
 using DownloadFn = std::function<int(const std::string& url, std::vector<uint8_t>& out)>;
+
+// vk-285-110: a cover file on disk, and which kind of place it was found in.
+struct CoverFile
+{
+	std::string path;
+	const char* source = ""; // "manual", "beside", "drive", "cache" or "art"
+};
+
+// vk-285-110: where a game's cover can be, best first:
+//   1. manual: the covers folder, <serial>, <file name> or <title> .jpg/.png/.jpeg (as before);
+//   2. beside: next to the disc image, under the image's name ("Game.iso" -> "Game.jpg", "Game.png");
+//   3. drive:  a "covers" folder at the root of the game's USB drive, names as in 1;
+//   4. cache:  a download (<serial>.jpg);
+//   5. art:    Open PS2 Loader's ART folder at the root of the game's USB drive, "<ELF name>_COV"
+//              .jpg/.png ("SLUS_213.51_COV.jpg"). These are often small, so a download still replaces
+//              them.
+// 2, 3 and 5 match names in any letter case (USB drives are FAT32 or exFAT). Only files that aren't
+// empty count. Each folder is listed once per finder: keep one finder for a whole pass over the
+// games, on one thread.
+class CoverFinder
+{
+public:
+	CoverFinder(std::string manual_dir, std::string cache_dir);
+
+	// The cover files `g` has, best first (empty when none).
+	std::vector<CoverFile> Find(const GameInfo& g);
+
+	// The first of them, or an empty path (stops looking at the first one found).
+	CoverFile Best(const GameInfo& g);
+
+private:
+	using Names = std::unordered_map<std::string, std::string>; // lower-case name -> the name on disk
+	std::vector<CoverFile> Search(const GameInfo& g, bool first_only);
+	const Names& List(const std::string& dir);
+	std::string Subdir(const std::string& dir, const char* lower_name);
+	bool Lookup(const std::string& dir, const std::string& base, const char* source, std::vector<CoverFile>& out);
+
+	std::string m_manual_dir, m_cache_dir;
+	std::unordered_map<std::string, Names> m_lists;
+};
+
+// vk-285-110: "/mnt/usb3" for a path on USB drive 3, else "".
+std::string UsbDriveRoot(const std::string& path);
+
+// vk-285-110: Open PS2 Loader's name for a game, "SLUS_213.51" for "SLUS-21351"; "" for a serial of
+// another shape.
+std::string OplGameId(const std::string& serial);
 
 class CoverService
 {
@@ -81,8 +132,9 @@ public:
 	// Decodes an image file's bytes to RGBA8, at most `max_h` rows tall; false if it isn't one.
 	static bool Decode(const std::vector<uint8_t>& bytes, int max_h, CoverImage& out);
 
-	// The games whose cover is none of: the user's own file, a cached download, a 404 in the last
-	// two weeks. For fetching them before the HEN jailbreak (fe_ps5.cpp, vk-285-44).
+	// The games whose cover is none of: the user's own file (CoverFinder's manual, beside or drive), a
+	// cached download, a 404 in the last two weeks. For fetching them before the HEN jailbreak
+	// (fe_ps5.cpp, vk-285-44). A game with only an OPL ART cover counts as missing (vk-285-110).
 	static std::vector<int> MissingCovers(const std::vector<GameInfo>& games, const CoverConfig& cfg);
 
 	// Downloads those covers into the cache, one after another, until `budget_s` seconds have
@@ -93,7 +145,12 @@ public:
 private:
 	static void* ThreadMain(void* self);
 	void Run();
-	bool FindCover(int index, CoverImage& out);
+	// vk-285-110: the covers on disk for every game first, then the downloads, so a slow or failing
+	// download never holds back a cover that is already there. `upgrade`: a download is still worth
+	// trying (no cover, or only an OPL ART one).
+	bool FindLocalCover(CoverFinder& finder, int index, CoverImage& out, bool& upgrade);
+	bool MayDownload(int index) const;
+	bool DownloadCover(int index, CoverImage& out);
 	int NextGame(const std::vector<bool>& done) const;
 
 	std::vector<GameInfo> m_games;

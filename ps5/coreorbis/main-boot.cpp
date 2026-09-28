@@ -1444,8 +1444,13 @@ int main()
   orbis_scan_usb("after the jailbreak"); // test build 1: games on USB drives
   if (!orbis_flag("nowebui"))
     orbis_web_start(orbis_frontend_paths(false), orbis_build_label().c_str());
+  // vk-285-110: the shelf tries the missing covers of games on USB drives (the prefetch above can't see
+  // the drives) in the background, after the covers on disk. Nothing else downloads after the jailbreak.
+  // HTTPS failed there on vk-285-41/42, with etaHEN's jailbreak; with the PS5SX2 Helper's it hasn't been
+  // tried, and boot.log's "[frontend] cover ..." lines will show it. When it fails, the next start's
+  // prefetch fetches them from cache/usb-games.txt, as before.
   if (!orbis_flag("nofrontend") && !orbis_flag("nomenu"))
-    s_game_path = orbis_frontend_run(orbis_frontend_paths(false), ORBIS_BUILD_TAG, &frontend_ran);
+    s_game_path = orbis_frontend_run(orbis_frontend_paths(!orbis_flag("nocoverdl")), ORBIS_BUILD_TAG, &frontend_ran);
 #endif
 #ifdef ORBIS_VULKAN
   // vk-285-53: the system's launch screen (sce_sys/pic1.dds) covers the app until it is hidden. The

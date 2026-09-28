@@ -12,11 +12,13 @@
 
 #pragma once
 
+#include "fe_covers.h"
 #include "fe_games.h"
 
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -108,6 +110,9 @@ private:
 
 	const GameInfo* FindGame(const std::string& id, std::vector<GameInfo>& games);
 	std::vector<GameInfo> Games();
+	// vk-285-110: the covers' lookup (CoverFinder), kept between requests so the page's one request per
+	// cover doesn't list the same USB folders again each time; made again after 10 s, like the list.
+	CoverFinder& Covers();
 
 	void ApiState(Response& res);
 	void ApiGames(Response& res);
@@ -125,6 +130,8 @@ private:
 	std::string m_token;
 	std::thread m_thread;
 	std::atomic<bool> m_stop{false};
+	std::unique_ptr<CoverFinder> m_covers; // the server thread only (vk-285-110)
+	double m_covers_time = -1e9;
 
 	mutable std::mutex m_mutex; // the fields below
 	std::string m_now_playing;
