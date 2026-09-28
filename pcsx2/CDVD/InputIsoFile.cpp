@@ -226,10 +226,8 @@ bool InputIsoFile::Open(std::string srcfile, Error* error)
 
 	Console.WriteLn("  Image type  = %s", nameFromType(m_type));
 	//Console.WriteLn("  Fileparts   = %u", m_numparts); // Pointless print, it's 1 unless it says otherwise above
-	DevCon.WriteLn("  blocks      = %u", m_blocks);
-	DevCon.WriteLn("  offset      = %d", m_offset);
-	DevCon.WriteLn("  blocksize   = %u", m_blocksize);
-	DevCon.WriteLn("  blockoffset = %d", m_blockofs);
+	// PS5 port (vk-285-109): in the release log too, for CHD images (their layout decides these).
+	Console.WriteLn("  blocks = %u, offset = %d, blocksize = %u, blockoffset = %d", m_blocks, m_offset, m_blocksize, m_blockofs);
 
 	return true;
 }

@@ -35,6 +35,10 @@ std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs);
 // (a DVD's 2048-byte units or a CD's raw frames); one that needs a parent CHD reads as empty.
 std::string ReadSerial(const std::string& image_path);
 
+// vk-285-109: what a CHD is (header, codecs, first track, data offset, or why libchdr can't open it), for
+// the log when ReadSerial found no serial in it; empty for other images.
+std::string DescribeImage(const std::string& image_path);
+
 // vk-285-108: where ReadSerial keeps the CHD serials it found (opening a CHD costs tens of milliseconds);
 // empty: none kept.
 void SetSerialCacheFile(const std::string& path);

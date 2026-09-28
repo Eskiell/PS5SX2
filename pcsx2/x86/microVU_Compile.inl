@@ -136,7 +136,7 @@ void doIbit(mV)
 		mVU.regAlloc->clearRegVF(33);
 		if (EmuConfig.Gamefixes.IbitHack)
 		{
-			xMOV(gprT1, ptr32[&curI]);
+			mVUloadCurI(mVU, gprT1); // vk-285-109
 			xMOV(ptr32[&mVU.getVI(REG_I)], gprT1);
 		}
 		else

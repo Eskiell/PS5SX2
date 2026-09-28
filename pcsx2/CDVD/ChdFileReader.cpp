@@ -397,6 +397,31 @@ bool ChdFileReader::Open2(std::string filename, Error* error)
 		file_size = static_cast<u64>(chd_header->unitbytes) * chd_header->unitcount;
 	}
 
+	// PS5 port (vk-285-109): what the image is, for the testers' logs (createcd vs createdvd images, codecs).
+	{
+		char codecs[32] = {};
+		for (int i = 0; i < 4; i++)
+		{
+			const u32 c = chd_header->compression[i];
+			if (!c)
+				continue;
+			const size_t n = std::strlen(codecs);
+			// v5: a four-letter code; v1-v4: a number (1 zlib, 2 zlib+, 3 A/V).
+			if (((c >> 24) & 0xff) >= 0x20 && ((c >> 16) & 0xff) >= 0x20 && ((c >> 8) & 0xff) >= 0x20 && (c & 0xff) >= 0x20)
+				std::snprintf(codecs + n, sizeof(codecs) - n, "%s%c%c%c%c", n ? "," : "", static_cast<char>(c >> 24),
+					static_cast<char>(c >> 16), static_cast<char>(c >> 8), static_cast<char>(c));
+			else
+				std::snprintf(codecs + n, sizeof(codecs) - n, "%s#%u", n ? "," : "", c);
+		}
+		char track[256] = {};
+		u32 track_len = 0;
+		if (chd_get_metadata(ChdFile, CDROM_TRACK_METADATA2_TAG, 0, track, sizeof(track) - 1, &track_len, nullptr, nullptr) != CHDERR_NONE)
+			chd_get_metadata(ChdFile, CDROM_TRACK_METADATA_TAG, 0, track, sizeof(track) - 1, &track_len, nullptr, nullptr);
+		Console.WriteLn("CHD: v%u, %u-byte units, %u-byte hunks, %llu bytes of data, codecs %s%s%s", chd_header->version,
+			chd_header->unitbytes, chd_header->hunkbytes, static_cast<unsigned long long>(file_size), codecs[0] ? codecs : "none",
+			track[0] ? ", first track " : "", track);
+	}
+
 	return true;
 }
 

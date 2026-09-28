@@ -130,7 +130,7 @@ static std::string orbis_ini_summary(const std::string& path)
 namespace {
 struct OrbisPadData { uint32_t buttons; uint8_t lx, ly, rx, ry, l2, r2, pad0, pad1; uint8_t rest[256]; };
 
-static void orbis_pad_axis(u32 pos, u32 neg, int v, int center)
+static void orbis_pad_axis(u32 port, u32 pos, u32 neg, int v, int center)
 {
   // v: 0..255, center ~128. Small deadzone; PCSX2 applies its own on top.
   const int d = v - center;
@@ -138,8 +138,8 @@ static void orbis_pad_axis(u32 pos, u32 neg, int v, int center)
   float fp = 0.0f, fn = 0.0f;
   if (d > dz) fp = std::min(1.0f, (d - dz) / (127.0f - dz));
   if (d < -dz) fn = std::min(1.0f, (-d - dz) / (128.0f - dz));
-  Pad::SetControllerState(0, pos, fp);
-  Pad::SetControllerState(0, neg, fn);
+  Pad::SetControllerState(port, pos, fp);
+  Pad::SetControllerState(port, neg, fn);
 }
 
 extern "C" {
@@ -149,6 +149,9 @@ int scePadGetHandle(int32_t userId, int32_t type, int32_t index);
 int scePadReadState(int32_t handle, void *data);
 int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int32_t *userId);
+// vk-285-109: the users logged in on the PS5, four ids, -1 for none (how the PS5 SDL port's joystick code
+// reads it: ps5-payload-dev/SDL src/joystick/ps5/SDL_ps5joystick.c).
+int sceUserServiceGetLoginUserIdList(int32_t *userIds);
 }
 
 // ---- Orbis sampling profiler (flag /data/PCSX2/prof): ITIMER_PROF -> SIGPROF on the running thread,
@@ -218,6 +221,81 @@ static void orbis_prof_start()
   if (pthread_create(&t, nullptr, orbis_prof_report_thread, nullptr) == 0) pthread_detach(t);
 }
 
+// vk-285-109: player 2. The PS5 ties each controller to a logged-in user; when a second user is logged in
+// at game start, PS2 port 2 gets a DualShock 2 and the pad thread reads that user's controller too (a
+// tester: "No second controller recognized in Fifa Street 2"). -1: one user, port 2 stays empty.
+static int32_t g_orbis_second_user = -1;
+
+static int32_t orbis_find_second_user(int32_t first)
+{
+  int32_t ids[16]; // four used; room to spare in case the list is longer on some firmware
+  for (int32_t &id : ids)
+    id = -1;
+  if (sceUserServiceGetLoginUserIdList(ids) != 0)
+    return -1;
+  for (int i = 0; i < 4; i++)
+    if (ids[i] != -1 && ids[i] != first)
+      return ids[i];
+  return -1;
+}
+
+// vk-285-109: one controller's buttons, triggers and sticks into a PS2 port (port 0 was the only one).
+struct OrbisPadPort
+{
+  u32 port = 0;
+  int32_t handle = -1;
+  uint32_t last_buttons = 0;
+  uint8_t last[6] = {0, 0, 128, 128, 128, 128};
+};
+
+// vk-285-109: whether the controller behind a handle is connected: the byte 76 bytes into the pad data (after
+// the buttons, sticks, triggers, padding, quaternion, velocity, acceleration and touch data; ScePadData's
+// "connected", which the PS5 SDL port reads as PS5_PadData.connected). A second user often stays logged in
+// with the controller off: player 2 then gets a neutral pad rather than whatever the read returns.
+static_assert(offsetof(OrbisPadData, rest) == 12, "OrbisPadData: the fields before rest are 12 bytes");
+static bool orbis_pad_connected(const OrbisPadData &d)
+{
+  return d.rest[76 - 12] != 0;
+}
+
+static void orbis_pad_apply(OrbisPadPort &p, const OrbisPadData &d)
+{
+  static const struct { uint32_t mask; u32 bind; } map[] = {
+    {0x00000010, PadDualshock2::Inputs::PAD_UP}, {0x00000020, PadDualshock2::Inputs::PAD_RIGHT},
+    {0x00000040, PadDualshock2::Inputs::PAD_DOWN}, {0x00000080, PadDualshock2::Inputs::PAD_LEFT},
+    {0x00001000, PadDualshock2::Inputs::PAD_TRIANGLE}, {0x00002000, PadDualshock2::Inputs::PAD_CIRCLE},
+    {0x00004000, PadDualshock2::Inputs::PAD_CROSS}, {0x00008000, PadDualshock2::Inputs::PAD_SQUARE},
+    {0x00100000, PadDualshock2::Inputs::PAD_SELECT}, {0x00000001, PadDualshock2::Inputs::PAD_SELECT},
+    {0x00000008, PadDualshock2::Inputs::PAD_START},
+    {0x00000400, PadDualshock2::Inputs::PAD_L1}, {0x00000800, PadDualshock2::Inputs::PAD_R1},
+    {0x00000002, PadDualshock2::Inputs::PAD_L3}, {0x00000004, PadDualshock2::Inputs::PAD_R3},
+  };
+  uint32_t select = 0;
+  for (const auto &m : map)
+    if (m.bind == PadDualshock2::Inputs::PAD_SELECT)
+      select |= d.buttons & m.mask;
+  if (d.buttons != p.last_buttons)
+  {
+    for (const auto &m : map)
+    {
+      if (m.bind == PadDualshock2::Inputs::PAD_SELECT)
+        continue;
+      if ((d.buttons ^ p.last_buttons) & m.mask)
+        Pad::SetControllerState(p.port, m.bind, (d.buttons & m.mask) ? 1.0f : 0.0f);
+    }
+    Pad::SetControllerState(p.port, PadDualshock2::Inputs::PAD_SELECT, select ? 1.0f : 0.0f);
+    p.last_buttons = d.buttons;
+  }
+  uint8_t *const last = p.last;
+  if (d.l2 != last[0]) Pad::SetControllerState(p.port, PadDualshock2::Inputs::PAD_L2, d.l2 / 255.0f);
+  if (d.r2 != last[1]) Pad::SetControllerState(p.port, PadDualshock2::Inputs::PAD_R2, d.r2 / 255.0f);
+  if (d.lx != last[2]) orbis_pad_axis(p.port, PadDualshock2::Inputs::PAD_L_RIGHT, PadDualshock2::Inputs::PAD_L_LEFT, d.lx, 128);
+  if (d.ly != last[3]) orbis_pad_axis(p.port, PadDualshock2::Inputs::PAD_L_DOWN, PadDualshock2::Inputs::PAD_L_UP, d.ly, 128);
+  if (d.rx != last[4]) orbis_pad_axis(p.port, PadDualshock2::Inputs::PAD_R_RIGHT, PadDualshock2::Inputs::PAD_R_LEFT, d.rx, 128);
+  if (d.ry != last[5]) orbis_pad_axis(p.port, PadDualshock2::Inputs::PAD_R_DOWN, PadDualshock2::Inputs::PAD_R_UP, d.ry, 128);
+  last[0] = d.l2; last[1] = d.r2; last[2] = d.lx; last[3] = d.ly; last[4] = d.rx; last[5] = d.ry;
+}
+
 static void *orbis_pad_thread(void *)
 {
   auto p_read = [](int32_t h, OrbisPadData *d) { return scePadReadState(h, d); };
@@ -233,17 +311,21 @@ static void *orbis_pad_thread(void *)
   fflush(stdout);
   if (handle < 0)
     return nullptr;
-  static const struct { uint32_t mask; u32 bind; } map[] = {
-    {0x00000010, PadDualshock2::Inputs::PAD_UP}, {0x00000020, PadDualshock2::Inputs::PAD_RIGHT},
-    {0x00000040, PadDualshock2::Inputs::PAD_DOWN}, {0x00000080, PadDualshock2::Inputs::PAD_LEFT},
-    {0x00001000, PadDualshock2::Inputs::PAD_TRIANGLE}, {0x00002000, PadDualshock2::Inputs::PAD_CIRCLE},
-    {0x00004000, PadDualshock2::Inputs::PAD_CROSS}, {0x00008000, PadDualshock2::Inputs::PAD_SQUARE},
-    {0x00100000, PadDualshock2::Inputs::PAD_SELECT}, {0x00000001, PadDualshock2::Inputs::PAD_SELECT},
-    {0x00000008, PadDualshock2::Inputs::PAD_START},
-    {0x00000400, PadDualshock2::Inputs::PAD_L1}, {0x00000800, PadDualshock2::Inputs::PAD_R1},
-    {0x00000002, PadDualshock2::Inputs::PAD_L3}, {0x00000004, PadDualshock2::Inputs::PAD_R3},
-  };
-  uint32_t last_buttons = 0;
+  OrbisPadPort port1;
+  port1.port = 0;
+  port1.handle = handle;
+  // vk-285-109: player 2's controller, when a second user was logged in at game start (main() gave PS2
+  // port 2 a DualShock 2 then).
+  OrbisPadPort port2;
+  port2.port = 1;
+  if (g_orbis_second_user != -1)
+  {
+    port2.handle = scePadOpen(g_orbis_second_user, 0, 0, nullptr);
+    if (port2.handle < 0)
+      port2.handle = scePadGetHandle(g_orbis_second_user, 0, 0);
+    printf("[pad] player 2: user=%d handle=%d\n", g_orbis_second_user, port2.handle);
+    fflush(stdout);
+  }
   unsigned reads = 0;
   for (;;)
   {
@@ -324,33 +406,36 @@ static void *orbis_pad_thread(void *)
         if (s_x_consumed)
           d.buttons &= ~0x00004000u;
       }
-      uint32_t select = 0;
-      for (const auto &m : map)
-        if (m.bind == PadDualshock2::Inputs::PAD_SELECT)
-          select |= d.buttons & m.mask;
-      if (d.buttons != last_buttons)
-      {
-        for (const auto &m : map)
-        {
-          if (m.bind == PadDualshock2::Inputs::PAD_SELECT)
-            continue;
-          if ((d.buttons ^ last_buttons) & m.mask)
-            Pad::SetControllerState(0, m.bind, (d.buttons & m.mask) ? 1.0f : 0.0f);
-        }
-        Pad::SetControllerState(0, PadDualshock2::Inputs::PAD_SELECT, select ? 1.0f : 0.0f);
-        last_buttons = d.buttons;
-      }
-      static uint8_t last[6] = {0, 0, 128, 128, 128, 128};
-      if (d.l2 != last[0]) Pad::SetControllerState(0, PadDualshock2::Inputs::PAD_L2, d.l2 / 255.0f);
-      if (d.r2 != last[1]) Pad::SetControllerState(0, PadDualshock2::Inputs::PAD_R2, d.r2 / 255.0f);
-      if (d.lx != last[2]) orbis_pad_axis(PadDualshock2::Inputs::PAD_L_RIGHT, PadDualshock2::Inputs::PAD_L_LEFT, d.lx, 128);
-      if (d.ly != last[3]) orbis_pad_axis(PadDualshock2::Inputs::PAD_L_DOWN, PadDualshock2::Inputs::PAD_L_UP, d.ly, 128);
-      if (d.rx != last[4]) orbis_pad_axis(PadDualshock2::Inputs::PAD_R_RIGHT, PadDualshock2::Inputs::PAD_R_LEFT, d.rx, 128);
-      if (d.ry != last[5]) orbis_pad_axis(PadDualshock2::Inputs::PAD_R_DOWN, PadDualshock2::Inputs::PAD_R_UP, d.ry, 128);
-      last[0] = d.l2; last[1] = d.r2; last[2] = d.lx; last[3] = d.ly; last[4] = d.rx; last[5] = d.ry;
+      orbis_pad_apply(port1, d);
     }
     if (++reads == 250u || (rc != 0 && reads % 1000u == 0u))
       printf("[pad] read rc=%x buttons=%08x lx=%u ly=%u\n", rc, d.buttons, d.lx, d.ly);
+    if (port2.handle >= 0)
+    {
+      OrbisPadData d2;
+      memset(&d2, 0, sizeof(d2));
+      const int rc2 = p_read(port2.handle, &d2);
+      const bool on = rc2 == 0 && orbis_pad_connected(d2);
+      if (on)
+        orbis_pad_apply(port2, d2);
+      else
+      {
+        // Released buttons, centred sticks: nothing held on port 2 while its controller is off.
+        OrbisPadData idle;
+        memset(&idle, 0, sizeof(idle));
+        idle.lx = idle.ly = idle.rx = idle.ry = 128;
+        orbis_pad_apply(port2, idle);
+      }
+      static int s_port2_on = -1;
+      if (s_port2_on != (on ? 1 : 0))
+      {
+        printf("[pad] player 2 controller %s (rc=%x)\n", on ? "connected" : "not connected", rc2);
+        s_port2_on = on ? 1 : 0;
+      }
+      if (reads == 250u || (rc2 != 0 && reads % 1000u == 0u))
+        printf("[pad] player 2 read rc=%x buttons=%08x lx=%u ly=%u connected=%u\n", rc2, d2.buttons, d2.lx, d2.ly,
+          static_cast<unsigned>(d2.rest[76 - 12]));
+    }
     usleep(4000);
   }
   return nullptr;
@@ -882,6 +967,35 @@ void OrbisBackToMenuCpu()
   VMManager::SetState(VMState::Stopping);
 }
 
+// vk-285-109: the end of the process without the static destructors and exit handlers, which abort when
+// PCSX2 is only half started (a failed start, or no game): the logs out first.
+[[noreturn]] static void orbis_exit_quietly(int status)
+{
+  orbis_log_drain();
+  fflush(stdout);
+  fflush(stderr);
+  _exit(status);
+}
+
+// vk-285-109: our own eboot again, into the shelf, after a start that failed (the VM never ran, so no memory
+// card or NVRAM to write back). Returns when LoadExec doesn't take.
+static void orbis_restart_to_menu()
+{
+  const char* path = "/data/homebrew/PPSA99203/eboot.bin";
+  struct stat st{};
+  if (stat(path, &st) != 0)
+    path = "/app0/eboot.bin";
+  printf("[menu] the game didn't start: re-executing %s\n", path);
+  orbis_log_drain();
+  fflush(stdout);
+  fflush(stderr);
+  const int rc = sceSystemServiceLoadExec(path, nullptr);
+  if (rc == 0)
+    for (int i = 0; i < 100; i++)
+      usleep(100000);
+  printf("[menu] LoadExec(%s) returned %x: closing instead\n", path, (unsigned)rc);
+}
+
 // vk-285-48: the VM has stopped for the menu. The memory cards' RAM cache and the NVRAM go back to
 // disk, then our own eboot is executed again: its startup (the jailbreak included, as for the eboot
 // watcher's new builds) ends in the frontend, with this game preselected. When LoadExec fails, the
@@ -1336,7 +1450,16 @@ int main()
   if (!frontend_ran)
     s_game_path = orbis_select_game(OrbisDir("games").c_str(), "/data/PCSX2", ORBIS_BUILD_TAG); // vk-285-33: games/ too
   if (s_game_path.empty())
-    s_game_path = OrbisDir("games") + "/Ratchet & Clank.iso";
+  {
+    // vk-285-109: no game to start (none found, or none picked). This fell back to games/Ratchet & Clank.iso,
+    // which failed wherever that file isn't ("VM init failed"), and the process then aborted on its way out:
+    // the signal 6 crashes in the testers' logs (vk-285-71 to 105, consoles with no image visible at start,
+    // e.g. games only on a USB drive not mounted yet). Now it says so and closes without the crash.
+    printf("[boot] no game to start: closing\n");
+    orbis_eventf("no game to start (no disc image found, or none picked): the app closed");
+    sys_notify("PS5SX2: no game to start. Put your .iso or .chd files in /data/PCSX2/games/ or on a USB drive, then start PS5SX2 again.");
+    orbis_exit_quietly(0);
+  }
   {
     // vk-285-32: its settings file, named after the image without the extension.
     std::string stem = s_game_path.substr(s_game_path.rfind('/') + 1);
@@ -1429,6 +1552,17 @@ int main()
     s_base_si.SetStringValue("USB2", "Type", "hidmouse");
   }
   printf("[boot] USB keyboard and mouse %s\n", orbis_flag("nousbkbm") ? "off (flag nousbkbm)" : "on ports 1 and 2");
+  {
+    // vk-285-109: player 2 (see g_orbis_second_user).
+    int32_t first = -1;
+    (void)sceUserServiceInitialize(nullptr);
+    (void)sceUserServiceGetInitialUser(&first);
+    g_orbis_second_user = orbis_find_second_user(first);
+    if (g_orbis_second_user != -1)
+      s_base_si.SetStringValue("Pad2", "Type", "DualShock2");
+    printf("[boot] users: first %d, second %d: PS2 port 2 %s\n", first, g_orbis_second_user,
+      g_orbis_second_user != -1 ? "gets a DualShock 2 for the second user's controller" : "stays empty");
+  }
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
   orbis_vu1_speed_from(s_base_si); // vk-285-75
@@ -1628,14 +1762,25 @@ int main()
   }
   else
   {
-    sys_notify("PS5SX2: the game didn't start (VM init failed)");
+    // vk-285-109: the reason too (a missing or unreadable image, an unknown disc type).
+    char msg[512];
+    snprintf(msg, sizeof(msg), "PS5SX2: the game didn't start.\n%s", err.GetDescription().c_str());
+    sys_notify(msg);
     orbis_eventf("the game didn't start: VM init failed (%s)", err.GetDescription().c_str()); // vk-285-51
   }
   ps5::debug::set_line(1, "Initialize=%d", (int)res);
   ps5::debug::set_line(2, "%s", res == VMBootResult::StartupSuccess ? "VM INIT OK" : "VM INIT FAILED");
   ps5::debug::set_line(3, "%s", err.GetDescription().c_str());
   if (res != VMBootResult::StartupSuccess)
-    return 1;
+  {
+    // vk-285-109: back to the shelf rather than out: returning from main here aborted (signal 6) with PCSX2
+    // half started, a crash on top of the failed start. Only when the game came from the shelf, which waits
+    // for a pick: the plain list's automatic picks (the only image, the nomenu flag, no controller or
+    // display) would choose the same image again, and fail again, in a loop.
+    if (frontend_ran)
+      orbis_restart_to_menu();
+    orbis_exit_quietly(1);
+  }
 
   // Must be Running before Execute: IsExecutionInterrupted() returns true for any
   // other state, which makes the first event test exit the interpreter immediately.

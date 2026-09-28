@@ -370,6 +370,25 @@ __fi std::optional<xAddressVoid> mVUoptimizeConstantAddr(mV, u32 srcreg, s32 off
 	}
 }
 
+// PS5 port (vk-285-109): the current instruction's I word, read by the code the I-bit hack compiles
+// (EmuConfig.Gamefixes.IbitHack: Scarface, Killzone, ShellShock: Nam '67, Call of Duty 2: Big Red One, Crash
+// Tag Team Racing). The VU micro memory lies above 4 GB on the PS5 (0x605000000), where ptr32[&curI] can't
+// reach: the emitter truncated the address to 32 bits, and the programs took their immediates from unrelated
+// memory (the testers' vk-285-73 to 108 logs: [sibwarn] from mVU_LQ, mVU_SQ, mVU_ILW, mVU_IADDIU and doIbit in
+// Scarface and ShellShock). The address goes through dst's own 64-bit register, which the load overwrites.
+// It is loaded 8 bytes short and read at [reg + 8]: without a displacement, [r13] encodes as RIP-relative (the
+// emitter adds the displacement only for rbp), and r13 can be dst where the EE's allocator hands out VI
+// registers (COP2). With an 8-bit displacement every register encodes right except rsp and r12, which need a
+// SIB byte the emitter doesn't add here; neither is ever given out (r12 is gprF0). Checked on the host: the
+// emitter's bytes for each register, disassembled.
+__fi void mVUloadCurI(mV, const xRegister32& dst)
+{
+	pxAssertMsg((dst.GetId() & 7) != 4, "mVUloadCurI: rsp or r12 as the address register");
+	const xAddressReg dst64(dst);
+	xMOV64(dst64, (sptr)&curI - 8);
+	xMOV(dst, ptr32[dst64 + 8]);
+}
+
 //------------------------------------------------------------------
 // Micro VU - Custom SSE Instructions
 //------------------------------------------------------------------

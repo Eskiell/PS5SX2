@@ -1353,6 +1353,9 @@ void WebServer::ApiReport(const Request& req, Response& res)
 		section(logs + "/stderr" + ss.suffix + ".log", ss.what, ss.err, 32 * 1024);
 	}
 	section(logs + "/ps5vk-hang.txt", "the last GPU hang the driver caught", 64 * 1024, 32 * 1024);
+	// vk-285-109: PCSX2's own dump of a GPU hang (GSDeviceVK.cpp), which settings.log points to; the reports
+	// of Driv3r's hangs on vk-285-94 came without it.
+	section(logs + "/vkhang.txt", "the last GPU hang PCSX2 caught", 64 * 1024, 32 * 1024);
 	section(logs + "/pf.log", "page faults this session", 64 * 1024, 16 * 1024);
 
 	// The settings, the switches and what is on the console.

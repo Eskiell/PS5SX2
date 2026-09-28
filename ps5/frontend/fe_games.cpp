@@ -96,8 +96,10 @@ private:
 };
 
 // vk-285-108: a CHD through libchdr. A DVD image (chdman createdvd) holds 2048-byte units; a CD image
-// (createcd) raw 2448-byte frames (2352 of sector, 96 of subcode), whose data starts 24 bytes in (mode 2,
-// the PS2's CDs) or 16 (mode 1). Read() stays inside one sector, so a CD sector never spans two frames.
+// (createcd) 2448-byte frames (2352 of sector, 96 of subcode). In a frame the data starts 24 bytes in for a
+// raw mode 2 track (the PS2's CDs from a .cue/.bin), 16 for raw mode 1, and at 0 for a track chdman got as
+// 2048-byte sectors (vk-285-109: createcd from an .iso, which people do with DVD games too), 8 for 2336-byte
+// mode 2. Read() stays inside one sector, so a CD sector never spans two frames.
 class ChdSectors final : public SectorReader
 {
 public:
@@ -109,30 +111,80 @@ public:
 
 	bool Open(const std::string& path)
 	{
-		if (chd_open(path.c_str(), CHD_OPEN_READ, nullptr, &m_chd) != CHDERR_NONE)
+		const chd_error err = chd_open(path.c_str(), CHD_OPEN_READ, nullptr, &m_chd);
+		if (err != CHDERR_NONE)
 		{
 			m_chd = nullptr; // a CHD that needs its parent reads as no serial (PCSX2 finds the parent itself)
+			m_what = std::string("libchdr can't open it: ") + chd_error_string(err);
 			return false;
 		}
 		const chd_header* const h = chd_get_header(m_chd);
 		if (!h || h->hunkbytes == 0 || h->unitbytes == 0)
+		{
+			m_what = "no hunk or unit size in its header";
 			return false;
+		}
 		m_unit = h->unitbytes;
 		m_hunk_bytes = h->hunkbytes;
 		m_buf.resize(m_hunk_bytes);
+		char meta[256] = {};
+		uint32_t len = 0;
+		if (chd_get_metadata(m_chd, CDROM_TRACK_METADATA2_TAG, 0, meta, sizeof(meta) - 1, &len, nullptr, nullptr) == CHDERR_NONE ||
+			chd_get_metadata(m_chd, CDROM_TRACK_METADATA_TAG, 0, meta, sizeof(meta) - 1, &len, nullptr, nullptr) == CHDERR_NONE)
+			m_track = meta;
+		char codecs[64] = {};
+		for (int i = 0; i < 4; i++)
+		{
+			const uint32_t c = h->compression[i];
+			if (c == 0)
+				continue;
+			// v5: a four-letter code (zlib, lzma, cdlz...); v1-v4: a number (1 zlib, 2 zlib+, 3 A/V).
+			char tag[16];
+			const bool fourcc = ((c >> 24) & 0xff) >= 0x20 && ((c >> 16) & 0xff) >= 0x20 && ((c >> 8) & 0xff) >= 0x20 && (c & 0xff) >= 0x20;
+			if (fourcc)
+				std::snprintf(tag, sizeof(tag), "%c%c%c%c", static_cast<char>(c >> 24), static_cast<char>(c >> 16), static_cast<char>(c >> 8),
+					static_cast<char>(c));
+			else
+				std::snprintf(tag, sizeof(tag), "#%u", c);
+			std::snprintf(codecs + std::strlen(codecs), sizeof(codecs) - std::strlen(codecs), "%s%s", codecs[0] ? "," : "", tag);
+		}
+		char what[512];
+		std::snprintf(what, sizeof(what), "v%u, %u-byte units, %u-byte hunks, %llu MB of data, codecs %s%s%s", h->version,
+			h->unitbytes, h->hunkbytes, static_cast<unsigned long long>(h->logicalbytes >> 20), codecs[0] ? codecs : "none",
+			m_track.empty() ? "" : ", track ", m_track.c_str());
+		m_what = what;
 		if (m_unit != 2352 && m_unit != 2448)
 			return true; // 2048-byte sectors back to back
-		// A CD: the data offset that puts the volume descriptor ("\1CD001") at sector 16.
-		for (const uint32_t offset : {24u, 16u})
+		// A CD: the data offset that puts the volume descriptor ("\1CD001") at sector 16, the track type's first.
+		// The TYPE field ("TRACK:1 TYPE:MODE2_RAW SUBTYPE:NONE ..."; not PGTYPE, the pregap's type).
+		std::string type;
+		const size_t t = m_track.find(" TYPE:");
+		if (t != std::string::npos)
+			type = m_track.substr(t + 6, m_track.find(' ', t + 6) - (t + 6));
+		uint32_t first = 24;
+		if (type == "MODE1_RAW")
+			first = 16;
+		else if (type == "MODE1" || type == "MODE2_FORM1")
+			first = 0;
+		else if (type == "MODE2" || type == "MODE2_FORM_MIX")
+			first = 8;
+		for (const uint32_t offset : {first, 24u, 16u, 0u, 8u})
 		{
 			m_offset = offset;
 			uint8_t pvd[6];
 			if (Read(16, pvd, sizeof(pvd)) && pvd[0] == 1 && std::memcmp(pvd + 1, "CD001", 5) == 0)
+			{
+				m_what += ", data " + std::to_string(offset) + " bytes into each frame";
 				return true;
+			}
 		}
-		m_offset = 24;
+		m_what += ", no ISO 9660 volume descriptor at sector 16 at any data offset";
+		m_offset = first;
 		return true;
 	}
+
+	// What the image is, for the log (vk-285-109): the header, the codecs, the first track, the data offset.
+	const std::string& What() const { return m_what; }
 
 	bool Read(uint32_t lba, void* buf, size_t len) override
 	{
@@ -181,6 +233,8 @@ private:
 	uint32_t m_offset = 0;
 	uint64_t m_cached = ~0ull; // the hunk in m_buf
 	std::vector<uint8_t> m_buf;
+	std::string m_track; // the first track's metadata (CD images)
+	std::string m_what;
 };
 
 // "SLUS-21351" from SYSTEM.CNF's BOOT2 line, found in the root directory of the ISO 9660 file system.
@@ -313,6 +367,15 @@ std::string ChdSerial(const std::string& path)
 	return serial;
 }
 } // namespace
+
+std::string DescribeImage(const std::string& image_path)
+{
+	if (!HasExtension(image_path.c_str(), ".chd"))
+		return {};
+	ChdSectors disc;
+	disc.Open(image_path);
+	return disc.What();
+}
 
 bool IsDiscImageName(const char* name)
 {

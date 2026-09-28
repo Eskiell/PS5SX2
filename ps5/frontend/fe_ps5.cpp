@@ -912,6 +912,13 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 		// Test build 1: the size too (a disc image of an odd size is often a bad dump), and the folder.
 		std::printf("[frontend] %s | %s | %s | %llu bytes | %s\n", g.file.c_str(), g.serial.empty() ? "no serial" : g.serial.c_str(),
 			g.title.c_str(), static_cast<unsigned long long>(g.bytes), g.path.substr(0, g.path.rfind('/')).c_str());
+		// vk-285-109: a CHD without a serial says what it is.
+		if (g.serial.empty())
+		{
+			const std::string what = DescribeImage(g.path);
+			if (!what.empty())
+				std::printf("[frontend]   chd: %s\n", what.c_str());
+		}
 	}
 	std::printf("[frontend] %zu disc image(s), %d on USB, scanned in %.0f ms\n", games.size(), on_usb, (Now() - t0) * 1000.0);
 	std::fflush(stdout);

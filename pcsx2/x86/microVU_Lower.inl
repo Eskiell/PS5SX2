@@ -853,10 +853,13 @@ mVUop(mVU_IADDI)
 	pass1 { mVUanalyzeIADDI(mVU, _Is_, _It_, _Imm5_); }
 	pass2
 	{
+		// PS5 port (vk-285-109): the I-bit hack reads the instruction from VU micro memory at iPC, which is 0 for
+		// the EE's COP2 macro VIADDI (setupMacroOp): upstream read VU0's micro word 0 there. The macro op's own
+		// immediate is right.
 		if (_Is_ == 0)
 		{
 			const xRegister32& regT = mVU.regAlloc->allocGPR(-1, _It_, mVUlow.backupVI);
-			if (!EmuConfig.Gamefixes.IbitHack)
+			if (!EmuConfig.Gamefixes.IbitHack || isCOP2) // vk-285-109: see above
 			{
 				if (_Imm5_ != 0)
 					xMOV(regT, _Imm5_);
@@ -865,7 +868,7 @@ mVUop(mVU_IADDI)
 			}
 			else
 			{
-				xMOV(regT, ptr32[&curI]);
+				mVUloadCurI(mVU, regT); // vk-285-109
 				xSHL(regT, 21);
 				xSAR(regT, 27);
 			}
@@ -874,14 +877,14 @@ mVUop(mVU_IADDI)
 		else
 		{
 			const xRegister32& regS = mVU.regAlloc->allocGPR(_Is_, _It_, mVUlow.backupVI);
-			if (!EmuConfig.Gamefixes.IbitHack)
+			if (!EmuConfig.Gamefixes.IbitHack || isCOP2) // vk-285-109
 			{
 				if (_Imm5_ != 0)
 					xADD(regS, _Imm5_);
 			}
 			else
 			{
-				xMOV(gprT1, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT1); // vk-285-109
 				xSHL(gprT1, 21);
 				xSAR(gprT1, 27);
 
@@ -911,7 +914,7 @@ mVUop(mVU_IADDIU)
 			}
 			else
 			{
-				xMOV(regT, ptr32[&curI]);
+				mVUloadCurI(mVU, regT); // vk-285-109
 				xMOV(gprT1, regT);
 				xSHR(gprT1, 10);
 				xAND(gprT1, 0x7800);
@@ -930,7 +933,7 @@ mVUop(mVU_IADDIU)
 			}
 			else
 			{
-				xMOV(gprT1, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT1); // vk-285-109
 				xMOV(gprT2, gprT1);
 				xSHR(gprT2, 10);
 				xAND(gprT2, 0x7800);
@@ -1015,7 +1018,7 @@ mVUop(mVU_ISUBIU)
 		}
 		else
 		{
-			xMOV(gprT1, ptr32[&curI]);
+			mVUloadCurI(mVU, gprT1); // vk-285-109
 			xMOV(gprT2, gprT1);
 			xSHR(gprT2, 10);
 			xAND(gprT2, 0x7800);
@@ -1169,7 +1172,7 @@ mVUop(mVU_ILW)
 			}
 			else
 			{
-				xMOV(gprT2, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT2); // vk-285-109
 				xSHL(gprT2, 21);
 				xSAR(gprT2, 21);
 
@@ -1257,7 +1260,7 @@ mVUop(mVU_ISW)
 			}
 			else
 			{
-				xMOV(gprT2, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT2); // vk-285-109
 				xSHL(gprT2, 21);
 				xSAR(gprT2, 21);
 
@@ -1360,7 +1363,7 @@ mVUop(mVU_LQ)
 			}
 			else
 			{
-				xMOV(gprT2, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT2); // vk-285-109
 				xSHL(gprT2, 21);
 				xSAR(gprT2, 21);
 
@@ -1473,7 +1476,7 @@ mVUop(mVU_SQ)
 			}
 			else
 			{
-				xMOV(gprT2, ptr32[&curI]);
+				mVUloadCurI(mVU, gprT2); // vk-285-109
 				xSHL(gprT2, 21);
 				xSAR(gprT2, 21);
 
