@@ -45,6 +45,7 @@ Expect rough edges. Bug reports with logs are very welcome, and so is patience.
 
 - **A jailbroken PS5.** Development happens on a PS5 Pro on firmware 11.40. Other models and firmware haven't been tested.
 - **The PS5SX2 Helper payload**, from the releases, loaded together with kstuff. It's based on OnionHEN. It jailbreaks PS5SX2 when it starts, which the emulator's recompilers need, and gives the app access to `/data`.
+- **[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)**, loaded at every boot like kstuff. It mounts PS5SX2 from `/data/homebrew/PPSA99203/` and puts it on the home screen.
 - **Your own PS2 BIOS**, dumped from your own console.
 - **Your own games**, as `.iso` files.
 
@@ -52,10 +53,10 @@ No BIOS, games or keys come with PS5SX2.
 
 ## Getting started
 
-1. Copy the app from the release to `/data/homebrew/PPSA99203/` and install it like your other homebrew.
+1. Copy the app from the release to `/data/homebrew/PPSA99203/`. ShadowMountPlus finds it there and adds it to the home screen.
 2. Put your BIOS in `/data/PCSX2/bios/` and your games in `/data/PCSX2/games/`.
 3. Add `PPSA99203` to `/data/whitelist.txt`, on a line of its own.
-4. Load the PS5SX2 Helper, then start PS5SX2 from the home screen.
+4. Load kstuff, ShadowMountPlus and the PS5SX2 Helper, then start PS5SX2 from the home screen.
 
 The first start downloads the covers for your games, then the shelf opens.
 
@@ -155,6 +156,7 @@ The PS5 layer lives in [`ps5/`](ps5/). [`ps5/README.md`](ps5/README.md) covers t
 - **[xlenore/ps2-covers](https://github.com/xlenore/ps2-covers),** for the covers the shelf downloads.
 - **[PS Rewired](https://psrewired.com),** for keeping PS2 online games alive.
 - **OnionHEN,** which the PS5SX2 Helper is based on.
+- **drakmor,** for [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus), and **VoidWhisper,** for ShadowMount, which it's based on.
 - **Project Nayuki's QR Code generator and Font Awesome Free:** see [`ps5/README.md`](ps5/README.md) for their licences.
 
 ## Licence
