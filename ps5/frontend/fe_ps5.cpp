@@ -746,14 +746,14 @@ std::vector<std::string> orbis_usb_game_dirs(const char* when)
 	return dirs;
 }
 
-bool orbis_frontend_watermark(const char* line1, const char* line2, float alpha1, float alpha2, std::vector<uint32_t>& rgba,
-	int& w, int& h)
+bool orbis_frontend_watermark(const char* line1, const char* line2, const char* line3, float alpha1, float alpha2,
+	std::vector<uint32_t>& rgba, int& w, int& h)
 {
 	Fonts fonts;
 	if (!fonts.Init(fe_font_text, static_cast<size_t>(fe_font_text_end - fe_font_text), fe_font_icons,
 			static_cast<size_t>(fe_font_icons_end - fe_font_icons)))
 		return false;
-	RasterWatermark(fonts, line1, line2, alpha1, alpha2, rgba, w, h);
+	RasterWatermark(fonts, line1, line2, line3, alpha1, alpha2, rgba, w, h);
 	return true;
 }
 
@@ -1003,6 +1003,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	acfg.build_tag = build_tag ? build_tag : "";
 	acfg.test_build = paths.test_build;   // test build 1: the TESTING watermark
 	acfg.build_label = paths.build_label;
+	acfg.test_note = paths.test_note; // vk-285-105
 	acfg.preselect = preselect;
 	acfg.sound = mixer;
 	bool ok = app.Init(&renderer, fonts, games, covers, acfg);

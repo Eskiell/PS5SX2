@@ -361,8 +361,8 @@ void Fonts::Raster(const char* utf8, float px, std::vector<uint8_t>& alpha, int&
 }
 
 // Test build 1 (vk-285-55): see fe_text.h.
-void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, float alpha1, float alpha2,
-	std::vector<uint32_t>& rgba, int& w, int& h)
+void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, const char* line3, float alpha1,
+	float alpha2, std::vector<uint32_t>& rgba, int& w, int& h)
 {
 	// The text in white; bold made by thickening Roboto Regular's coverage (a small max filter).
 	struct Line
@@ -407,13 +407,14 @@ void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, f
 		}
 		return l;
 	};
-	const Line a = raster(line1, 300.0f, 5), b = raster(line2, 76.0f, 1);
-	const int shadow = 5, gap = 18, pad = 12;
-	w = std::max(a.w, b.w) + 2 * pad + shadow;
-	h = a.h + (b.h ? gap + b.h : 0) + 2 * pad + shadow;
+	// vk-285-105: line3, the Discord note, smaller under the build.
+	const Line a = raster(line1, 300.0f, 5), b = raster(line2, 76.0f, 1), c = raster(line3, 48.0f, 1);
+	const int shadow = 5, gap = 18, gap3 = 14, pad = 12;
+	w = std::max(std::max(a.w, b.w), c.w) + 2 * pad + shadow;
+	h = a.h + (b.h ? gap + b.h : 0) + (c.h ? gap3 + c.h : 0) + 2 * pad + shadow;
 	// Coverage of the text and of its shadow, then straight-alpha RGBA: white text over black shadow.
 	std::vector<float> text(static_cast<size_t>(w) * h, 0.0f), shade(text.size(), 0.0f);
-	auto put = [&](const Line& l, int ox, int oy, float alpha) {
+	auto put = [&](const Line& l, int ox, int oy, float alpha, int sh) {
 		for (int y = 0; y < l.h; y++)
 			for (int x = 0; x < l.w; x++)
 			{
@@ -422,13 +423,15 @@ void RasterWatermark(const Fonts& fonts, const char* line1, const char* line2, f
 					continue;
 				float& t0 = text[static_cast<size_t>(oy + y) * w + ox + x];
 				t0 = std::max(t0, c);
-				float& s0 = shade[static_cast<size_t>(oy + y + shadow) * w + ox + x + shadow];
+				float& s0 = shade[static_cast<size_t>(oy + y + sh) * w + ox + x + sh];
 				s0 = std::max(s0, c * 0.6f);
 			}
 	};
-	put(a, pad + (w - 2 * pad - shadow - a.w) / 2, pad, alpha1);
+	put(a, pad + (w - 2 * pad - shadow - a.w) / 2, pad, alpha1, shadow);
 	if (b.h)
-		put(b, pad + (w - 2 * pad - shadow - b.w) / 2, pad + a.h + gap, alpha2);
+		put(b, pad + (w - 2 * pad - shadow - b.w) / 2, pad + a.h + gap, alpha2, shadow);
+	if (c.h) // a closer shadow for the small line
+		put(c, pad + (w - 2 * pad - shadow - c.w) / 2, pad + a.h + (b.h ? gap + b.h : 0) + gap3, alpha2, 3);
 	rgba.assign(static_cast<size_t>(w) * h, 0u);
 	for (size_t i = 0; i < rgba.size(); i++)
 	{

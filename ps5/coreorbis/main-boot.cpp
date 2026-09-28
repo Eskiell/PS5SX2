@@ -741,6 +741,15 @@ static std::string orbis_build_label()
   return "Test build " + std::to_string(g_orbis_test_build) + " \xC2\xB7 " ORBIS_BUILD_TAG;
 }
 
+// vk-285-105 (Spyros): testing builds point at the testers' Discord, in smaller text under the build
+// on the shelf and over the game. Empty in a normal build.
+static std::string orbis_test_note()
+{
+  if (g_orbis_test_build <= 0)
+    return std::string();
+  return "Join: https://discord.gg/7gZxXt4PM";
+}
+
 // Test build 1: what the console is, for the logs. Only calls every app may make; the SoC id
 // call gets a pointer too, so it works whichever of the two forms it has (the value comes back
 // either as the result or through the pointer).
@@ -928,6 +937,7 @@ static OrbisFrontendPaths orbis_frontend_paths(bool allow_download)
   fe.usb_list = OrbisDir("cache") + "/usb-games.txt";
   fe.test_build = g_orbis_test_build;
   fe.build_label = orbis_build_label();
+  fe.test_note = orbis_test_note(); // vk-285-105
   fe.logs_dir = OrbisDir("logs");
   fe.report_header = orbis_report_header();
   fe.games_dir = OrbisDir("games");
@@ -1346,9 +1356,9 @@ int main()
   if (g_orbis_test_build > 0)
   {
     // Test build 1 (vk-285-55): the watermark over the game (GSRenderer.cpp OrbisWatermark):
-    // TESTING and the build, faint, in the middle of the screen.
-    const std::string label = orbis_build_label();
-    const bool wm = orbis_frontend_watermark("TESTING", label.c_str(), 0.20f, 0.45f, g_orbis_watermark,
+    // TESTING and the build, faint, in the middle of the screen; vk-285-105: the Discord note under them.
+    const std::string label = orbis_build_label(), note = orbis_test_note();
+    const bool wm = orbis_frontend_watermark("TESTING", label.c_str(), note.c_str(), 0.20f, 0.45f, g_orbis_watermark,
       g_orbis_watermark_w, g_orbis_watermark_h);
     printf("[boot] testing watermark: %s (%dx%d)\n", wm ? "ready" : "no font", g_orbis_watermark_w, g_orbis_watermark_h);
     fflush(stdout);

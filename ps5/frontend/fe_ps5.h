@@ -26,6 +26,7 @@ struct OrbisFrontendPaths
 	std::string usb_list;              // cache/usb-games.txt: the USB games seen, for the next start's cover prefetch
 	int test_build = 0;                // > 0: a testing build; the shelf shows TESTING and this label
 	std::string build_label;           // "Test build 1 · vk-285-55", or the plain tag
+	std::string test_note;             // vk-285-105: testing builds, under the label (the testers' Discord)
 	std::string logs_dir;              // logs/: the settings page's logs download reads the sessions there
 	std::string report_header;         // that download's first lines: build, sources, console
 };
@@ -36,11 +37,12 @@ struct OrbisFrontendPaths
 // [usb] lines it prints (null: silent).
 std::vector<std::string> orbis_usb_game_dirs(const char* when);
 
-// Test build 1 (vk-285-55): the watermark drawn over the game in testing builds: `line1` big and
-// `line2` under it, white with a soft shadow, at the given opacities, sized for a 2160-line screen.
-// RGBA8 pixels (R in the low byte, straight alpha), `w` x `h`. False if the font didn't load.
-bool orbis_frontend_watermark(const char* line1, const char* line2, float alpha1, float alpha2, std::vector<uint32_t>& rgba,
-	int& w, int& h);
+// Test build 1 (vk-285-55): the watermark drawn over the game in testing builds: `line1` big,
+// `line2` under it and `line3` (vk-285-105, may be null) smaller under that, white with a soft
+// shadow, at the given opacities (line3 at line2's), sized for a 2160-line screen. RGBA8 pixels (R in
+// the low byte, straight alpha), `w` x `h`. False if the font didn't load.
+bool orbis_frontend_watermark(const char* line1, const char* line2, const char* line3, float alpha1, float alpha2,
+	std::vector<uint32_t>& rgba, int& w, int& h);
 
 // Before the HEN jailbreak: downloads the covers the cache lacks, for at most `budget_s` seconds.
 // HTTPS works there and failed after the jailbreak (vk-285-41/42). `notify` (may be null) is told

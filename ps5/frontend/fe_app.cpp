@@ -550,12 +550,22 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		const float base = H * 0.5f + m_fonts->Ascent(px) * 0.36f;
 		m_fonts->AddText(ui, "TESTING", W * 0.5f + 5.0f * k, base + 5.0f * k, px, Rgba(0, 0, 0, 0.30f), 0.95f, Fonts::Center);
 		m_fonts->AddText(ui, "TESTING", W * 0.5f, base, px, Rgba(1, 1, 1, 0.42f), 0.95f, Fonts::Center);
+		float below = base + m_fonts->Descent(px); // the bottom of the last line drawn
 		if (!m_cfg.build_label.empty())
 		{
-			const float sub_base = base + m_fonts->Descent(px) + sub_px * 1.1f;
+			const float sub_base = below + sub_px * 1.1f;
 			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f + 3.0f * k, sub_base + 3.0f * k, sub_px, Rgba(0, 0, 0, 0.45f),
 				0.5f, Fonts::Center);
 			m_fonts->AddText(ui, m_cfg.build_label.c_str(), W * 0.5f, sub_base, sub_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
+			below = sub_base + m_fonts->Descent(sub_px);
+		}
+		// vk-285-105: the Discord note, smaller, under the build.
+		if (!m_cfg.test_note.empty())
+		{
+			const float note_px = 44.0f * k, note_base = below + note_px * 1.25f;
+			m_fonts->AddText(ui, m_cfg.test_note.c_str(), W * 0.5f + 2.0f * k, note_base + 2.0f * k, note_px, Rgba(0, 0, 0, 0.45f),
+				0.5f, Fonts::Center);
+			m_fonts->AddText(ui, m_cfg.test_note.c_str(), W * 0.5f, note_base, note_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
 		}
 	}
 }
