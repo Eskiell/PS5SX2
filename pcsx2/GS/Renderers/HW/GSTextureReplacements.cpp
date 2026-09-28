@@ -160,6 +160,11 @@ namespace GSTextureReplacements
 #include "OrbisDeferredLog.h"
 #include <atomic>
 #include <chrono>
+#include <pthread.h>
+// vk-285-112 (GSRenderer.cpp): the loader thread runs on the pin layout's helper CPUs. It starts with its
+// creator's CPUs, the GS thread's, and a 16 MB PNG takes a while to decode.
+void OrbisHelperThreadAdd(pthread_t thread);
+void OrbisHelperThreadRemove(pthread_t thread);
 namespace
 {
 	struct OrbisTexRep
@@ -182,6 +187,22 @@ namespace
 										n.region_width, n.region_height, n.bits);
 		return n.HasPalette() ? StringUtil::StdStringFromFormat(TEXTURE_FILENAME_CLUT_FORMAT_STRING, n.TEX0Hash, n.CLUTHash, n.bits) :
 								StringUtil::StdStringFromFormat(TEXTURE_FILENAME_FORMAT_STRING, n.TEX0Hash, n.bits);
+	}
+
+	// vk-285-112: the decoded copies s_replacement_texture_cache keeps, in bytes (under its mutex). PCSX2 keeps
+	// every loaded replacement in memory until the game changes; the PS5 app has ~150 MB of heap left while a game
+	// runs, and one 2048x2048 replacement is 16 MB (Spyros's R&C pack has dozens). Past this budget a copy is
+	// dropped once it's on the GPU, and a texture the hash cache lets go is read from its file again when the game
+	// uses it next. Needs proper testing.
+	size_t s_orbis_cache_bytes = 0;
+	constexpr size_t ORBIS_CACHE_BUDGET = 48u << 20;
+
+	size_t OrbisReplacementBytes(const GSTextureReplacements::ReplacementTexture& r)
+	{
+		size_t n = r.data.size();
+		for (const auto& m : r.mips)
+			n += m.data.size();
+		return n;
 	}
 
 	// Once in 5 s at most, when something changed: the counters.
@@ -439,6 +460,9 @@ void GSTextureReplacements::ReloadReplacementMap()
 		s_replacement_texture_cache.clear();
 		s_pending_async_load_textures.clear();
 		s_async_loaded_textures.clear();
+#ifdef ORBIS_VULKAN
+		s_orbis_cache_bytes = 0;
+#endif
 	}
 
 	// can't replace bios textures.
@@ -675,11 +699,25 @@ GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache:
 
 		// insert into cache
 		std::unique_lock<std::mutex> lock(s_replacement_texture_cache_mutex);
+#ifdef ORBIS_VULKAN
+		const auto cit = s_replacement_texture_cache.emplace(name, std::move(replacement.value())).first;
+		const ReplacementTexture& rtex = cit->second;
+		s_orbis_cache_bytes += OrbisReplacementBytes(rtex);
+		*alpha_minmax = rtex.alpha_minmax;
+		GSTexture* const orbis_tex = CreateReplacementTexture(rtex, mipmap);
+		if (s_orbis_cache_bytes > ORBIS_CACHE_BUDGET) // vk-285-112: on the GPU now; keep no copy past the budget
+		{
+			s_orbis_cache_bytes -= OrbisReplacementBytes(cit->second);
+			s_replacement_texture_cache.erase(cit);
+		}
+		return orbis_tex;
+#else
 		const ReplacementTexture& rtex = s_replacement_texture_cache.emplace(name, std::move(replacement.value())).first->second;
 
 		// and upload to gpu
 		*alpha_minmax = rtex.alpha_minmax;
 		return CreateReplacementTexture(rtex, mipmap);
+#endif
 	}
 }
 
@@ -831,6 +869,9 @@ void GSTextureReplacements::QueueAsyncReplacementTextureLoad(const TextureName& 
 		// insert into the cache and queue for later injection
 		if (replacement.has_value())
 		{
+#ifdef ORBIS_VULKAN
+			s_orbis_cache_bytes += OrbisReplacementBytes(replacement.value());
+#endif
 			s_replacement_texture_cache.emplace(name, std::move(replacement.value()));
 			s_async_loaded_textures.emplace_back(name, mipmap);
 		}
@@ -844,6 +885,12 @@ void GSTextureReplacements::QueueAsyncReplacementTextureLoad(const TextureName& 
 
 void GSTextureReplacements::PrecacheReplacementTextures()
 {
+#ifdef ORBIS_VULKAN
+	// vk-285-112: loading a whole pack into memory up front doesn't fit the PS5 app's heap (see
+	// ORBIS_CACHE_BUDGET); replacements load when the game first uses them.
+	OrbisDeferredPrintf("[texrep] preloading every replacement is off on the PS5; they load as the game uses them\n");
+	return;
+#endif
 	std::unique_lock<std::mutex> lock(s_replacement_texture_cache_mutex);
 
 	// predict whether the requests will come with mipmaps
@@ -870,6 +917,9 @@ void GSTextureReplacements::ClearReplacementTextures()
 	s_replacement_texture_cache.clear();
 	s_pending_async_load_textures.clear();
 	s_async_loaded_textures.clear();
+#ifdef ORBIS_VULKAN
+	s_orbis_cache_bytes = 0;
+#endif
 }
 
 GSTexture* GSTextureReplacements::CreateReplacementTexture(const ReplacementTexture& rtex, bool mipmap)
@@ -948,6 +998,14 @@ void GSTextureReplacements::ProcessAsyncLoadedTextures()
 		GSTexture* tex = CreateReplacementTexture(it->second, mipmap);
 		if (tex)
 			g_texture_cache->InjectHashCacheTexture(HashCacheKeyFromTextureName(name), tex, it->second.alpha_minmax);
+#ifdef ORBIS_VULKAN
+		// vk-285-112: on the GPU now; keep no copy past the budget
+		if (s_orbis_cache_bytes > ORBIS_CACHE_BUDGET)
+		{
+			s_orbis_cache_bytes -= OrbisReplacementBytes(it->second);
+			s_replacement_texture_cache.erase(it);
+		}
+#endif
 	}
 	s_async_loaded_textures.clear();
 #ifdef ORBIS_VULKAN
@@ -1033,6 +1091,9 @@ void GSTextureReplacements::StartWorkerThread()
 
 	s_worker_thread_running = true;
 	s_worker_thread = std::thread(WorkerThreadEntryPoint);
+#ifdef ORBIS_VULKAN
+	OrbisHelperThreadAdd(s_worker_thread.native_handle()); // vk-285-112
+#endif
 }
 
 void GSTextureReplacements::StopWorkerThread()
@@ -1046,6 +1107,9 @@ void GSTextureReplacements::StopWorkerThread()
 		s_worker_thread_cv.notify_one();
 	}
 
+#ifdef ORBIS_VULKAN
+	OrbisHelperThreadRemove(s_worker_thread.native_handle()); // vk-285-112: before the thread ends
+#endif
 	s_worker_thread.join();
 
 	// clear out workery-things too

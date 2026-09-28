@@ -1,6 +1,13 @@
 // Orbis opendir/readdir/closedir backed by sceKernelOpen + sceKernelGetdents.
 // The libc opendir in libSceLibcInternal returns EPERM in the bigapp sandbox;
 // the direct kernel path is proven working (native-iso-probe-03).
+//
+// vk-285-112: each open directory has its own dirent, as POSIX has it (valid until the next readdir on the
+// same DIR, or closedir). Until 111 one thread-local dirent served every open directory, so a walk that
+// reads a subfolder while its parent is open lost the parent's entry: PCSX2's recursive FindFiles passes
+// the parent's d_name down as the subfolder's name, the subfolder's first readdir overwrote it, and every
+// path in the subfolder came out as <folder>/<name>/<name>. Texture replacement packs (files in subfolders
+// of textures/<serial>/replacements) were never found.
 #include <sys/dirent.h>
 #include <cstddef>
 #include <cstring>
@@ -25,6 +32,7 @@ struct OrbisDIR
     size_t offset;
     size_t length;
     bool eof;
+    dirent entry; // vk-285-112: this directory's own (see above)
 };
 
 extern "C" DIR* opendir(const char* name)
@@ -55,8 +63,8 @@ extern "C" struct dirent* readdir(DIR* dirp)
         const size_t namlen = static_cast<unsigned char>(p[7]);
         if (reclen >= 12 && reclen % 4 == 0 && d->offset + reclen <= d->length && 8 + namlen < reclen)
         {
-            // Return a pointer into the internal buffer; valid until the next call.
-            static thread_local dirent entry;
+            // This directory's entry; valid until the next readdir on it or closedir.
+            dirent& entry = d->entry;
             std::memset(&entry, 0, sizeof(entry));
             entry.d_fileno = *reinterpret_cast<const u32*>(p);
             entry.d_reclen = static_cast<u16>(reclen);
@@ -89,7 +97,7 @@ extern "C" struct dirent* readdir(DIR* dirp)
         const size_t namlen = static_cast<unsigned char>(p[7]);
         if (reclen >= 12 && reclen % 4 == 0 && d->offset + reclen <= d->length && 8 + namlen < reclen)
         {
-            static thread_local dirent entry;
+            dirent& entry = d->entry;
             std::memset(&entry, 0, sizeof(entry));
             entry.d_fileno = *reinterpret_cast<const u32*>(p);
             entry.d_reclen = static_cast<u16>(reclen);
