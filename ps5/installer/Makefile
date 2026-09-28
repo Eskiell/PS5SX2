@@ -4,11 +4,13 @@
 #   make test   -> host build + tests/run-tests.sh
 #
 # Dependencies (see fetch-deps.sh): Mbed TLS 3.6.7 and miniz 3.1.1 in $(DEPS); the PS5 payload SDK in
-# $(PS5_PAYLOAD_SDK). RELAY_URL is the log relay (a Cloudflare Worker, see worker/); empty = not set up.
+# $(PS5_PAYLOAD_SDK). RELAY_URL is the log relay built into the PS5 ELF (the Cloudflare Worker in worker/,
+# deployed on Spyros's account 2026-09-28); `make ps5 RELAY_URL=` builds an ELF that only keeps reports in
+# outbox/. Host builds never have one built in: the tests pass theirs in PS5SX2_TEST_RELAY_URL.
 
 PS5_PAYLOAD_SDK ?= /home/claude/ps5deps/sdk285
 DEPS ?= /home/claude/ps5deps/installer
-RELAY_URL ?=
+RELAY_URL ?= https://ps5sx2-logs.ps5sx2.workers.dev/v1/logs
 
 MBEDTLS := $(DEPS)/mbedtls-3.6.7
 MINIZ := $(DEPS)/miniz-3.1.1
@@ -17,7 +19,7 @@ SRC_COMMON := src/util.c src/paths.c src/log.c src/fsx.c src/net.c src/tls.c src
               src/github.c src/zipx.c src/app.c src/install.c src/report.c src/logger.c src/main.c
 MBED_SRC := $(wildcard $(MBEDTLS)/library/*.c)
 
-DEFS := -DMBEDTLS_USER_CONFIG_FILE='"mbedtls_user_config.h"' -DRELAY_URL_DEFAULT='"$(RELAY_URL)"'
+DEFS := -DMBEDTLS_USER_CONFIG_FILE='"mbedtls_user_config.h"'
 INCS := -Isrc -Iconfig -I$(MBEDTLS)/include -I$(MINIZ)
 MINIZ_DEFS := -DMINIZ_NO_STDIO -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES
 WARN := -Wall -Wextra -Werror -Wno-unused-parameter
@@ -26,7 +28,7 @@ WARN := -Wall -Wextra -Werror -Wno-unused-parameter
 PS5_CC := $(PS5_PAYLOAD_SDK)/bin/prospero-clang
 PS5_AR := $(PS5_PAYLOAD_SDK)/bin/prospero-ar
 PS5_OUT := build/ps5
-PS5_CFLAGS := -std=gnu11 -O2 -fPIC $(DEFS) $(INCS)
+PS5_CFLAGS := -std=gnu11 -O2 -fPIC $(DEFS) $(INCS) -DRELAY_URL_DEFAULT='"$(RELAY_URL)"'
 
 PS5_OBJ := $(patsubst src/%.c,$(PS5_OUT)/%.o,$(SRC_COMMON) src/plat_ps5.c) $(PS5_OUT)/cacert_data.o $(PS5_OUT)/history_data.o
 PS5_MBED_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(PS5_OUT)/mbedtls/%.o,$(MBED_SRC))
@@ -35,6 +37,11 @@ ps5: $(PS5_OUT)/PS5SX2Installer.elf
 
 $(PS5_OUT)/%.o: src/%.c src/*.h config/mbedtls_user_config.h | $(PS5_OUT)
 	$(PS5_CC) $(PS5_CFLAGS) $(WARN) -c -o $@ $<
+
+# logger.o (the only user of RELAY_URL_DEFAULT) is rebuilt whenever RELAY_URL changes
+$(PS5_OUT)/relay-url.txt: FORCE | $(PS5_OUT)
+	@printf '%s\n' '$(RELAY_URL)' | cmp -s - $@ || printf '%s\n' '$(RELAY_URL)' > $@
+$(PS5_OUT)/logger.o: $(PS5_OUT)/relay-url.txt
 
 $(PS5_OUT)/cacert_data.o: $(PS5_OUT)/cacert_data.c
 	$(PS5_CC) $(PS5_CFLAGS) -c -o $@ $<
@@ -58,7 +65,7 @@ $(PS5_OUT)/PS5SX2Installer.elf: $(PS5_OBJ) $(PS5_OUT)/miniz.o $(PS5_OUT)/libmbed
 HOST_CC ?= cc
 HOST_OUT := build/host
 HOST_SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer
-HOST_CFLAGS := -std=gnu11 -O1 -g -D_GNU_SOURCE -DPS5SX2_HOST $(DEFS) $(INCS)
+HOST_CFLAGS := -std=gnu11 -O1 -g -D_GNU_SOURCE -DPS5SX2_HOST $(DEFS) $(INCS) -DRELAY_URL_DEFAULT='""'
 
 HOST_OBJ := $(patsubst src/%.c,$(HOST_OUT)/%.o,$(SRC_COMMON) src/plat_host.c) $(HOST_OUT)/cacert_data.o $(HOST_OUT)/history_data.o
 HOST_MBED_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(HOST_OUT)/mbedtls/%.o,$(MBED_SRC))
@@ -102,5 +109,6 @@ test: host
 clean:
 	rm -rf build
 
-.PHONY: ps5 host test clean
+.PHONY: ps5 host test clean FORCE
+FORCE:
 .SECONDARY:

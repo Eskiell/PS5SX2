@@ -59,15 +59,15 @@ One text file per session is built from:
 
 IPv4, IPv6 and MAC addresses and the settings page's token are removed, and the game list isn't included. Reports wait in `outbox/`, at most 20 files or 60 MB, until the relay takes them.
 
-**The relay.** `worker/` is a Cloudflare Worker that posts each report to a private Discord channel. The webhook URL is a Worker secret, never in the ELF, and the Worker rate-limits per console and per network address. To set it up:
+**The relay.** `worker/` is a Cloudflare Worker that posts each report to a private Discord channel. The webhook URL is a Worker secret, never in the ELF, and the Worker rate-limits per console and per network address. It runs at `https://ps5sx2-logs.ps5sx2.workers.dev` (Spyros's Cloudflare account), and `make ps5` builds that address into the ELF. `make ps5 RELAY_URL=` builds an ELF that only keeps reports in `outbox/`; `upload-url.txt` points one console somewhere else.
+
+To set up a relay:
 
 1. Discord: the log channel's settings, then Integrations, Create Webhook. Copy its URL.
 2. On Windows, run `worker\deploy.cmd` (needs Node.js). It signs in to Cloudflare, deploys the Worker and asks for the webhook URL. Elsewhere: `cd worker && npx wrangler login && npx wrangler deploy && npx wrangler secret put DISCORD_WEBHOOK_URL`.
-3. Build the ELF with `make ps5 RELAY_URL=https://ps5sx2-logs.<account>.workers.dev/v1/logs`. For testing, put the URL in `upload-url.txt` instead.
+3. Build with `make ps5 RELAY_URL=https://ps5sx2-logs.<account>.workers.dev/v1/logs`.
 
 The rate limits can't be set from the Cloudflare dashboard, so make changes with wrangler (running `deploy.cmd` again also swaps in a new webhook).
-
-Until a relay is set up, reports stay in `outbox/`.
 
 ## Build and test
 
