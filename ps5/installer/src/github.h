@@ -1,4 +1,4 @@
-/* PS5SX2 Installer: the latest test build on GitHub (Swordpdf/PS5SX2TESTS), and its download. */
+/* PS5SX2 Installer: the latest release on GitHub (Swordpdf/PS5SX2), and its download. */
 #pragma once
 
 #include <stdint.h>

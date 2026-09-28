@@ -1,4 +1,4 @@
-/* PS5SX2 Installer: install the latest test build safely. */
+/* PS5SX2 Installer: install the latest release safely. */
 #pragma once
 
 enum {

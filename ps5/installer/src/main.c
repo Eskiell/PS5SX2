@@ -1,7 +1,7 @@
 /* PS5SX2 Installer: a payload ELF, separate from the PS5SX2 Helper.
  *
  * Every time it is sent to the console:
- *   1. it installs the latest test build from GitHub if it is newer than the one installed (install.c);
+ *   1. it installs the latest release from GitHub if it is newer than the one installed (install.c);
  *   2. if no copy of it is running yet, it stays running as the logger: when PS5SX2 closes, that session's logs
  *      are sent (logger.c). A copy sent later in the same boot installs and then exits, because the first
  *      copy already holds logger.lock.

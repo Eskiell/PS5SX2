@@ -1,4 +1,4 @@
-/* PS5SX2 Installer: the latest test build on GitHub, and its download (size and SHA-256 checked). */
+/* PS5SX2 Installer: the latest release on GitHub, and its download (size and SHA-256 checked). */
 #include "github.h"
 
 #include "config.h"
@@ -77,7 +77,7 @@ int gh_latest(gh_release *out) {
     goto done;
   }
   if (resp.status == 404) {
-    err_set("no test build is published yet (GitHub: no release)");
+    err_set("no build is published yet (GitHub: no release)");
     goto done;
   }
   if ((resp.status == 403 || resp.status == 429) && resp.ratelimit_remaining == 0) {

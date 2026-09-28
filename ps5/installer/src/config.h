@@ -2,11 +2,12 @@
 #pragma once
 
 #define INSTALLER_NAME "PS5SX2 Installer"
-#define INSTALLER_VERSION "1.0"
+#define INSTALLER_VERSION "1.1"
 #define INSTALLER_UA "PS5SX2-Installer/" INSTALLER_VERSION
 
-/* Where test builds are published (public repo; only the two folders testers need). */
-#define GH_REPO "Swordpdf/PS5SX2TESTS"
+/* Where builds are published: the official releases of Swordpdf/PS5SX2 (public since 2026-09-29). Version 1.0
+ * installed the test builds from Swordpdf/PS5SX2TESTS. */
+#define GH_REPO "Swordpdf/PS5SX2"
 #define GH_API_URL "https://api.github.com/repos/" GH_REPO "/releases/latest"
 #define GH_DOWNLOAD_PREFIX "https://github.com/" GH_REPO "/releases/download/"
 

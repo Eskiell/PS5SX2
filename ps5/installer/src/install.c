@@ -1,4 +1,4 @@
-/* PS5SX2 Installer: install the latest test build without touching what belongs to the user.
+/* PS5SX2 Installer: install the latest release without touching what belongs to the user.
  *
  * What goes where (paths inside the zip's top folder):
  *   PPSA99203/...        -> /data/homebrew/PPSA99203/...  replaced (the app itself)
@@ -818,7 +818,7 @@ int install_run(void) {
     return INSTALL_FAILED;
   }
 
-  notify("PS5SX2 Installer %s: checking for a new test build...", INSTALLER_VERSION);
+  notify("PS5SX2 Installer %s: checking for a new build...", INSTALLER_VERSION);
   gh_release rel;
   if (gh_latest(&rel) != 0) {
     notify("PS5SX2 update: %s. Nothing was changed.", err_get());
@@ -839,14 +839,14 @@ int install_run(void) {
       return INSTALL_NOTHING;
     }
     if (cmp == 1) {
-      notify("Your PS5SX2 (%s) is newer than the latest test build (%s): nothing to install", have, rel.tag);
+      notify("Your PS5SX2 (%s) is newer than the latest release (%s): nothing to install", have, rel.tag);
       fs_unlock(lockfd);
       return INSTALL_NOTHING;
     }
   }
   if (force)
     log_line("install: 'reinstall' switch present");
-  notify("New test build %s (installed: %s)", rel.tag, have_ok ? have : "none found");
+  notify("New build %s (installed: %s)", rel.tag, have_ok ? have : "none found");
 
   int changed = 0, kept = 0;
   const int rc = do_install(&rel, have_ok ? have : "", &changed, &kept);

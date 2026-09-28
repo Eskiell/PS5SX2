@@ -2,7 +2,7 @@
 
 A payload ELF, separate from the PS5SX2 Helper. Send it with the payload loader, like the helper.
 
-- **Every time it's sent, it installs.** It checks the latest release of `Swordpdf/PS5SX2TESTS` and downloads the zip. The download's size and SHA-256 must match what GitHub publishes. The build then goes in with the rules below, and each step shows a notification.
+- **Every time it's sent, it installs.** It checks the latest official release of `Swordpdf/PS5SX2` and downloads its `PS5SX2-*.zip` (1.0 used the test builds of `Swordpdf/PS5SX2TESTS`). The download's size and SHA-256 must match what GitHub publishes. The build then goes in with the rules below, and each step shows a notification.
 - **The first copy sent after a boot stays running as the logger.** When PS5SX2 closes or crashes, that session's logs are sent to the log relay. A copy sent later in the same boot installs and exits, since the first copy holds `logger.lock`.
 
 Not yet run on a console: the first console test is still to do.
@@ -15,7 +15,7 @@ Not yet run on a console: the first console test is still to do.
 | `PCSX2/resources/…` | `/data/PCSX2/resources/…` | Replaced, with a backup. |
 | `PCSX2/bios`, `games`, `memcards`, `savestates`, `textures`, `covers`, `cache`, `logs`, … | same | The folder is created if missing. Nothing is ever written inside. |
 | `PCSX2/flags/…` | `/data/PCSX2/flags/` | First install: all of them. Later: only switches new in a build. Never one the user removed or moved to `flags-off/`. |
-| `gs.ini`, `live.ini`, `settings/*.ini`, `patches`, `cheats`, anything else under `PCSX2/` | same | Added when missing. Replaced only if the file on the console is byte for byte one the installer put there (`manifest.txt`) or an earlier test build's copy (`history/`). A file the user changed or deleted stays that way. |
+| `gs.ini`, `live.ini`, `settings/*.ini`, `patches`, `cheats`, anything else under `PCSX2/` | same | Added when missing. Replaced only if the file on the console is byte for byte one the installer put there (`manifest.txt`) or an earlier build's copy (`history/`). A file the user changed or deleted stays that way. |
 | top-level texts (`SETUP.txt`, licences) | `/data/PS5SX2-Installer/release-notes/<tag>/` | Always written. |
 | anything else | — | Skipped. |
 

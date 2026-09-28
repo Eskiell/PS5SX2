@@ -2,7 +2,7 @@
 """Test HTTPS server standing in for GitHub (release API, download redirect, asset CDN) and the log relay.
 
 Behaviour comes from state.json in the work folder, re-read on every request:
-  release        the JSON returned by /repos/Swordpdf/PS5SX2TESTS/releases/latest
+  release        the JSON returned by /repos/Swordpdf/PS5SX2/releases/latest
   api_status     HTTP status for that call (default 200); api_headers: extra headers
   api_chunked    send the API answer chunked
   assets_dir     where /assets/<name> files come from
@@ -75,13 +75,13 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         st = state()
         p = self.path
-        if p == '/repos/Swordpdf/PS5SX2TESTS/releases/latest':
+        if p == '/repos/Swordpdf/PS5SX2/releases/latest':
             body = json.dumps(st.get('release', {}), indent=1).encode()
             if 'api_body' in st:
                 body = st['api_body'].encode()
             return self.send_body(st.get('api_status', 200), body, 'application/json; charset=utf-8',
                                   st.get('api_chunked', False), st.get('api_headers', {}))
-        prefix = '/Swordpdf/PS5SX2TESTS/releases/download/'
+        prefix = '/Swordpdf/PS5SX2/releases/download/'
         if p.startswith(prefix):
             name = p.rsplit('/', 1)[1]
             base = st.get('redirect_to', 'https://localhost:%d/assets/' % PORT)

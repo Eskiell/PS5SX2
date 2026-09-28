@@ -107,13 +107,13 @@ def set_state(**kw):
 
 def release_json(tag, name, data, digest=None, size=None, url=None, extra_assets=()):
     assets = list(extra_assets) + [{
-        'url': 'https://api.github.com/repos/Swordpdf/PS5SX2TESTS/releases/assets/1',
+        'url': 'https://api.github.com/repos/Swordpdf/PS5SX2/releases/assets/1',
         'id': 1, 'name': name, 'label': '', 'content_type': 'application/zip', 'state': 'uploaded',
         'size': len(data) if size is None else size,
         'digest': 'sha256:' + sha_bytes(data) if digest is None else digest,
-        'browser_download_url': url or 'https://localhost:%d/Swordpdf/PS5SX2TESTS/releases/download/%s/%s' % (PORT, tag, name),
+        'browser_download_url': url or 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/%s/%s' % (PORT, tag, name),
     }]
-    return {'tag_name': tag, 'name': 'PS5SX2 Test build 1 (%s)' % tag, 'draft': False, 'prerelease': False,
+    return {'tag_name': tag, 'name': 'PS5SX2 %s' % tag, 'draft': False, 'prerelease': False,
             'published_at': '2026-09-28T17:15:57Z', 'target_commitish': 'main',
             'body': 'Notes with · unicode, "quotes", a tab\t and \\ escapes 😀',
             'assets': assets}
@@ -135,8 +135,8 @@ def run(root, env_extra=None, timeout=300, expect_rc=0, logger=False):
     env.update({
         'PS5SX2_ROOT': root,
         'PS5SX2_TEST_CA_FILE': os.path.join(WORK, 'ca.pem'),
-        'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2TESTS/releases/latest' % PORT,
-        'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2TESTS/releases/download/' % PORT,
+        'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2/releases/latest' % PORT,
+        'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/' % PORT,
         'PS5SX2_TEST_ALLOW_HOST': 'localhost',
         'PS5SX2_TEST_RELAY_URL': 'https://localhost:%d/v1/logs' % PORT,
         'ASAN_OPTIONS': 'detect_leaks=1:abort_on_error=1',
@@ -293,8 +293,8 @@ def t_fresh_install(z112, files112):
     mk_fresh(root)
     publish('vk-285-112', z112)
     notes, err = run(root)
-    check(any('checking for a new test build' in n for n in notes), 'first notification')
-    check(any('New test build vk-285-112 (installed: none found)' in n for n in notes), 'new build notification')
+    check(any('checking for a new build' in n for n in notes), 'first notification')
+    check(any('New build vk-285-112 (installed: none found)' in n for n in notes), 'new build notification')
     check(any(n.startswith('Downloading vk-285-112 (') for n in notes), 'download notification')
     check(any('Downloading vk-285-112: 50%' in n for n in notes), 'progress 50%')
     check(any('SHA-256 checked' in n for n in notes), 'sha notification')
@@ -338,7 +338,7 @@ def t_user_install(z112, files112):
     before = snapshot(root)
     publish('vk-285-112', z112)
     notes, err = run(root)
-    check(any('New test build vk-285-112 (installed: vk-285-111)' in n for n in notes), 'sees 111')
+    check(any('New build vk-285-112 (installed: vk-285-111)' in n for n in notes), 'sees 111')
     done = [n for n in notes if 'PS5SX2 vk-285-112 installed' in n]
     check(done, 'installed')
     after = snapshot(root)
@@ -420,7 +420,7 @@ def t_update_113(root, files112, z112, before112):
     top, files113, z113 = make_113(files112, z112)
     publish('vk-285-113', z113)
     notes, err = run(root)
-    check(any('New test build vk-285-113 (installed: vk-285-112)' in n for n in notes), 'sees 112')
+    check(any('New build vk-285-113 (installed: vk-285-112)' in n for n in notes), 'sees 112')
     check(any('PS5SX2 vk-285-113 installed' in n for n in notes), 'installed 113: %s' % notes[-3:])
     after = snapshot(root)
     a, r, c = diff(before, after)
@@ -488,7 +488,7 @@ def t_downgrade_and_reinstall(root, z112):
     publish('vk-285-112', z112)
     before = snapshot(root)
     notes, _ = run(root)
-    check(any('is newer than the latest test build (vk-285-112)' in n for n in notes), 'no downgrade: %s' % notes)
+    check(any('is newer than the latest release (vk-285-112)' in n for n in notes), 'no downgrade: %s' % notes)
     check(snapshot(root) == before, 'nothing changed on a downgrade refusal')
 
 
@@ -576,7 +576,7 @@ def t_bad_downloads(z112, files112):
         ('no digest', dict(digest=''), 'no SHA-256'),
         ('size mismatch', dict(size=len(gz) + 10), "isn't the release's"),
         ('foreign url', dict(url='https://localhost:%d/Someone/Else/releases/download/vk-285-120/x.zip' % PORT), "address isn't"),
-        ('404', dict(api_status=404), 'no test build is published'),
+        ('404', dict(api_status=404), 'no build is published'),
         ('rate limit', dict(api_status=403, api_headers={'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1790620000'}), 'hourly limit'),
         ('bad json', dict(api_body='{"tag_name": "vk-285-120", "assets": [}'), "couldn't be read"),
         ('redirect elsewhere', dict(redirect_to='https://127.0.0.1:%d/assets/' % PORT), 'unexpected server'),
@@ -649,8 +649,8 @@ def t_logger(files112, z112):
         f.write('sword.pdf\n')
     env = dict(os.environ)
     env.update({'PS5SX2_ROOT': root, 'PS5SX2_TEST_CA_FILE': os.path.join(WORK, 'ca.pem'),
-                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2TESTS/releases/latest' % PORT,
-                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2TESTS/releases/download/' % PORT,
+                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2/releases/latest' % PORT,
+                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/' % PORT,
                 'PS5SX2_TEST_ALLOW_HOST': 'localhost',
                 'PS5SX2_TEST_RELAY_URL': 'https://localhost:%d/v1/logs' % PORT,
                 'ASAN_OPTIONS': 'detect_leaks=0:abort_on_error=1'})
@@ -999,8 +999,8 @@ def t_logger_short_and_relaunch(files112, z112):
     os.remove(os.path.join(pc, 'pid.txt'))
     env = dict(os.environ)
     env.update({'PS5SX2_ROOT': root, 'PS5SX2_TEST_CA_FILE': os.path.join(WORK, 'ca.pem'),
-                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2TESTS/releases/latest' % PORT,
-                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2TESTS/releases/download/' % PORT,
+                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2/releases/latest' % PORT,
+                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/' % PORT,
                 'PS5SX2_TEST_ALLOW_HOST': 'localhost', 'PS5SX2_TEST_RELAY_URL': 'https://localhost:%d/v1/logs' % PORT,
                 'ASAN_OPTIONS': 'detect_leaks=0:abort_on_error=1'})
     logger = subprocess.Popen([BIN], env=env, stderr=open(os.path.join(WORK, 'logger2.stderr'), 'w'))
