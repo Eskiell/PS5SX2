@@ -151,6 +151,59 @@ namespace GSTextureReplacements
 	static bool s_worker_thread_running = false;
 }; // namespace GSTextureReplacements
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-111): what the texture replacements do, in boot.log. A pack in the right folder with the
+// right names (Spyros's Ratchet & Clank one, PNG) showed no sign of loading, and PCSX2 itself says what it
+// found only in debug builds. These lines say how many files the scan found, whether the game's textures
+// match them (and, for a miss whose texture hash is in the pack, which part of the name differs), and
+// whether the files load and reach the GPU. Diagnostics only; needs proper testing.
+#include "OrbisDeferredLog.h"
+#include <atomic>
+#include <chrono>
+namespace
+{
+	struct OrbisTexRep
+	{
+		std::atomic<u32> lookups{0}, hits{0}, queued{0}, loaded{0}, load_failed{0}, created{0}, create_failed{0};
+		std::atomic<u64> load_us{0}, load_pixels{0};
+		u32 miss_logged = 0, near_logged = 0, hit_logged = 0; // the GS thread only
+		u32 last[7] = {};
+		std::chrono::steady_clock::time_point last_report{};
+		std::unordered_multimap<u64, TextureName> by_tex0; // the pack's names by texture hash, for the near misses
+	};
+	OrbisTexRep s_orbis_texrep;
+
+	std::string OrbisTexName(const TextureName& n)
+	{
+		if (n.HasRegion())
+			return n.HasPalette() ? StringUtil::StdStringFromFormat(TEXTURE_FILENAME_REGION_CLUT_FORMAT_STRING, n.TEX0Hash,
+										n.CLUTHash, n.region_width, n.region_height, n.bits) :
+									StringUtil::StdStringFromFormat(TEXTURE_FILENAME_REGION_FORMAT_STRING, n.TEX0Hash,
+										n.region_width, n.region_height, n.bits);
+		return n.HasPalette() ? StringUtil::StdStringFromFormat(TEXTURE_FILENAME_CLUT_FORMAT_STRING, n.TEX0Hash, n.CLUTHash, n.bits) :
+								StringUtil::StdStringFromFormat(TEXTURE_FILENAME_FORMAT_STRING, n.TEX0Hash, n.bits);
+	}
+
+	// Once in 5 s at most, when something changed: the counters.
+	void OrbisTexRepReport(bool force)
+	{
+		OrbisTexRep& r = s_orbis_texrep;
+		const u32 now_vals[7] = {r.lookups.load(), r.hits.load(), r.queued.load(), r.loaded.load(), r.load_failed.load(),
+			r.created.load(), r.create_failed.load()};
+		const auto now = std::chrono::steady_clock::now();
+		if (!force && (std::memcmp(now_vals, r.last, sizeof(r.last)) == 0 || now - r.last_report < std::chrono::seconds(5)))
+			return;
+		std::memcpy(r.last, now_vals, sizeof(r.last));
+		r.last_report = now;
+		const u32 n = now_vals[3];
+		OrbisDeferredPrintf("[texrep] lookups %u, hits %u, loads queued %u, loaded %u (avg %.0f ms, %.1f Mpx), failed %u, "
+							"on the GPU %u, GPU texture failed %u\n",
+			now_vals[0], now_vals[1], now_vals[2], n, n ? r.load_us.load() / 1000.0 / n : 0.0, r.load_pixels.load() / 1e6,
+			now_vals[4], now_vals[5], now_vals[6]);
+	}
+} // namespace
+#endif
+
 TextureName GSTextureReplacements::CreateTextureName(const GSTextureCache::HashCacheKey& hash, u32 miplevel)
 {
 	TextureName name;
@@ -390,7 +443,14 @@ void GSTextureReplacements::ReloadReplacementMap()
 
 	// can't replace bios textures.
 	if (s_current_serial.empty() || !GSConfig.LoadTextureReplacements)
+	{
+#ifdef ORBIS_VULKAN
+		s_orbis_texrep.by_tex0.clear();
+		OrbisDeferredPrintf("[texrep] no scan: serial '%s', LoadTextureReplacements %d\n", s_current_serial.c_str(),
+			GSConfig.LoadTextureReplacements ? 1 : 0);
+#endif
 		return;
+	}
 
 	const std::string texture_dir = GetGameTextureDirectory();
 	const std::string replacement_dir(Path::Combine(texture_dir, TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME));
@@ -413,8 +473,19 @@ void GSTextureReplacements::ReloadReplacementMap()
 			Host::OSD_WARNING_DURATION);
 	}
 
+#ifdef ORBIS_VULKAN
+	s_orbis_texrep.by_tex0.clear();
+	u32 orbis_no_loader = 0, orbis_bad_name = 0;
+	std::string orbis_example_skipped;
+	const auto orbis_t0 = std::chrono::steady_clock::now();
+#endif
 	if (!FileSystem::FindFiles(replacement_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
+	{
+#ifdef ORBIS_VULKAN
+		OrbisDeferredPrintf("[texrep] %s: no files found in %s\n", s_current_serial.c_str(), replacement_dir.c_str());
+#endif
 		return;
+	}
 
 	std::string filename;
 	for (FILESYSTEM_FIND_DATA& fd : files)
@@ -422,12 +493,29 @@ void GSTextureReplacements::ReloadReplacementMap()
 		// file format we can handle?
 		filename = Path::GetFileName(fd.FileName);
 		if (!GetLoader(filename))
+		{
+#ifdef ORBIS_VULKAN
+			orbis_no_loader++;
+			if (orbis_example_skipped.empty())
+				orbis_example_skipped = filename;
+#endif
 			continue;
+		}
 
 		// parse the name if it's valid
 		std::optional<TextureName> name = ParseReplacementName(filename);
 		if (!name.has_value())
+		{
+#ifdef ORBIS_VULKAN
+			orbis_bad_name++;
+			if (orbis_example_skipped.empty())
+				orbis_example_skipped = filename;
+#endif
 			continue;
+		}
+#ifdef ORBIS_VULKAN
+		s_orbis_texrep.by_tex0.emplace(name->TEX0Hash, name.value());
+#endif
 
 		DbgCon.WriteLn("Found %ux%u replacement '%.*s'", name->Width(), name->Height(), static_cast<int>(filename.size()), filename.data());
 		s_replacement_texture_filenames.emplace(name.value(), std::move(fd.FileName));
@@ -436,6 +524,16 @@ void GSTextureReplacements::ReloadReplacementMap()
 		name->CLUTHash = 0;
 		s_replacement_textures_without_clut_hash.insert(name.value());
 	}
+#ifdef ORBIS_VULKAN
+	OrbisDeferredPrintf("[texrep] %s: %zu replacement textures in %s (%zu files: %u not PNG, %u not named like a "
+						"replacement%s%s%s); scan %.0f ms; async %d, precache %d, GPU palettes %d, preloading %d\n",
+		s_current_serial.c_str(), s_replacement_texture_filenames.size(), replacement_dir.c_str(), files.size(),
+		orbis_no_loader, orbis_bad_name, orbis_example_skipped.empty() ? "" : ", e.g. '",
+		orbis_example_skipped.c_str(), orbis_example_skipped.empty() ? "" : "'",
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - orbis_t0).count(),
+		GSConfig.LoadTextureReplacementsAsync ? 1 : 0, GSConfig.PrecacheTextureReplacements ? 1 : 0,
+		GSConfig.GPUPaletteConversion ? 1 : 0, static_cast<int>(GSConfig.TexturePreloading));
+#endif
 
 	if (!s_replacement_texture_filenames.empty())
 	{
@@ -510,6 +608,36 @@ GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache:
 
 	// replacement for this name exists?
 	auto fnit = s_replacement_texture_filenames.find(name);
+#ifdef ORBIS_VULKAN
+	OrbisTexRep& orbis_r = s_orbis_texrep;
+	orbis_r.lookups.fetch_add(1, std::memory_order_relaxed);
+	if (fnit == s_replacement_texture_filenames.end())
+	{
+		// A texture whose hash is in the pack under another name says which part differs; the first few
+		// plain misses show the names the game's textures get here.
+		const auto range = orbis_r.by_tex0.equal_range(name.TEX0Hash);
+		if (range.first != range.second && orbis_r.near_logged < 24)
+		{
+			orbis_r.near_logged++;
+			OrbisDeferredPrintf("[texrep] near miss: the game's %s, the pack's %s\n", OrbisTexName(name).c_str(),
+				OrbisTexName(range.first->second).c_str());
+		}
+		else if (range.first == range.second && orbis_r.miss_logged < 12)
+		{
+			orbis_r.miss_logged++;
+			OrbisDeferredPrintf("[texrep] miss: %s (%ux%u)\n", OrbisTexName(name).c_str(), name.Width(), name.Height());
+		}
+	}
+	else
+	{
+		orbis_r.hits.fetch_add(1, std::memory_order_relaxed);
+		if (orbis_r.hit_logged < 10)
+		{
+			orbis_r.hit_logged++;
+			OrbisDeferredPrintf("[texrep] hit: %s -> %s\n", OrbisTexName(name).c_str(), fnit->second.c_str());
+		}
+	}
+#endif
 	if (fnit == s_replacement_texture_filenames.end())
 		return nullptr;
 
@@ -530,6 +658,9 @@ GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache:
 	{
 		// replacement will be injected into the TC later on
 		std::unique_lock<std::mutex> lock(s_replacement_texture_cache_mutex);
+#ifdef ORBIS_VULKAN
+		orbis_r.queued.fetch_add(1, std::memory_order_relaxed);
+#endif
 		QueueAsyncReplacementTextureLoad(name, fnit->second, mipmap, false);
 
 		*pending = true;
@@ -636,11 +767,25 @@ std::optional<GSTextureReplacements::ReplacementTexture> GSTextureReplacements::
 		return std::nullopt;
 
 	ReplacementTexture rtex;
+#ifdef ORBIS_VULKAN
+	const auto orbis_t0 = std::chrono::steady_clock::now();
+#endif
 	if (!loader(filename.c_str(), &rtex, only_base_image))
 	{
 		Console.Warning("Failed to load replacement texture %s", filename.c_str());
+#ifdef ORBIS_VULKAN
+		if (s_orbis_texrep.load_failed.fetch_add(1) < 10)
+			OrbisDeferredPrintf("[texrep] failed to load %s\n", filename.c_str());
+#endif
 		return std::nullopt;
 	}
+#ifdef ORBIS_VULKAN
+	s_orbis_texrep.load_us.fetch_add(static_cast<u64>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - orbis_t0).count()));
+	s_orbis_texrep.load_pixels.fetch_add(static_cast<u64>(rtex.width) * rtex.height);
+	if (s_orbis_texrep.loaded.fetch_add(1) < 5)
+		OrbisDeferredPrintf("[texrep] loaded %s: %ux%u\n", filename.c_str(), rtex.width, rtex.height);
+#endif
 
 	SetReplacementTextureAlphaMinMax(rtex);
 
@@ -748,6 +893,15 @@ GSTexture* GSTextureReplacements::CreateReplacementTexture(const ReplacementText
 	}
 
 	GSTexture* tex = g_gs_device->CreateTexture(rtex.width, rtex.height, static_cast<int>(rtex.mips.size()) + 1, rtex.format);
+#ifdef ORBIS_VULKAN
+	if (!tex)
+	{
+		if (s_orbis_texrep.create_failed.fetch_add(1) < 10)
+			OrbisDeferredPrintf("[texrep] no GPU texture for a %ux%u replacement\n", rtex.width, rtex.height);
+	}
+	else
+		s_orbis_texrep.created.fetch_add(1, std::memory_order_relaxed);
+#endif
 	if (!tex)
 		return nullptr;
 
@@ -796,6 +950,10 @@ void GSTextureReplacements::ProcessAsyncLoadedTextures()
 			g_texture_cache->InjectHashCacheTexture(HashCacheKeyFromTextureName(name), tex, it->second.alpha_minmax);
 	}
 	s_async_loaded_textures.clear();
+#ifdef ORBIS_VULKAN
+	lock.unlock();
+	OrbisTexRepReport(false);
+#endif
 }
 
 void GSTextureReplacements::DumpTexture(const GSTextureCache::HashCacheKey& hash, const GIFRegTEX0& TEX0,
