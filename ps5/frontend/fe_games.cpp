@@ -5,24 +5,33 @@
 
 #include "fe_games.h"
 
+#include "libchdr/chd.h" // vk-285-108: CHD images (3rdparty/libchdr)
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <unordered_map>
 
 namespace fe
 {
 namespace
 {
-bool EndsWithIso(const char* name)
+// `name` ends in `ext` (".iso", lower case), in any case, and isn't hidden.
+bool HasExtension(const char* name, const char* ext)
 {
-	const size_t n = std::strlen(name);
-	return n > 4 && name[0] != '.' && name[n - 4] == '.' && (name[n - 3] | 0x20) == 'i' && (name[n - 2] | 0x20) == 's' &&
-	       (name[n - 1] | 0x20) == 'o';
+	const size_t n = std::strlen(name), e = std::strlen(ext);
+	if (n <= e || name[0] == '.')
+		return false;
+	for (size_t i = 0; i < e; i++)
+		if (std::tolower(static_cast<unsigned char>(name[n - e + i])) != ext[i])
+			return false;
+	return true;
 }
 
 std::string Lower(std::string s)
@@ -63,67 +72,272 @@ const char* const kRegions[] = {"USA", "Europe", "Japan", "Korea", "Asia", "Worl
 	"Italy", "Spain", "UK", "Canada", "Brazil", "Russia", "China", "Taiwan", "Netherlands", "Sweden"};
 } // namespace
 
-std::string ReadSerial(const std::string& iso_path)
+namespace
 {
-	const int fd = open(iso_path.c_str(), O_RDONLY);
-	if (fd < 0)
-		return {};
+// A disc image's 2048-byte data sectors, read by number.
+class SectorReader
+{
+public:
+	virtual ~SectorReader() = default;
+	virtual bool Read(uint32_t lba, void* buf, size_t len) = 0; // `len` bytes from the start of sector `lba`
+};
+
+class IsoSectors final : public SectorReader
+{
+public:
+	explicit IsoSectors(int fd)
+		: m_fd(fd)
+	{
+	}
+	bool Read(uint32_t lba, void* buf, size_t len) override { return ReadAt(m_fd, static_cast<uint64_t>(lba) * 2048, buf, len); }
+
+private:
+	int m_fd;
+};
+
+// vk-285-108: a CHD through libchdr. A DVD image (chdman createdvd) holds 2048-byte units; a CD image
+// (createcd) raw 2448-byte frames (2352 of sector, 96 of subcode), whose data starts 24 bytes in (mode 2,
+// the PS2's CDs) or 16 (mode 1). Read() stays inside one sector, so a CD sector never spans two frames.
+class ChdSectors final : public SectorReader
+{
+public:
+	~ChdSectors() override
+	{
+		if (m_chd)
+			chd_close(m_chd);
+	}
+
+	bool Open(const std::string& path)
+	{
+		if (chd_open(path.c_str(), CHD_OPEN_READ, nullptr, &m_chd) != CHDERR_NONE)
+		{
+			m_chd = nullptr; // a CHD that needs its parent reads as no serial (PCSX2 finds the parent itself)
+			return false;
+		}
+		const chd_header* const h = chd_get_header(m_chd);
+		if (!h || h->hunkbytes == 0 || h->unitbytes == 0)
+			return false;
+		m_unit = h->unitbytes;
+		m_hunk_bytes = h->hunkbytes;
+		m_buf.resize(m_hunk_bytes);
+		if (m_unit != 2352 && m_unit != 2448)
+			return true; // 2048-byte sectors back to back
+		// A CD: the data offset that puts the volume descriptor ("\1CD001") at sector 16.
+		for (const uint32_t offset : {24u, 16u})
+		{
+			m_offset = offset;
+			uint8_t pvd[6];
+			if (Read(16, pvd, sizeof(pvd)) && pvd[0] == 1 && std::memcmp(pvd + 1, "CD001", 5) == 0)
+				return true;
+		}
+		m_offset = 24;
+		return true;
+	}
+
+	bool Read(uint32_t lba, void* buf, size_t len) override
+	{
+		if (len > 2048)
+		{
+			// Sector by sector (a CD's sectors aren't contiguous).
+			uint8_t* p = static_cast<uint8_t*>(buf);
+			for (; len; lba++)
+			{
+				const size_t n = std::min<size_t>(len, 2048);
+				if (!Read(lba, p, n))
+					return false;
+				p += n;
+				len -= n;
+			}
+			return true;
+		}
+		const bool raw = m_unit == 2352 || m_unit == 2448;
+		uint64_t pos = raw ? static_cast<uint64_t>(lba) * m_unit + m_offset : static_cast<uint64_t>(lba) * 2048;
+		uint8_t* p = static_cast<uint8_t*>(buf);
+		while (len)
+		{
+			const uint64_t hunk = pos / m_hunk_bytes;
+			const size_t in = static_cast<size_t>(pos % m_hunk_bytes);
+			if (hunk > 0xffffffffull)
+				return false;
+			if (hunk != m_cached)
+			{
+				if (chd_read(m_chd, static_cast<uint32_t>(hunk), m_buf.data()) != CHDERR_NONE)
+					return false;
+				m_cached = hunk;
+			}
+			const size_t n = std::min<size_t>(len, m_hunk_bytes - in);
+			std::memcpy(p, m_buf.data() + in, n);
+			p += n;
+			pos += n;
+			len -= n;
+		}
+		return true;
+	}
+
+private:
+	chd_file* m_chd = nullptr;
+	uint32_t m_unit = 0;
+	uint32_t m_hunk_bytes = 0;
+	uint32_t m_offset = 0;
+	uint64_t m_cached = ~0ull; // the hunk in m_buf
+	std::vector<uint8_t> m_buf;
+};
+
+// "SLUS-21351" from SYSTEM.CNF's BOOT2 line, found in the root directory of the ISO 9660 file system.
+std::string SerialFromDisc(SectorReader& disc)
+{
 	std::string serial;
 	uint8_t pvd[2048];
-	if (ReadAt(fd, 16 * 2048ull, pvd, sizeof(pvd)) && pvd[0] == 1 && std::memcmp(pvd + 1, "CD001", 5) == 0)
+	if (!disc.Read(16, pvd, sizeof(pvd)) || pvd[0] != 1 || std::memcmp(pvd + 1, "CD001", 5) != 0)
+		return serial;
+	const uint8_t* root = pvd + 156;
+	const uint32_t root_lba = Le32(root + 2);
+	const uint32_t root_len = std::min<uint32_t>(Le32(root + 10), 64 * 2048);
+	std::vector<uint8_t> dir(root_len);
+	if (!root_len || !disc.Read(root_lba, dir.data(), dir.size()))
+		return serial;
+	for (size_t off = 0; off < dir.size();)
 	{
-		const uint8_t* root = pvd + 156;
-		const uint32_t root_lba = Le32(root + 2);
-		const uint32_t root_len = std::min<uint32_t>(Le32(root + 10), 64 * 2048);
-		std::vector<uint8_t> dir(root_len);
-		if (root_len && ReadAt(fd, static_cast<uint64_t>(root_lba) * 2048, dir.data(), dir.size()))
+		const uint8_t len = dir[off];
+		if (len == 0)
 		{
-			for (size_t off = 0; off < dir.size();)
+			off = (off / 2048 + 1) * 2048; // records don't cross sectors
+			continue;
+		}
+		if (off + len > dir.size() || len < 34)
+			break;
+		const uint8_t name_len = dir[off + 32];
+		std::string name(reinterpret_cast<const char*>(&dir[off + 33]), std::min<size_t>(name_len, len - 33));
+		if (Lower(name).rfind("system.cnf", 0) == 0)
+		{
+			const uint32_t lba = Le32(&dir[off + 2]);
+			const uint32_t size = std::min<uint32_t>(Le32(&dir[off + 10]), 4096);
+			std::string cnf(size, '\0');
+			if (disc.Read(lba, cnf.data(), size))
 			{
-				const uint8_t len = dir[off];
-				if (len == 0)
+				// BOOT2 = cdrom0:\SLUS_213.51;1
+				const size_t b = cnf.find("BOOT2");
+				const size_t s = cnf.find('\\', b == std::string::npos ? 0 : b);
+				if (b != std::string::npos && s != std::string::npos)
 				{
-					off = (off / 2048 + 1) * 2048; // records don't cross sectors
-					continue;
-				}
-				if (off + len > dir.size() || len < 34)
-					break;
-				const uint8_t name_len = dir[off + 32];
-				std::string name(reinterpret_cast<const char*>(&dir[off + 33]), std::min<size_t>(name_len, len - 33));
-				if (Lower(name).rfind("system.cnf", 0) == 0)
-				{
-					const uint32_t lba = Le32(&dir[off + 2]);
-					const uint32_t size = std::min<uint32_t>(Le32(&dir[off + 10]), 4096);
-					std::string cnf(size, '\0');
-					if (ReadAt(fd, static_cast<uint64_t>(lba) * 2048, cnf.data(), size))
+					std::string elf;
+					for (size_t i = s + 1; i < cnf.size() && cnf[i] != ';' && cnf[i] != '\r' && cnf[i] != '\n'; i++)
+						elf += cnf[i];
+					// SLUS_213.51 -> SLUS-21351
+					std::string out;
+					for (char c : elf)
 					{
-						// BOOT2 = cdrom0:\SLUS_213.51;1
-						const size_t b = cnf.find("BOOT2");
-						const size_t s = cnf.find('\\', b == std::string::npos ? 0 : b);
-						if (b != std::string::npos && s != std::string::npos)
-						{
-							std::string elf;
-							for (size_t i = s + 1; i < cnf.size() && cnf[i] != ';' && cnf[i] != '\r' && cnf[i] != '\n'; i++)
-								elf += cnf[i];
-							// SLUS_213.51 -> SLUS-21351
-							std::string out;
-							for (char c : elf)
-							{
-								if (c == '_')
-									out += '-';
-								else if (c != '.')
-									out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-							}
-							if (out.size() >= 9 && out.size() <= 12)
-								serial = out;
-						}
+						if (c == '_')
+							out += '-';
+						else if (c != '.')
+							out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 					}
-					break;
+					if (out.size() >= 9 && out.size() <= 12)
+						serial = out;
 				}
-				off += len;
+			}
+			break;
+		}
+		off += len;
+	}
+	return serial;
+}
+
+// vk-285-108: a CHD's serial costs its map's decompression (tens of milliseconds for a DVD), so the ones
+// found are kept in a file, one "<path>\t<size>\t<mtime>\t<serial>" line each (a later line wins).
+std::mutex s_serial_mutex;
+std::string s_serial_file;
+bool s_serial_loaded = false;
+std::unordered_map<std::string, std::string> s_serials; // "<path>\t<size>\t<mtime>" -> serial
+
+std::string SerialKey(const std::string& path)
+{
+	struct stat st = {};
+	if (stat(path.c_str(), &st) != 0)
+		return {};
+	return path + "\t" + std::to_string(static_cast<long long>(st.st_size)) + "\t" +
+	       std::to_string(static_cast<long long>(st.st_mtime));
+}
+
+void LoadSerialsLocked()
+{
+	if (s_serial_loaded || s_serial_file.empty())
+		return;
+	s_serial_loaded = true;
+	FILE* f = std::fopen(s_serial_file.c_str(), "rb");
+	if (!f)
+		return;
+	char line[1024];
+	while (std::fgets(line, sizeof(line), f))
+	{
+		std::string l = line;
+		while (!l.empty() && (l.back() == '\n' || l.back() == '\r'))
+			l.pop_back();
+		const size_t tab = l.rfind('\t');
+		if (tab != std::string::npos && tab > 0 && tab + 1 < l.size())
+			s_serials[l.substr(0, tab)] = l.substr(tab + 1);
+	}
+	std::fclose(f);
+}
+
+std::string ChdSerial(const std::string& path)
+{
+	const std::string key = SerialKey(path);
+	if (!key.empty())
+	{
+		std::lock_guard<std::mutex> lock(s_serial_mutex);
+		LoadSerialsLocked();
+		const auto it = s_serials.find(key);
+		if (it != s_serials.end())
+			return it->second;
+	}
+	ChdSectors disc;
+	const std::string serial = disc.Open(path) ? SerialFromDisc(disc) : std::string();
+	if (!serial.empty() && !key.empty())
+	{
+		std::lock_guard<std::mutex> lock(s_serial_mutex);
+		s_serials[key] = serial;
+		if (!s_serial_file.empty())
+		{
+			const size_t slash = s_serial_file.rfind('/');
+			if (slash != std::string::npos)
+				mkdir(s_serial_file.substr(0, slash).c_str(), 0777);
+			if (FILE* f = std::fopen(s_serial_file.c_str(), "ab"))
+			{
+				const std::string line = key + "\t" + serial + "\n";
+				std::fwrite(line.data(), 1, line.size(), f);
+				std::fclose(f);
 			}
 		}
 	}
+	return serial;
+}
+} // namespace
+
+bool IsDiscImageName(const char* name)
+{
+	return HasExtension(name, ".iso") || HasExtension(name, ".chd");
+}
+
+void SetSerialCacheFile(const std::string& path)
+{
+	std::lock_guard<std::mutex> lock(s_serial_mutex);
+	if (path == s_serial_file)
+		return;
+	s_serial_file = path;
+	s_serial_loaded = false;
+	s_serials.clear();
+}
+
+std::string ReadSerial(const std::string& image_path)
+{
+	if (HasExtension(image_path.c_str(), ".chd"))
+		return ChdSerial(image_path);
+	const int fd = open(image_path.c_str(), O_RDONLY);
+	if (fd < 0)
+		return {};
+	IsoSectors disc(fd);
+	const std::string serial = SerialFromDisc(disc);
 	close(fd);
 	return serial;
 }
@@ -193,7 +407,7 @@ std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs)
 			continue;
 		while (const dirent* e = readdir(d))
 		{
-			if (!EndsWithIso(e->d_name))
+			if (!IsDiscImageName(e->d_name))
 				continue;
 			const std::string file = e->d_name;
 			if (std::any_of(games.begin(), games.end(), [&](const GameInfo& g) { return g.file == file; }))
@@ -204,7 +418,7 @@ std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs)
 			if (stat(g.path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
 				continue;
 			g.file = file;
-			g.stem = file.substr(0, file.size() - 4);
+			g.stem = file.substr(0, file.size() - 4); // ".iso" and ".chd"
 			g.bytes = static_cast<uint64_t>(st.st_size);
 			MakeTitle(g.stem, g.title, g.region, g.extra);
 			games.push_back(g);

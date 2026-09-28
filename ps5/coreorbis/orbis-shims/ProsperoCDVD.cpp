@@ -1,9 +1,9 @@
-// Orbis CDVD stubs: compressed image formats (.cso/.zso/.chd/.gz) need
-// zlib/libchdr, absent from ps5-payload-sdk. Raw .iso/.bin works fully via
-// the real InputIsoFile (kept in build); only compressed backends refuse.
-// Physical-disc reader (Linux ioctl) likewise unavailable.
+// Orbis CDVD stubs: .cso/.zso/.gz images need zlib/lz4 readers that aren't built,
+// so those backends refuse. Raw .iso/.bin works fully via the real InputIsoFile
+// (kept in build); .chd too since vk-285-108 (the real ChdFileReader over libchdr,
+// with zlib and zstd vendored in ps5/third_party). Physical-disc reader (Linux
+// ioctl) likewise unavailable.
 #include "CDVD/CsoFileReader.h"
-#include "CDVD/ChdFileReader.h"
 #include "CDVD/GzippedFileReader.h"
 #include "CDVD/CDVDdiscReader.h"
 #include "common/Error.h"
@@ -98,37 +98,6 @@ void CsoFileReader::Close2()
 {
 }
 u32 CsoFileReader::GetBlockCount() const
-{
-  return 0;
-}
-
-ChdFileReader::ChdFileReader() = default;
-ChdFileReader::~ChdFileReader() = default;
-bool ChdFileReader::Open2(std::string filename, Error* error)
-{
-  (void)filename;
-  return Unsupported(error, "CHD not supported on Orbis (no libchdr)");
-}
-bool ChdFileReader::Precache2(ProgressCallback* progress, Error* error)
-{
-  (void)progress;
-  return Unsupported(error, "CHD not supported on Orbis (no libchdr)");
-}
-ThreadedFileReader::Chunk ChdFileReader::ChunkForOffset(u64 offset)
-{
-  (void)offset;
-  return ThreadedFileReader::Chunk{-1, 0, 0};
-}
-int ChdFileReader::ReadChunk(void* dst, s64 blockID)
-{
-  (void)dst;
-  (void)blockID;
-  return -1;
-}
-void ChdFileReader::Close2()
-{
-}
-uint ChdFileReader::GetBlockCount() const
 {
   return 0;
 }

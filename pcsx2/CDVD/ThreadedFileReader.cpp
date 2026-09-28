@@ -12,18 +12,26 @@
 #include "common/Threading.h"
 
 #include <cstring>
+#include <pthread.h> // PS5 port (vk-285-108)
 
 // Make sure buffer size is bigger than the cutoff where PCSX2 emulates a seek
 // If buffers are smaller than that, we can't keep up with linear reads
 static constexpr u32 MINIMUM_SIZE = 128 * 1024;
 
+// PS5 port (vk-285-108, GSRenderer.cpp): the reader thread runs on the pin layout's helper CPUs, never on
+// the EE's (a thread starts with its creator's CPUs, and the CPU thread may be pinned there already).
+void OrbisHelperThreadAdd(pthread_t thread);
+void OrbisHelperThreadRemove(pthread_t thread);
+
 ThreadedFileReader::ThreadedFileReader()
 {
 	m_readThread = std::thread([](ThreadedFileReader* r){ r->Loop(); }, this);
+	OrbisHelperThreadAdd(m_readThread.native_handle()); // PS5 port (vk-285-108)
 }
 
 ThreadedFileReader::~ThreadedFileReader()
 {
+	OrbisHelperThreadRemove(m_readThread.native_handle()); // PS5 port (vk-285-108): before the thread ends
 	m_quit = true;
 	(void)std::lock_guard<std::mutex>{m_mtx};
 	m_condition.notify_one();

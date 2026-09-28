@@ -47,6 +47,12 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "VUmicro.h"                    // vk-285-76: CpuVU0/CpuVU1->Reset() after a VU codegen switch
 #include "OrbisEEDiag.h"                // vk-285-100: OrbisCoreCyclesPerTsc
 #include "OrbisDeferredLog.h"            // vk-285-104: orbis_log_drain (the ticker)
+// vk-285-108 (GSRenderer.cpp): the helper threads' CPUs and the ticker's heartbeat for the GS thread's watchdog.
+void OrbisHelperThreadAdd(pthread_t thread);
+extern std::atomic<unsigned long long> g_orbis_ticker_beat;
+extern std::atomic<int> g_orbis_ticker_step, g_orbis_ticker_cpu;
+extern pthread_t g_orbis_ticker_thread;
+extern "C" int sceKernelGetCurrentCpu(void);
 #include <dlfcn.h>
 
 // Orbis: DualSense -> PCSX2 port 1 DualShock2 via libScePad (polled on its own thread).
@@ -935,6 +941,7 @@ static OrbisFrontendPaths orbis_frontend_paths(bool allow_download)
   // Test build 1 (vk-285-55): USB drives, the testing label and the logs download.
   fe.usb_dirs = s_usb_dirs;
   fe.usb_list = OrbisDir("cache") + "/usb-games.txt";
+  fe.serial_cache = OrbisDir("cache") + "/chd-serials.txt"; // vk-285-108
   fe.test_build = g_orbis_test_build;
   fe.build_label = orbis_build_label();
   fe.test_note = orbis_test_note(); // vk-285-105
@@ -1759,24 +1766,40 @@ int main()
   // without re-entry the VM silently stops after the ELF-load reset (pc and
   // cycles freeze, state stays Running). Ticker thread samples, main thread
   // drives re-entry until the smoke window ends.
-  std::thread([]() {
+  std::thread ticker([]() {
     // Runs for the whole session: 1s sampling + doubles as the periodic
     // log flusher (stdout is fully buffered; crash handler flushes on death).
+    // vk-285-108: each pass's steps are timed (a [ticker] line when a pass runs long) and published for the
+    // GS thread's watchdog (GSRenderer.cpp OrbisTickerWatch): the step, the CPU and the time of the last pass.
+    using TickClock = std::chrono::steady_clock;
+    const auto ms_between = [](TickClock::time_point a, TickClock::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
     for (int i = 0; ; i++)
     {
+      g_orbis_ticker_step.store(0, std::memory_order_relaxed);
+      const TickClock::time_point t_sleep = TickClock::now();
       std::this_thread::sleep_for(std::chrono::seconds(1));
+      const int cpu_start = sceKernelGetCurrentCpu();
+      g_orbis_ticker_cpu.store(cpu_start, std::memory_order_relaxed);
+      g_orbis_ticker_step.store(1, std::memory_order_relaxed);
+      const TickClock::time_point t_flags = TickClock::now();
       // vk-285-105: the flags folder and the polled settings files, read here for the emulation threads
       // (OrbisFlag and OrbisCachedRead answer from this snapshot; OrbisPaths.h).
       OrbisFlagsRefresh();
+      g_orbis_ticker_step.store(2, std::memory_order_relaxed);
+      const TickClock::time_point t_drain = TickClock::now();
       // vk-285-104: the GS thread's deferred lines (OrbisDeferredLog.h) out first, from this thread.
       orbis_log_drain();
+      g_orbis_ticker_step.store(3, std::memory_order_relaxed);
+      const TickClock::time_point t_lines = TickClock::now();
       {
         extern unsigned long long g_orbis_gs_idle_ticks, g_orbis_ee_waitgs_ticks, g_orbis_ee_stall_ticks, g_orbis_ee_waitgs_n, g_orbis_ee_stall_n;
         extern unsigned long long g_orbis_hwdraw_n;
         static unsigned long long p0, p1, p2, p3, p4, p5;
-        printf("[threads] draws=%llu gs_idle_ms=%.0f ee_waitgs_ms=%.0f(%llu) ee_ringfull_ms=%.0f(%llu)\n",
+        printf("[threads] draws=%llu gs_idle_ms=%.0f ee_waitgs_ms=%.0f(%llu) ee_ringfull_ms=%.0f(%llu) ticker_cpu=%d\n",
           g_orbis_hwdraw_n - p5, (g_orbis_gs_idle_ticks - p0) / 1596000.0, (g_orbis_ee_waitgs_ticks - p1) / 1596000.0, g_orbis_ee_waitgs_n - p3,
-          (g_orbis_ee_stall_ticks - p2) / 1596000.0, g_orbis_ee_stall_n - p4);
+          (g_orbis_ee_stall_ticks - p2) / 1596000.0, g_orbis_ee_stall_n - p4, cpu_start);
         p0 = g_orbis_gs_idle_ticks; p1 = g_orbis_ee_waitgs_ticks; p2 = g_orbis_ee_stall_ticks; p3 = g_orbis_ee_waitgs_n; p4 = g_orbis_ee_stall_n; p5 = g_orbis_hwdraw_n;
       }
 #ifdef ORBIS_VULKAN
@@ -1839,11 +1862,33 @@ int main()
         psxRegs.pc, (unsigned long long)psxRegs.cycle,
         (int)EmuConfig.Cpu.Recompiler.EnableEE, (int)EmuConfig.Cpu.Recompiler.EnableIOP);
       fflush(stdout);
+      g_orbis_ticker_step.store(4, std::memory_order_relaxed);
+      const TickClock::time_point t_overlay = TickClock::now();
       ps5::debug::set_line(4, "t+%ds st=%d ee=%08x/%llu io=%08x rec=%d%d", i + 1, (int)VMManager::GetState(),
         cpuRegs.pc, (unsigned long long)cpuRegs.cycle, psxRegs.pc,
         (int)EmuConfig.Cpu.Recompiler.EnableEE, (int)EmuConfig.Cpu.Recompiler.EnableIOP);
+      const TickClock::time_point t_end = TickClock::now();
+      const int cpu_end = sceKernelGetCurrentCpu();
+      // vk-285-108: a pass whose sleep overran by 250 ms or whose work took 250 ms, step by step.
+      const double sleep_ms = ms_between(t_sleep, t_flags), work_ms = ms_between(t_flags, t_end);
+      if (sleep_ms > 1250.0 || work_ms > 250.0)
+      {
+        printf("[ticker] slow pass %d: sleep %.0f flags %.0f drain %.0f lines %.0f overlay %.0f ms (cpu %d -> %d)\n",
+          i + 1, sleep_ms, ms_between(t_flags, t_drain), ms_between(t_drain, t_lines), ms_between(t_lines, t_overlay),
+          ms_between(t_overlay, t_end), cpu_start, cpu_end);
+        fflush(stdout);
+      }
+      g_orbis_ticker_cpu.store(cpu_end, std::memory_order_relaxed);
+      g_orbis_ticker_beat.store(__builtin_ia32_rdtsc(), std::memory_order_release);
     }
-  }).detach();
+  });
+  // vk-285-108: this (the CPU) thread may already be pinned to the EE's CPU (pin=3 applies during the first
+  // Execute), and a new thread starts with its creator's CPUs: the ticker goes to the layout's helper CPUs
+  // (GSRenderer.cpp OrbisHelperThreadAdd), and the GS thread's watchdog starts from now.
+  g_orbis_ticker_thread = ticker.native_handle();
+  OrbisHelperThreadAdd(ticker.native_handle());
+  g_orbis_ticker_beat.store(__builtin_ia32_rdtsc(), std::memory_order_release);
+  ticker.detach();
 
   {
     auto t0 = std::chrono::steady_clock::now();

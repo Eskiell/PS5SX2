@@ -607,21 +607,15 @@ std::string LowerAscii(std::string s)
 	return s;
 }
 
-bool IsIsoName(const char* name)
-{
-	const size_t n = std::strlen(name);
-	return n > 4 && name[0] != '.' && LowerAscii(name + n - 4) == ".iso";
-}
-
-// The .iso files straight in `dir`, or -1 when it can't be opened as a folder.
-int CountIsos(const std::string& dir)
+// The disc images (.iso, .chd) straight in `dir`, or -1 when it can't be opened as a folder.
+int CountImages(const std::string& dir)
 {
 	DIR* d = opendir(dir.c_str());
 	if (!d)
 		return -1;
 	int n = 0;
 	while (const dirent* e = readdir(d))
-		n += IsIsoName(e->d_name) ? 1 : 0;
+		n += IsDiscImageName(e->d_name) ? 1 : 0;
 	closedir(d);
 	return n;
 }
@@ -716,7 +710,7 @@ std::vector<std::string> orbis_usb_game_dirs(const char* when)
 			if (e->d_name[0] == '.')
 				continue;
 			entries++;
-			isos += IsIsoName(e->d_name) ? 1 : 0;
+			isos += IsDiscImageName(e->d_name) ? 1 : 0;
 			const std::string lower = LowerAscii(e->d_name);
 			if (lower == "dvd" || lower == "cd" || lower == "ps5sx2")
 				subs.push_back(e->d_name);
@@ -730,14 +724,14 @@ std::vector<std::string> orbis_usb_game_dirs(const char* when)
 		for (const std::string& sub : subs)
 		{
 			const std::string dir = std::string(root) + "/" + sub;
-			const int n = CountIsos(dir);
+			const int n = CountImages(dir);
 			if (n < 0)
 				continue;
 			dirs.push_back(dir);
 			found += ", " + sub + "/ (" + std::to_string(n) + ")";
 		}
 		if (when)
-			std::printf("[usb] %s: %s: %d entries; .iso files in %s\n", when, root, entries, found.c_str());
+			std::printf("[usb] %s: %s: %d entries; disc images in %s\n", when, root, entries, found.c_str());
 	}
 	if (when && drives == 0)
 		std::printf("[usb] %s: no USB drive with files at /mnt/usb0-7\n", when);
@@ -817,6 +811,7 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 {
 	if (g_web)
 		return true;
+	SetSerialCacheFile(paths.serial_cache); // vk-285-108
 	WebConfig cfg;
 	cfg.game_dirs = {paths.games_dir, paths.top_dir};
 	cfg.game_dirs.insert(cfg.game_dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1
@@ -868,6 +863,7 @@ int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budge
 	if (!paths.allow_download)
 		return 0;
 	const double t0 = Now();
+	SetSerialCacheFile(paths.serial_cache); // vk-285-108
 	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
 	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives, when visible here
 	std::vector<GameInfo> games = ScanGames(dirs);
@@ -903,6 +899,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 {
 	*ran = false;
 	const double t0 = Now();
+	SetSerialCacheFile(paths.serial_cache); // vk-285-108
 	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
 	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives
 	std::vector<GameInfo> games = ScanGames(dirs);

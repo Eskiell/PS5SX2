@@ -1,4 +1,4 @@
-// PS5 port frontend: the game list: disc images, their serials (read from the disc's SYSTEM.CNF),
+// PS5 port frontend: the game list: disc images (.iso, .chd), their serials (read from the disc's SYSTEM.CNF),
 // display titles made from Redump-style file names, and badges from the game's settings.
 //
 // Copyright (C) 2026 Spyros
@@ -25,11 +25,19 @@ struct GameInfo
 	std::vector<std::string> badges; // "6x", "16:9", "60 FPS"
 };
 
-// Lists the .iso images in `dirs` (the first folder wins for a name found twice), sorted by title.
+// A disc image's file name: .iso or (vk-285-108) .chd, in any case, not hidden.
+bool IsDiscImageName(const char* name);
+
+// Lists the disc images in `dirs` (the first folder wins for a name found twice), sorted by title.
 std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs);
 
-// "SLUS-21351" from the image's SYSTEM.CNF (ISO 9660, 2048-byte sectors); empty if unreadable.
-std::string ReadSerial(const std::string& iso_path);
+// "SLUS-21351" from the image's SYSTEM.CNF (ISO 9660); empty if unreadable. A .chd is read through libchdr
+// (a DVD's 2048-byte units or a CD's raw frames); one that needs a parent CHD reads as empty.
+std::string ReadSerial(const std::string& image_path);
+
+// vk-285-108: where ReadSerial keeps the CHD serials it found (opening a CHD costs tens of milliseconds);
+// empty: none kept.
+void SetSerialCacheFile(const std::string& path);
 
 // Display title and region from a file name stem ("Lord of the Rings, The - The Two Towers (USA)").
 void MakeTitle(const std::string& stem, std::string& title, std::string& region, std::string& extra);

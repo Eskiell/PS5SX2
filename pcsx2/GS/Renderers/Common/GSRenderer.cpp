@@ -135,6 +135,90 @@ void OrbisCpuForget(int slot)
 	if (slot >= 0 && slot < ORBIS_CPU_SLOTS)
 		s_orbis_thr[slot] = pthread_t{};
 }
+// vk-285-108: helper threads (the ticker, the disc reader) get the CPUs the pin layout leaves free. A thread
+// starts with its creator's CPU set, and the ticker is made by the CPU thread after the first Execute
+// returns, by when pin=3 has put that thread on the EE's CPU alone: vk-285-107's ticker shared CPU 2 with
+// an EE that never slept and stopped at t+8s (its log lines waited in memory until the app closed, and an FTP
+// listing of logs/ hung, likely on a file lock it held); vk-285-98 to 106's ticked only when the EE waited.
+// A registered thread gets the layout's `rest` CPUs now and whenever the layout changes; unregister before
+// the thread ends. 0: no layout applied yet (a thread keeps its own set).
+static std::mutex s_orbis_helper_mutex;
+static pthread_t s_orbis_helpers[8];
+static int s_orbis_helper_n = 0;
+static unsigned long long s_orbis_helper_mask = 0;
+static int OrbisPinHelpersLocked()
+{
+	int failed = 0;
+	for (int i = 0; i < s_orbis_helper_n; i++)
+		failed += scePthreadSetaffinity(s_orbis_helpers[i], s_orbis_helper_mask) != 0 ? 1 : 0;
+	return failed;
+}
+static void OrbisPinHelpers(unsigned long long mask)
+{
+	std::lock_guard<std::mutex> lock(s_orbis_helper_mutex);
+	s_orbis_helper_mask = mask;
+	const int failed = OrbisPinHelpersLocked();
+	printf("[pin] helpers: %d thread(s) to %#llx%s\n", s_orbis_helper_n, mask, failed ? " (some failed)" : "");
+}
+void OrbisHelperThreadAdd(pthread_t thread)
+{
+	std::lock_guard<std::mutex> lock(s_orbis_helper_mutex);
+	if (s_orbis_helper_n < static_cast<int>(std::size(s_orbis_helpers)))
+		s_orbis_helpers[s_orbis_helper_n++] = thread;
+	if (s_orbis_helper_mask != 0)
+		scePthreadSetaffinity(thread, s_orbis_helper_mask);
+}
+void OrbisHelperThreadRemove(pthread_t thread)
+{
+	std::lock_guard<std::mutex> lock(s_orbis_helper_mutex);
+	for (int i = 0; i < s_orbis_helper_n; i++)
+	{
+		if (pthread_equal(s_orbis_helpers[i], thread))
+		{
+			s_orbis_helpers[i] = s_orbis_helpers[--s_orbis_helper_n];
+			break;
+		}
+	}
+}
+// vk-285-108: the ticker's heartbeat (main-boot.cpp), which the GS thread watches once a second
+// (OrbisTickerWatch below): the TSC at the end of its last pass, the step it is in and the CPU it was on.
+std::atomic<unsigned long long> g_orbis_ticker_beat{0};
+std::atomic<int> g_orbis_ticker_step{0}, g_orbis_ticker_cpu{-1};
+pthread_t g_orbis_ticker_thread{};
+// No pass for 3 s: a deferred [ticker] line (it goes out with the ticker's next drain) naming its step and CPU,
+// and the ticker moved off that CPU (the layout's helper CPUs without it, or every CPU of the process but it).
+static void OrbisTickerWatch()
+{
+	static unsigned long long s_last_warn = 0;
+	static unsigned long long s_orig_mask = 0;
+	const unsigned long long beat = g_orbis_ticker_beat.load(std::memory_order_acquire);
+	if (beat == 0 || g_orbis_ticker_thread == pthread_t{})
+		return;
+	const unsigned long long now = __rdtsc();
+	const double stale_s = static_cast<double>(now - beat) / 1596300000.0;
+	if (stale_s < 3.0 || (s_last_warn != 0 && now - s_last_warn < 5ull * 1596300000ull))
+		return;
+	s_last_warn = now;
+	static const char* const steps[] = {"sleep", "flags", "drain", "lines", "overlay"};
+	const int step = g_orbis_ticker_step.load(std::memory_order_relaxed);
+	const int cpu = g_orbis_ticker_cpu.load(std::memory_order_relaxed);
+	unsigned long long mask;
+	{
+		std::lock_guard<std::mutex> lock(s_orbis_helper_mutex);
+		mask = s_orbis_helper_mask;
+	}
+	if (mask == 0)
+	{
+		if (s_orig_mask == 0 && scePthreadGetaffinity(g_orbis_ticker_thread, &s_orig_mask) != 0)
+			s_orig_mask = 0;
+		mask = s_orig_mask;
+	}
+	if (cpu >= 0 && cpu < 64 && (mask & ~(1ull << cpu)) != 0)
+		mask &= ~(1ull << cpu);
+	const int rc = mask ? scePthreadSetaffinity(g_orbis_ticker_thread, mask) : -1;
+	printf("[ticker] no pass for %.1f s: in step %s, last on CPU %d; moved to %#llx (rc=%d)\n", stale_s,
+		(step >= 0 && step < 5) ? steps[step] : "?", cpu, mask, rc);
+}
 // vk-285-87: pin=3, the explicit layout (s_orbis_pin_cpu). A named CPU outside the process mask counts as
 // unnamed. The EE's and the VU's SMT siblings are left free as well, so those two threads have their cores
 // alone; every unnamed thread gets the CPUs left over.
@@ -202,6 +286,7 @@ static void OrbisApplyLayout(unsigned long long orig)
 	printf("[pin] mode=3 ee=%d gs=%d vu=%d rec=%d queue=%d rest=%#llx all=%d rc ee=%d gs=%d vu=%d rec=%d queue=%d\n",
 		cpu[ORBIS_PIN_EE], cpu[ORBIS_PIN_GS], cpu[ORBIS_PIN_VU], cpu[ORBIS_PIN_REC], cpu[ORBIS_PIN_QUEUE], rest,
 		rc_all, rc[0], rc[1], rc[2], rc_rec, rc_queue);
+	OrbisPinHelpers(rest); // vk-285-108
 	fflush(stdout);
 	OrbisOSDLabel("PIN 3");
 }
@@ -257,6 +342,7 @@ void OrbisApplyPinning(int mode)
 	}
 	printf("[pin] mode=%d pairs=%d ee=%#llx gs=%#llx rest=%#llx rc ee=%d gs=%d vu=%d sw=%d/%d/%d/%d/%d\n", mode, np, ee,
 		gs, rest, rc[0], rc[1], rc[2], rc[3], rc[4], rc[5], rc[6], rc[7]);
+	OrbisPinHelpers(rest); // vk-285-108 (mode 0: every CPU of the process)
 	fflush(stdout);
 	char label[24];
 	snprintf(label, sizeof(label), "PIN %d", mode);
@@ -339,6 +425,7 @@ static void OrbisMeasureLoad()
 		g_orbis_ee_waitvu_ticks, g_orbis_ee_vuring_ticks, g_orbis_ee_throttle_ticks, g_orbis_gs_idle_ticks,
 		g_orbis_gs_swsync_ticks, g_orbis_vu_idle_ticks, 0};
 	OrbisLoadMeasure& m = s_orbis_load_measure;
+	OrbisTickerWatch(); // vk-285-108
 	m.nsw = std::min<u32>(PerformanceMetrics::GetGSSWThreadCount(), 16);
 	m.measured = s_tsc != 0 && sec > 0.2;
 	if (m.measured)

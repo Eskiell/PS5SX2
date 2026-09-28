@@ -1,6 +1,6 @@
 // PS5 port (vk-285-30): the game selector.
 //
-// At start, before PCSX2 owns the display, the port lists the disc images in /data/PCSX2 (*.iso)
+// At start, before PCSX2 owns the display, the port lists the disc images in /data/PCSX2 (*.iso, *.chd)
 // and lets the DualSense pick one: D-pad or left stick to move (held: repeats), L1/R1 a page,
 // X or OPTIONS to start. It draws on the VideoOut OVERLAY bus with the boot overlay's CPU canvas
 // (demo_renderer.cpp) and gives the bus and its memory back before the Vulkan device opens the
@@ -58,13 +58,15 @@ struct Game
 	unsigned long long bytes;
 };
 
+// .iso, or .chd (vk-285-108), in any case.
 bool IsDiscImage(const char* name)
 {
 	const size_t n = std::strlen(name);
 	if (n < 5 || name[0] == '.')
 		return false;
 	const char* ext = name + n - 4;
-	return ext[0] == '.' && (ext[1] | 0x20) == 'i' && (ext[2] | 0x20) == 's' && (ext[3] | 0x20) == 'o';
+	const char e1 = static_cast<char>(ext[1] | 0x20), e2 = static_cast<char>(ext[2] | 0x20), e3 = static_cast<char>(ext[3] | 0x20);
+	return ext[0] == '.' && ((e1 == 'i' && e2 == 's' && e3 == 'o') || (e1 == 'c' && e2 == 'h' && e3 == 'd'));
 }
 
 std::string Lower(const std::string& s)

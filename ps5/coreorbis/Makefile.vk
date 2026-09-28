@@ -192,6 +192,7 @@ INPUT_SRCS := $(PCSX2)/pcsx2/Input/InputManager.cpp \
 SPU2_SRCS := $(wildcard $(PCSX2)/pcsx2/SPU2/*.cpp)
 
 CDVD_SRCS := $(PCSX2)/pcsx2/CDVD/BlockdumpFileReader.cpp \
+  $(PCSX2)/pcsx2/CDVD/ChdFileReader.cpp \
   $(PCSX2)/pcsx2/CDVD/Ps1CD.cpp \
   $(PCSX2)/pcsx2/CDVD/CDVDcommon.cpp \
   $(PCSX2)/pcsx2/CDVD/CDVD.cpp \
@@ -269,6 +270,19 @@ CFLAGS := -O3 -DNDEBUG -march=znver2 -msse4.1 -mavx2 -mno-vzeroupper $(NARROW_FL
   -DRC_NO_THREADS=1 -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ROM -DRC_HASH_NO_ZIP \
   -include string.h -include stdlib.h \
   -I$(PCSX2)/3rdparty/rcheevos/include -I$(PCSX2)/3rdparty/demangler/include
+
+# vk-285-108: CHD images (.chd). PCSX2's ChdFileReader (CDVD_SRCS) reads them through libchdr, whose codecs
+# need 3rdparty/lzma's LZMA decoder and zlib and zstd; the SDK has neither of those two, so their
+# decompression sources are vendored in ps5/third_party (see its README.md). The frontend reads a CHD's
+# serial through libchdr as well (fe_games.cpp).
+PS5_THIRD := $(PCSX2)/ps5/third_party
+CHD_CSRCS := $(wildcard $(PCSX2)/3rdparty/libchdr/src/*.c) \
+  $(PCSX2)/3rdparty/lzma/src/LzmaDec.c \
+  $(addprefix $(PS5_THIRD)/zlib/,adler32.c crc32.c inffast.c inflate.c inftrees.c zutil.c) \
+  $(wildcard $(PS5_THIRD)/zstd/lib/common/*.c) $(wildcard $(PS5_THIRD)/zstd/lib/decompress/*.c)
+CHD_INCLUDES := -I$(PCSX2)/3rdparty/libchdr/include -I$(PCSX2)/3rdparty/lzma/include \
+  -I$(PS5_THIRD)/zlib -I$(PS5_THIRD)/zstd/lib
+C_SRCS := $(C_SRCS) $(CHD_CSRCS)
 
 # The GL build's shims minus glprobe, GLContextPS5 and gl_loader_table; plus the
 # shaderc shim and the Vulkan build's stand-ins for GL-only hooks.
@@ -379,6 +393,12 @@ OBJS := $(patsubst $(PCSX2)/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(SRCS))) \
   $(patsubst ./%.S,$(OBJDIR)/shim/%.o,$(SHIM_ASM)) \
   $(patsubst $(FE_DIR)/%.cpp,$(OBJDIR)/frontend/%.o,$(FE_SRCS)) \
   $(patsubst $(FE_DIR)/%.c,$(OBJDIR)/frontend/%.o,$(FE_CSRCS))
+
+# vk-285-108: the CHD code's flags (see CHD_CSRCS): single-threaded LZMA, zstd's C Huffman decoder (its
+# amd64 .S isn't vendored) without the legacy formats or the trace hooks.
+$(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(CHD_CSRCS)): CFLAGS += $(CHD_INCLUDES) -DZ7_ST \
+  -DZSTD_DISABLE_ASM=1 -DZSTD_LEGACY_SUPPORT=0 -DZSTD_NO_TRACE=1
+$(OBJDIR)/pcsx2/CDVD/ChdFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -I$(PCSX2)/3rdparty/libchdr/include
 
 all: $(OBJS)
 	@echo "VK COMPILE OK: $(words $(OBJS)) objects"
