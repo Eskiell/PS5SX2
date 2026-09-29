@@ -72,6 +72,14 @@ void OrbisOSDLabel(const char* text)
 }
 int g_orbis_diag = 0; // eerec-280: periodic GL readback diagnostics (live.ini diag=1)
 int g_orbis_perf = 0; // eerec-280: perf OSD + [perf] klog line every second (live.ini perf=1)
+// vk-285-113: PS5SX2/Overlay and PS5SX2/FpsGraph from gs.ini or the game's ini (main-boot.cpp orbis_ps5opts_from), and
+// the settings page's QR code over the game (the pad thread: L2 + D-pad down held for 2 s).
+std::atomic<int> g_orbis_overlay_mode{-1}; // -1: live.ini's fps= and perf= decide; 0: no box; 1: FPS; 2: FPS and the EE/GS/VU loads
+std::atomic<int> g_orbis_fps_graph{0}; // 1: a blue graph of the last minute's frame rate, top right
+std::atomic<int> g_orbis_qr_show{0}; // 1: the settings page's QR code and address over the game
+// The page's address as a QR code (fe_ps5.cpp): its modules, one byte each row by row, the side length, and the
+// "192.168.1.20:8844" it is shown as; false without a web server or a network.
+extern bool orbis_web_qr(std::vector<unsigned char>& modules, int& size, std::string& shown);
 // ---- eerec-285: live gs.ini reload flags; CPU placement sampling and pinning ----
 #include <pthread.h>
 #include <sys/param.h> // vk-285-87: cpuset_setaffinity (pin_all)
@@ -939,6 +947,92 @@ static void OrbisWatermark()
 }
 #endif
 
+// vk-285-113: the settings page's address as a QR code over the game while g_orbis_qr_show is set (the pad thread
+// toggles it: L2 + D-pad down held for 2 s). A white panel with black modules and the address under it, right of
+// the middle of the screen; the game goes on behind it. Made once per showing, at a size for the display's height.
+static void OrbisDrawQrPanel()
+{
+	static GSTexture* s_tex = nullptr;
+	static GSDevice* s_dev = nullptr;
+	static GSDevice* s_tex_dev = nullptr; // the device s_tex came from
+	static int s_w = 0, s_h = 0, s_for_height = 0;
+	static bool s_showing = false, s_ok = false;
+	if (!g_orbis_qr_show.load(std::memory_order_relaxed))
+	{
+		s_showing = false;
+		return;
+	}
+	if (!g_gs_device)
+		return;
+	const int wh = static_cast<int>(g_gs_device->GetWindowHeight());
+	if (!s_showing || s_dev != g_gs_device.get() || s_for_height != wh)
+	{
+		s_showing = true;
+		s_dev = g_gs_device.get();
+		s_for_height = wh;
+		s_ok = false;
+		std::vector<unsigned char> modules;
+		int size = 0;
+		std::string shown;
+		const bool have = orbis_web_qr(modules, size, shown);
+		const float k = static_cast<float>(wh) / 2160.0f;
+		const int mp = std::max(3, static_cast<int>(10.0f * k + 0.5f)); // pixels a module
+		const int ts = std::max(2, static_cast<int>(4.0f * k + 0.5f)); // text scale (a glyph is 5x7 units, 6 wide with its gap)
+		const int quiet = 4 * mp;
+		const int qr_px = have ? size * mp : 0;
+		const char* const title = "PS5SX2 SETTINGS";
+		const char* const hint = "HOLD L2 + DOWN TO CLOSE";
+		const std::string addr = have ? shown : std::string("NO NETWORK ADDRESS");
+		const auto text_w = [](const char* str, int scale) { return static_cast<int>(std::strlen(str)) * 6 * scale; };
+		const int w = std::max({qr_px + 2 * quiet, text_w(title, ts) + 2 * quiet, text_w(addr.c_str(), ts) + 2 * quiet,
+			text_w(hint, std::max(1, ts - 1)) + 2 * quiet});
+		const int line = 9 * ts;
+		const int h = quiet + line + (have ? qr_px + quiet / 2 : 0) + line + std::max(1, ts - 1) * 9 + quiet;
+		s_w = w;
+		s_h = h;
+		std::vector<u32> pix(static_cast<size_t>(w) * h, 0xFFFFFFFFu);
+		const auto centered = [&](int y, const char* str, int scale, u32 color) {
+			orbis_text_rgba(pix.data(), static_cast<unsigned>(w), static_cast<unsigned>(h),
+				static_cast<unsigned>(std::max(0, (w - text_w(str, scale)) / 2)), static_cast<unsigned>(y), str, static_cast<unsigned>(scale), color);
+		};
+		int y = quiet / 2;
+		centered(y, title, ts, 0xFF303030u);
+		y += line;
+		if (have)
+		{
+			const int x0 = (w - qr_px) / 2;
+			for (int my = 0; my < size; my++)
+				for (int mx = 0; mx < size; mx++)
+					if (modules[static_cast<size_t>(my) * size + mx])
+						for (int py = 0; py < mp; py++)
+							for (int px = 0; px < mp; px++)
+								pix[static_cast<size_t>(y + my * mp + py) * w + x0 + mx * mp + px] = 0xFF000000u;
+			y += qr_px + quiet / 2;
+		}
+		centered(y, addr.c_str(), ts, 0xFF000000u);
+		y += line;
+		centered(y, hint, std::max(1, ts - 1), 0xFF606060u);
+		if (s_tex && s_tex_dev == s_dev)
+			s_dev->Recycle(s_tex); // back to the device's pool (a new showing may need another size)
+		s_tex = s_dev->CreateTexture(w, h, 1, GSTexture::Format::Color);
+		s_tex_dev = s_dev;
+		if (s_tex)
+		{
+			s_tex->Update(GSVector4i(0, 0, w, h), pix.data(), w * 4);
+			s_ok = true;
+		}
+		printf("[present] settings QR %dx%d (%s): %s\n", w, h, have ? shown.c_str() : "no address", s_tex ? "on" : "no texture");
+		fflush(stdout);
+	}
+	if (!s_ok || !s_tex)
+		return;
+	const float ww = static_cast<float>(g_gs_device->GetWindowWidth());
+	const float whf = static_cast<float>(wh);
+	const float x1 = ww - 60.0f * whf / 2160.0f, x0 = x1 - static_cast<float>(s_w);
+	const float y0 = std::floor((whf - static_cast<float>(s_h)) * 0.5f), y1 = y0 + static_cast<float>(s_h);
+	g_gs_device->PresentRect(s_tex, GSVector4(0.0f, 0.0f, 1.0f, 1.0f), nullptr, GSVector4(x0, y0, x1, y1), PresentShader::COPY, 0.0f, Nearest);
+}
+
 static void OrbisGLOSD()
 {
 	if (!s_orbis_gl || !g_gs_device)
@@ -979,7 +1073,40 @@ static void OrbisGLOSD()
 		s_count = 0;
 		s_t0 = now;
 	}
-	char text[48];
+	// vk-285-113: the frame rate four times a second for the graph: 240 samples, a minute, two pixels each.
+	constexpr int GRAPH_N = 240;
+	static float s_hist[GRAPH_N] = {};
+	static int s_hist_n = 0;
+	static u64 s_q_count = 0;
+	static auto s_q_t0 = now;
+	static bool s_hist_dirty = false;
+	s_q_count++;
+	{
+		const double qdt = std::chrono::duration<double>(now - s_q_t0).count();
+		if (qdt >= 0.25)
+		{
+			const float sample = static_cast<float>(static_cast<double>(s_q_count) / qdt);
+			const int copies = std::min(8, std::max(1, static_cast<int>(qdt / 0.25))); // a stall shows as a flat stretch
+			for (int i = 0; i < copies; i++)
+			{
+				std::memmove(s_hist, s_hist + 1, (GRAPH_N - 1) * sizeof(float));
+				s_hist[GRAPH_N - 1] = sample;
+			}
+			s_hist_n = std::min(GRAPH_N, s_hist_n + copies);
+			s_q_count = 0;
+			s_q_t0 = now;
+			s_hist_dirty = true;
+		}
+	}
+
+	// vk-285-113: PS5SX2/Overlay (0 none, 1 FPS, 2 FPS and loads) wins over live.ini's fps= and perf= when set.
+	const int overlay = g_orbis_overlay_mode.load(std::memory_order_relaxed);
+	const bool show_fps = overlay >= 0 ? overlay >= 1 : s_orbis_fps_box;
+	const bool show_loads = overlay >= 0 ? overlay >= 2 : g_orbis_perf != 0;
+	const bool graph = g_orbis_fps_graph.load(std::memory_order_relaxed) != 0;
+
+	char text[48] = {};
+	bool have_text = true;
 	if (g_orbis_osd_text_frames.load(std::memory_order_acquire) > 0) // eerec-282
 	{
 		g_orbis_osd_text_frames.fetch_sub(1, std::memory_order_relaxed);
@@ -990,26 +1117,32 @@ static void OrbisGLOSD()
 		s_orbis_label_frames--;
 		snprintf(text, sizeof(text), "%s", s_orbis_modes[s_orbis_mode].name);
 	}
-	else if (s_orbis_fps_box && g_orbis_perf) // eerec-280; vk-285-72: the [load] line's loads
+	else if (show_fps && show_loads) // eerec-280; vk-285-72: the [load] line's loads
 		snprintf(text, sizeof(text), "%u FPS EE%u GS%u VU%u", s_fps,
 			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_ee : PerformanceMetrics::GetCPUThreadUsage()) + 0.5),
 			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_gs : PerformanceMetrics::GetGSThreadUsage()) + 0.5f),
 			static_cast<unsigned>((s_orbis_load_valid ? s_orbis_load_vu : PerformanceMetrics::GetVUThreadUsage()) + 0.5f));
-	else if (s_orbis_fps_box)
+	else if (show_fps)
 		snprintf(text, sizeof(text), "FPS %u", s_fps);
 	else
+		have_text = false;
+	if (!have_text && !graph)
+	{
+		OrbisDrawQrPanel();
 		return;
+	}
 
 	// vk-285-12: second line, the game's frame size and the size it is drawn at on screen.
 	char text2[48] = {};
-	if (s_orbis_fps_box && s_orbis_res[0] > 0)
+	if (have_text && show_fps && s_orbis_res[0] > 0)
 		snprintf(text2, sizeof(text2), "%dx%d > %dx%d", s_orbis_res[0], s_orbis_res[1], s_orbis_res[2], s_orbis_res[3]);
 
-	constexpr int TW = 480, TH = 80, SCALE = 3, LINE2_Y = 45; // eerec-280: 320 -> 480; vk-285-12: two lines
+	// vk-285-113: the box is the text (one line 50 px, two 80) and, when the graph is on, the graph under it.
+	constexpr int TW = 480, TEXT_H = 80, SCALE = 3, LINE2_Y = 45, GRAPH_H = 96, TH = TEXT_H + GRAPH_H;
 	static GSTexture* s_tex = nullptr;
 	static GSDevice* s_dev = nullptr;
 	static char s_last[96] = {};
-	static int s_box_w = TW, s_box_h = TH;
+	static int s_box_w = TW, s_box_h = TEXT_H;
 	if (s_dev != g_gs_device.get())
 	{
 		s_dev = g_gs_device.get();
@@ -1019,8 +1152,8 @@ static void OrbisGLOSD()
 	if (!s_tex)
 		return;
 	char key[96];
-	snprintf(key, sizeof(key), "%s|%s", text, text2);
-	if (strcmp(key, s_last) != 0)
+	snprintf(key, sizeof(key), "%s|%s|%d", have_text ? text : "", text2, graph ? 1 : 0);
+	if (strcmp(key, s_last) != 0 || (graph && s_hist_dirty))
 	{
 		static u32 s_buf[TW * TH];
 		const auto width = [](const char* str) {
@@ -1033,14 +1166,51 @@ static void OrbisGLOSD()
 			}
 			return tw;
 		};
-		s_box_w = std::min(TW, std::max(width(text), width(text2)) + 30 - SCALE);
-		s_box_h = text2[0] ? TH : 50;
+		const int text_h = !have_text ? 0 : (text2[0] ? TEXT_H : 50);
+		s_box_w = graph ? TW : std::min(TW, std::max(width(text), width(text2)) + 30 - SCALE);
+		s_box_h = text_h + (graph ? GRAPH_H : 0);
 		std::fill(std::begin(s_buf), std::end(s_buf), 0xFF202020u);
-		orbis_text_rgba(s_buf, TW, TH, 15, 12, text, SCALE, 0xFF00FFFFu);
-		if (text2[0])
-			orbis_text_rgba(s_buf, TW, TH, 15, LINE2_Y, text2, SCALE, 0xFFE0E0E0u);
+		if (have_text)
+		{
+			orbis_text_rgba(s_buf, TW, TH, 15, 12, text, SCALE, 0xFF00FFFFu);
+			if (text2[0])
+				orbis_text_rgba(s_buf, TW, TH, 15, LINE2_Y, text2, SCALE, 0xFFE0E0E0u);
+		}
+		if (graph)
+		{
+			// The bars in blue on the dark box; the scale is 0-60 fps, or 30 fps steps above that. Faint lines at 30 and 60.
+			constexpr u32 BLUE = 0xFFFF7A1Eu; // R 1E, G 7A, B FF (0xAABBGGRR)
+			constexpr u32 GRID = 0xFF484848u;
+			const int gy0 = text_h + 4, gh = GRAPH_H - 8; // the graph's rows: gy0 .. gy0 + gh - 1
+			float peak = 60.0f;
+			for (int i = GRAPH_N - s_hist_n; i < GRAPH_N; i++)
+				peak = std::max(peak, s_hist[i]);
+			const float scale_max = std::ceil(peak / 30.0f) * 30.0f;
+			const auto row_of = [&](float fps) { return gy0 + gh - 1 - static_cast<int>(std::min(fps, scale_max) / scale_max * (gh - 1) + 0.5f); };
+			for (const float mark : {30.0f, 60.0f})
+			{
+				if (mark > scale_max)
+					continue;
+				const int y = row_of(mark);
+				for (int x = 0; x < TW; x++)
+					s_buf[y * TW + x] = GRID;
+			}
+			for (int i = 0; i < GRAPH_N; i++)
+			{
+				if (i < GRAPH_N - s_hist_n)
+					continue;
+				const int top = row_of(s_hist[i]);
+				for (int y = top; y < gy0 + gh; y++)
+					for (int x = i * 2; x < i * 2 + 2; x++)
+						s_buf[y * TW + x] = BLUE;
+			}
+			char label[8];
+			snprintf(label, sizeof(label), "%d", static_cast<int>(scale_max));
+			orbis_text_rgba(s_buf, TW, TH, 3, static_cast<unsigned>(gy0 + 1), label, 2, 0xFFC0C0C0u);
+		}
 		s_tex->Update(GSVector4i(0, 0, TW, TH), s_buf, TW * 4);
 		snprintf(s_last, sizeof(s_last), "%s", key);
+		s_hist_dirty = false;
 	}
 	const float ww = static_cast<float>(g_gs_device->GetWindowWidth());
 	const float wh = static_cast<float>(g_gs_device->GetWindowHeight());
@@ -1054,6 +1224,7 @@ static void OrbisGLOSD()
 #endif
 	g_gs_device->PresentRect(s_tex, GSVector4(0.0f, 0.0f, static_cast<float>(s_box_w) / TW, static_cast<float>(s_box_h) / TH),
 		nullptr, GSVector4(x0, y0, x1, y1), PresentShader::COPY, 0.0f, Nearest);
+	OrbisDrawQrPanel();
 }
 // ---- end eerec-278 ----
 

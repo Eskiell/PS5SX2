@@ -61,6 +61,10 @@ int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budge
 bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag);
 // The disc image PCSX2 runs, for the page's "now playing".
 void orbis_web_now_playing(const std::string& image_path);
+// vk-285-113: the page's address as the QR code the shelf shows: `modules` (one byte a module, row by row), its
+// side length in `size`, and the short "<ip>:<port>" in `shown`. GSRenderer.cpp draws it over the game while
+// L2 + D-pad down is held for 2 s. False without a web server or a network.
+bool orbis_web_qr(std::vector<unsigned char>& modules, int& size, std::string& shown);
 
 // vk-285-51: the settings log, logs/settings.log. The settings page writes what it changed there
 // (fe_web.cpp) and the app what it did around it: starts, games, live applies, crashes and GPU

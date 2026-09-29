@@ -1463,8 +1463,17 @@ void InputManager::SetUSBVibrationIntensity(u32 port, float large_or_single_moto
 	SetPadVibrationIntensity(Pad::NUM_CONTROLLER_PORTS + port, large_or_single_motor_intensity, small_motor_intensity);
 }
 
+#ifdef ORBIS_VULKAN
+// vk-285-113: the PS5 port's rumble (main-boot.cpp): the DualShock 2's motors of PS2 ports 1 and 2 go to the
+// controllers by scePadSetVibration; there is no input source with motor bindings here.
+extern "C" void orbis_pad_vibration(unsigned pad_index, float large, float small);
+#endif
+
 void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single_motor_intensity, float small_motor_intensity)
 {
+#ifdef ORBIS_VULKAN
+	orbis_pad_vibration(pad_index, large_or_single_motor_intensity, small_motor_intensity);
+#endif
 	for (PadVibrationBinding& pad : s_pad_vibration_array)
 	{
 		if (pad.pad_index != pad_index)

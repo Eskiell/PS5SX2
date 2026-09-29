@@ -17,6 +17,7 @@
 #include "fe_text.h"
 #include "fe_vk.h"
 #include "fe_web.h"
+#include "third_party/qrcodegen/qrcodegen.h" // vk-285-113: orbis_web_qr
 
 #include <algorithm>
 #include <atomic>
@@ -902,6 +903,25 @@ void orbis_web_now_playing(const std::string& image_path)
 {
 	if (g_web)
 		g_web->SetNowPlaying(image_path);
+}
+
+// vk-285-113: the page's address as a QR code (the one the shelf shows) for the panel drawn over the game.
+bool orbis_web_qr(std::vector<unsigned char>& modules, int& size, std::string& shown)
+{
+	if (!g_web)
+		return false;
+	std::string url;
+	if (!g_web->Address(url, shown))
+		return false;
+	uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+	if (!qrcodegen_encodeText(url.c_str(), tmp, qr, qrcodegen_Ecc_MEDIUM, 1, 10, qrcodegen_Mask_AUTO, true))
+		return false;
+	size = qrcodegen_getSize(qr);
+	modules.assign(static_cast<size_t>(size) * size, 0);
+	for (int y = 0; y < size; y++)
+		for (int x = 0; x < size; x++)
+			modules[static_cast<size_t>(y) * size + x] = qrcodegen_getModule(qr, x, y) ? 1 : 0;
+	return true;
 }
 
 int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budget_s, void (*notify)(const char*))

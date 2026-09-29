@@ -128,6 +128,22 @@ static std::string orbis_ini_summary(const std::string& path)
   return out.empty() ? "nothing set" : out;
 }
 
+// vk-285-113: rumble. PCSX2's DualShock 2 hands its two motors (the big one's strength, the small one on or off) to
+// InputManager::SetPadVibrationIntensity, which went nowhere with no input source bound. Input/InputManager.cpp now
+// passes the values of PS2 ports 1 and 2 to orbis_pad_vibration; the pad thread sends the changes to the controllers
+// with scePadSetVibration. PS5SX2/Rumble=false (the settings page's Controller group) turns it off.
+static std::atomic<u32> g_orbis_rumble_state[2]; // (big << 8) | small, each 0..255
+static std::atomic<int> g_orbis_rumble_on{1};
+extern "C" void orbis_pad_vibration(unsigned pad_index, float large, float small)
+{
+  if (pad_index > 1)
+    return;
+  const auto to_byte = [](float v) { return static_cast<u32>(std::min(std::max(v, 0.0f), 1.0f) * 255.0f + 0.5f); };
+  g_orbis_rumble_state[pad_index].store((to_byte(large) << 8) | to_byte(small), std::memory_order_relaxed);
+}
+// vk-285-113: L2 + D-pad down held for 2 s toggles the settings page's QR code over the game (GSRenderer.cpp).
+extern std::atomic<int> g_orbis_qr_show;
+
 namespace {
 struct OrbisPadData { uint32_t buttons; uint8_t lx, ly, rx, ry, l2, r2, pad0, pad1; uint8_t rest[256]; };
 
@@ -148,6 +164,7 @@ int scePadInit(void);
 int scePadOpen(int32_t userId, int32_t type, int32_t index, const void *param);
 int scePadGetHandle(int32_t userId, int32_t type, int32_t index);
 int scePadReadState(int32_t handle, void *data);
+int scePadSetVibration(int32_t handle, const void *param); // vk-285-113: { uint8_t big, small }
 int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int32_t *userId);
 // vk-285-109: the users logged in on the PS5, four ids, -1 for none (how the PS5 SDL port's joystick code
@@ -297,6 +314,36 @@ static void orbis_pad_apply(OrbisPadPort &p, const OrbisPadData &d)
   last[0] = d.l2; last[1] = d.r2; last[2] = d.lx; last[3] = d.ly; last[4] = d.rx; last[5] = d.ry;
 }
 
+// vk-285-113: one controller's rumble: what the game last asked for (or nothing: Rumble off, or leaving for the menu),
+// sent when it changes. The first few changes and any failure are logged (a DualSense in PS4 mode takes the same
+// two-motor call).
+struct OrbisRumbleOut
+{
+  u32 sent = 0;
+  unsigned logged = 0;
+};
+static void orbis_rumble_send(int index, int32_t handle, OrbisRumbleOut &out)
+{
+  if (handle < 0)
+    return;
+  const bool on = g_orbis_rumble_on.load(std::memory_order_relaxed) != 0 && !g_orbis_menu_request.load(std::memory_order_relaxed);
+  const u32 want = on ? g_orbis_rumble_state[index].load(std::memory_order_relaxed) : 0u;
+  if (want == out.sent)
+    return;
+  const uint8_t param[2] = {static_cast<uint8_t>(want >> 8), static_cast<uint8_t>(want & 0xFFu)};
+  const int rc = scePadSetVibration(handle, param);
+  if (out.logged < 8u || rc != 0)
+  {
+    out.logged++;
+    if (out.logged <= 12u)
+    {
+      printf("[pad] rumble port %d: big %u small %u -> rc=%x\n", index + 1, want >> 8, want & 0xFFu, static_cast<unsigned>(rc));
+      fflush(stdout);
+    }
+  }
+  out.sent = want;
+}
+
 static void *orbis_pad_thread(void *)
 {
   auto p_read = [](int32_t h, OrbisPadData *d) { return scePadReadState(h, d); };
@@ -407,7 +454,41 @@ static void *orbis_pad_thread(void *)
         if (s_x_consumed)
           d.buttons &= ~0x00004000u;
       }
+      // vk-285-113: L2 + D-pad down held for 2 s: the settings page's QR code and address over the game, or off
+      // again. The game keeps running (and sees the buttons: a 2 s hold is nobody's move).
+      {
+        static bool s_holding = false, s_fired = false;
+        static std::chrono::steady_clock::time_point s_since;
+        const bool l2 = (d.buttons & 0x00000100u) != 0 || d.l2 >= 200u;
+        const bool down = (d.buttons & 0x00000040u) != 0;
+        if (l2 && down)
+        {
+          const auto now = std::chrono::steady_clock::now();
+          if (!s_holding)
+          {
+            s_holding = true;
+            s_fired = false;
+            s_since = now;
+          }
+          else if (!s_fired && now - s_since >= std::chrono::seconds(2))
+          {
+            s_fired = true;
+            const int show = g_orbis_qr_show.load(std::memory_order_relaxed) ? 0 : 1;
+            g_orbis_qr_show.store(show, std::memory_order_relaxed);
+            printf("[pad] L2 + D-pad down held for 2 s: settings QR %s\n", show ? "shown" : "hidden");
+            fflush(stdout);
+            orbis_eventf("settings page QR code %s over the game (L2 + D-pad down held for 2 s)", show ? "shown" : "hidden");
+          }
+        }
+        else
+          s_holding = false;
+      }
       orbis_pad_apply(port1, d);
+    }
+    {
+      static OrbisRumbleOut s_rumble1, s_rumble2;
+      orbis_rumble_send(0, handle, s_rumble1);
+      orbis_rumble_send(1, port2.handle, s_rumble2);
     }
     if (++reads == 250u || (rc != 0 && reads % 1000u == 0u))
       printf("[pad] read rc=%x buttons=%08x lx=%u ly=%u\n", rc, d.buttons, d.lx, d.ly);
@@ -698,6 +779,32 @@ static bool orbis_vu1_speed_from(const SettingsInterface& si)
   return false;
 }
 
+// vk-285-113: PS5SX2/Overlay, PS5SX2/FpsGraph and PS5SX2/Rumble from gs.ini and the game's file, live (the settings
+// page's Overlay and Controller groups). Overlay: 0 no box, 1 FPS, 2 FPS and the EE/GS/VU loads; unset, or anything
+// else: live.ini's fps= and perf= decide, as before. GSRenderer.cpp draws the box and the graph; the pad thread sends
+// the rumble.
+extern std::atomic<int> g_orbis_overlay_mode;
+extern std::atomic<int> g_orbis_fps_graph;
+static void orbis_ps5opts_from(const SettingsInterface& si)
+{
+  s32 overlay = -1;
+  if (!si.GetIntValue("PS5SX2", "Overlay", &overlay) || overlay < 0 || overlay > 2)
+    overlay = -1;
+  bool graph = false, rumble = true;
+  si.GetBoolValue("PS5SX2", "FpsGraph", &graph);
+  si.GetBoolValue("PS5SX2", "Rumble", &rumble);
+  const int old_overlay = g_orbis_overlay_mode.exchange(overlay, std::memory_order_relaxed);
+  const int old_graph = g_orbis_fps_graph.exchange(graph ? 1 : 0, std::memory_order_relaxed);
+  const int old_rumble = g_orbis_rumble_on.exchange(rumble ? 1 : 0, std::memory_order_relaxed);
+  if (old_overlay != overlay || old_graph != (graph ? 1 : 0) || old_rumble != (rumble ? 1 : 0))
+  {
+    printf("[boot] on-screen box %s, FPS graph %s, rumble %s (PS5SX2/Overlay, FpsGraph, Rumble)\n",
+      overlay < 0 ? "as live.ini says" : overlay == 0 ? "off" : overlay == 1 ? "FPS" : "FPS and loads", graph ? "on" : "off",
+      rumble ? "on" : "off");
+    fflush(stdout);
+  }
+}
+
 // eerec-285: gs.ini re-read while running (GSRenderer.cpp OrbisLiveTune sees the change, StubHost's
 // PumpMessagesOnCPUThread calls this at vsync on the CPU thread).
 static MemorySettingsInterface s_base_pre_gsini; // the base layer as it was before boot applied gs.ini
@@ -756,6 +863,7 @@ void orbis_reload_gs_ini_cpu()
     s_base_si = trial;
   }
   const bool vu_codegen_changed = orbis_vu1_speed_from(trial); // vk-285-75, vk-285-76
+  orbis_ps5opts_from(trial); // vk-285-113
   VMManager::ApplySettings();
   if (vu_codegen_changed)
   {
@@ -1600,6 +1708,7 @@ int main()
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
   orbis_vu1_speed_from(s_base_si); // vk-285-75
+  orbis_ps5opts_from(s_base_si); // vk-285-113
   {
     // vk-285-110: the PS2 system language games are told (pcsx2/CDVD/CDVD.cpp): the PS5SX2/GameLanguage
     // setting (0 Japanese .. 7 Portuguese, from gs.ini or the game's settings file), else the PS5's own
