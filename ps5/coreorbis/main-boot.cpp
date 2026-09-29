@@ -48,6 +48,8 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "VUmicro.h"                    // vk-285-76: CpuVU0/CpuVU1->Reset() after a VU codegen switch
 #include "OrbisEEDiag.h"                // vk-285-100: OrbisCoreCyclesPerTsc
 #include "OrbisDeferredLog.h"            // vk-285-104: orbis_log_drain (the ticker)
+#include "orbis-shims/OrbisTextureRoots.h" // vk-285-113: a game's texture pack on a USB drive
+#include <mutex>
 // vk-285-108 (GSRenderer.cpp): the helper threads' CPUs and the ticker's heartbeat for the GS thread's watchdog.
 void OrbisHelperThreadAdd(pthread_t thread);
 extern std::atomic<unsigned long long> g_orbis_ticker_beat;
@@ -785,6 +787,31 @@ static bool orbis_vu1_speed_from(const SettingsInterface& si)
 // the rumble.
 extern std::atomic<int> g_orbis_overlay_mode;
 extern std::atomic<int> g_orbis_fps_graph;
+
+// vk-285-113: a game's texture pack outside /data/PCSX2/textures: PS5SX2/TexturesDir/<serial>, or a USB drive's
+// PS5SX2/textures, PCSX2/textures or textures folder (orbis-shims/OrbisTextureRoots.h; GSTextureReplacements.cpp asks
+// when a game starts). The setting is kept here under a lock: the GS thread asks, the CPU thread reads the files.
+static std::mutex g_orbis_textures_mutex;
+static std::string g_orbis_textures_dir;
+static void orbis_set_textures_dir(const std::string& dir)
+{
+  std::lock_guard<std::mutex> lock(g_orbis_textures_mutex);
+  if (dir == g_orbis_textures_dir)
+    return;
+  g_orbis_textures_dir = dir;
+  printf("[boot] PS5SX2/TexturesDir=%s\n", dir.empty() ? "(not set: USB drives, then /data/PCSX2/textures)" : dir.c_str());
+  fflush(stdout);
+}
+std::string OrbisTexturesGameDir(const std::string& serial, std::string& how)
+{
+  std::string manual;
+  {
+    std::lock_guard<std::mutex> lock(g_orbis_textures_mutex);
+    manual = g_orbis_textures_dir;
+  }
+  return OrbisTextures::FindGameDir(OrbisTextures::UsbRoots("/mnt"), manual, serial, &how);
+}
+
 static void orbis_ps5opts_from(const SettingsInterface& si)
 {
   s32 overlay = -1;
@@ -796,6 +823,9 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
   const int old_overlay = g_orbis_overlay_mode.exchange(overlay, std::memory_order_relaxed);
   const int old_graph = g_orbis_fps_graph.exchange(graph ? 1 : 0, std::memory_order_relaxed);
   const int old_rumble = g_orbis_rumble_on.exchange(rumble ? 1 : 0, std::memory_order_relaxed);
+  std::string textures_dir; // vk-285-113: PS5SX2/TexturesDir, where a game's texture packs are besides USB drives
+  si.GetStringValue("PS5SX2", "TexturesDir", &textures_dir);
+  orbis_set_textures_dir(textures_dir);
   if (old_overlay != overlay || old_graph != (graph ? 1 : 0) || old_rumble != (rumble ? 1 : 0))
   {
     printf("[boot] on-screen box %s, FPS graph %s, rumble %s (PS5SX2/Overlay, FpsGraph, Rumble)\n",

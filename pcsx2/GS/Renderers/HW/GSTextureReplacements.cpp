@@ -333,8 +333,20 @@ std::optional<TextureName> GSTextureReplacements::ParseReplacementName(const std
 	return std::nullopt;
 }
 
+#ifdef ORBIS_VULKAN
+// vk-285-113: a game's texture pack outside /data/PCSX2/textures: on a USB drive, or where the PS5SX2/TexturesDir
+// setting says (main-boot.cpp, orbis-shims/OrbisTextureRoots.h). Found again at each ReloadReplacementMap; empty: the
+// pack, if there is one, is in the textures folder.
+extern std::string OrbisTexturesGameDir(const std::string& serial, std::string& how);
+static std::string s_orbis_game_dir;
+#endif
+
 std::string GSTextureReplacements::GetGameTextureDirectory()
 {
+#ifdef ORBIS_VULKAN
+	if (!s_orbis_game_dir.empty())
+		return s_orbis_game_dir;
+#endif
 	return Path::Combine(EmuFolders::Textures, s_current_serial);
 }
 
@@ -450,6 +462,9 @@ static bool GetWrongCasePath(std::string* output, const char* dir, std::string_v
 void GSTextureReplacements::ReloadReplacementMap()
 {
 	SyncWorkerThread();
+#ifdef ORBIS_VULKAN
+	s_orbis_game_dir.clear();
+#endif
 
 	// clear out the caches
 	{
@@ -476,6 +491,14 @@ void GSTextureReplacements::ReloadReplacementMap()
 		return;
 	}
 
+#ifdef ORBIS_VULKAN
+	{
+		std::string how;
+		s_orbis_game_dir = OrbisTexturesGameDir(s_current_serial, how);
+		if (!s_orbis_game_dir.empty())
+			OrbisDeferredPrintf("[texrep] %s: the texture pack is in %s (%s)\n", s_current_serial.c_str(), s_orbis_game_dir.c_str(), how.c_str());
+	}
+#endif
 	const std::string texture_dir = GetGameTextureDirectory();
 	const std::string replacement_dir(Path::Combine(texture_dir, TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME));
 
@@ -484,7 +507,11 @@ void GSTextureReplacements::ReloadReplacementMap()
 	// For some reason texture pack authors think it's a good idea to rename the replacements directory to something with the wrong case...
 	std::string wrong_case_path;
 	const std::string* right_case_path = nullptr;
-	if (GetWrongCasePath(&wrong_case_path, EmuFolders::Textures.c_str(), s_current_serial, &files))
+	if (
+#ifdef ORBIS_VULKAN
+		s_orbis_game_dir.empty() && // vk-285-113: a pack found on a drive was found in whatever case its names have
+#endif
+		GetWrongCasePath(&wrong_case_path, EmuFolders::Textures.c_str(), s_current_serial, &files))
 		right_case_path = &texture_dir;
 	else if (GetWrongCasePath(&wrong_case_path, texture_dir.c_str(), TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME, &files))
 		right_case_path = &replacement_dir;

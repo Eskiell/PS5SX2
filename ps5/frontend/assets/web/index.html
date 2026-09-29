@@ -280,7 +280,10 @@ const GROUPS = [
       hint: "Higher fixes more effects and costs speed. Full and Max are left out for now: Max hung the GPU in Ratchet & Clank." },
     { key: "hw_mipmap", label: "Mipmapping", type: "toggle", def: "true", short: "Mipmaps %" },
     { key: "LoadTextureReplacements", label: "Texture replacements", type: "toggle", def: "false", short: "Replacements %",
-      hint: "Loads a texture pack's PNG and DDS files from /data/PCSX2/textures/<game serial>/replacements/. DDS (DXT1 to DXT5, BC7 or uncompressed) is unpacked by the CPU as a game asks for it." },
+      hint: "Loads a texture pack's PNG and DDS files from <game serial>/replacements/ in a USB drive's PS5SX2/textures (or textures) folder, else in /data/PCSX2/textures. DDS (DXT1 to DXT5, BC7 or uncompressed) is unpacked by the CPU as a game asks for it." },
+    { key: "PS5SX2/TexturesDir", label: "Textures folder", type: "text", def: "", restart: true, later: "the textures folder",
+      placeholder: "/mnt/usb0/PS2/textures",
+      hint: "Optional: a folder that holds <game serial>/replacements/, when the pack isn't in one of the places above." },
   ]},
   { title: "Performance", items: [
     { key: "EmuCore/Speedhacks/EECycleRate", label: "EE cycle rate", type: "seg", def: "0", short: "EE %",
@@ -501,6 +504,11 @@ function render() {
           '<div class="from" style="margin-top:3px">' + from + '</div>' + (it.hint ? '<div class="hint">' + esc(it.hint) + "</div>" : "") +
           '</div><button class="sw' + (truthy(eff.v) ? " on" : "") + (eff.from !== "own" ? " inh" : "") + '" data-key="' + esc(it.key) + '" data-val="' +
           (truthy(eff.v) ? "false" : "true") + '" aria-label="' + esc(it.label) + '"></button></div></div>';
+      } else if (it.type === "text") {
+        html += '<div class="row"><div class="head"><div class="label">' + esc(it.label) + tag + '</div><div class="from">' + from + '</div></div>';
+        if (it.hint) html += '<div class="hint">' + esc(it.hint) + "</div>";
+        html += '<input class="txt" data-textkey="' + esc(it.key) + '" maxlength="200" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="' +
+          esc(it.placeholder || "") + '" value="' + esc(eff.from === "default" ? "" : eff.v) + '"></div>';
       } else {
         html += '<div class="row"><div class="head"><div class="label">' + esc(it.label) + tag + '</div><div class="from">' + from + '</div></div>';
         if (it.hint) html += '<div class="hint">' + esc(it.hint) + "</div>";
@@ -531,6 +539,11 @@ function render() {
   $("settings").querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => change(b.dataset.key, b.dataset.val)));
   $("settings").querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", () => change(b.dataset.reset, null)));
   $("settings").querySelectorAll("[data-patch]").forEach((b) => b.addEventListener("click", () => patch(b.dataset.patch, b.dataset.on === "1")));
+  $("settings").querySelectorAll("[data-textkey]").forEach((el) => el.addEventListener("change", () => {
+    const v = el.value.trim();
+    if (v.includes("#")) { toast("A # can't be in a path here"); render(); return; }
+    change(el.dataset.textkey, v === "" ? null : v);
+  }));
   $("settings").querySelectorAll("[data-mcd]").forEach((el) => el.addEventListener("change", () => mcdChoose(SLOTS[+el.dataset.mcd - 1], el.value)));
   $("settings").querySelectorAll("[data-mcdreset]").forEach((b) => b.addEventListener("click", () => mcdChoose(SLOTS[+b.dataset.mcdreset - 1], "")));
   $("settings").querySelectorAll("[data-mcdsize]").forEach((b) => b.addEventListener("click", () => { mcdSize = +b.dataset.mcdsize; render(); }));
