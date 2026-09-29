@@ -3,7 +3,8 @@
  * The same pieces as the settings page's "Download logs" (fe_web.cpp ApiReport), for one session: its lines of
  * settings.log, its boot.log, emulog.txt and stderr.log, a GPU hang dump written during it, the settings files,
  * the switch names, and the end of the helper's log. Not included: the game list, the settings page's token.
- * IPv4 addresses are replaced with x.x.x.x. */
+ * IPv4 addresses are replaced with x.x.x.x. The logs are in /data/PCSX2/logs or, on a console set up from a
+ * release (no logs/ folder), in /data/PCSX2 itself (log_dirs). */
 #include "report.h"
 
 #include "config.h"
@@ -193,39 +194,128 @@ int report_redact(sbuf *text, const char *secret) {
   return 0;
 }
 
+/* ---- where the session's logs are ---- */
+
+/* PS5SX2 writes its logs where OrbisLogPath (coreorbis/orbis-shims/orbis_paths.cpp) puts them: in logs/ when that
+ * folder exists, otherwise in /data/PCSX2 itself. The release zips have no logs/ folder and PS5SX2 doesn't make
+ * one, so a console set up from a release keeps every log in /data/PCSX2 (1.0 and 1.1 only looked in logs/, so
+ * their reports from those consoles had no logs and no game). Both places are searched, logs/ first. Returns how
+ * many places there are. */
+static int log_dirs(char dirs[2][PATH_LEN]) {
+  int n = 0;
+  if (path_join(dirs[0], PATH_LEN, g_p.pcsx2, "logs") == 0 && fs_is_dir(dirs[0]))
+    n = 1;
+  str_copy(dirs[n], PATH_LEN, g_p.pcsx2);
+  return n + 1;
+}
+
+/* "/data/PCSX2/logs" or "/data/PCSX2", for the report's header (on the host, dirs have the test root in front). */
+static const char *log_dir_name(const char *dir) {
+  return str_ends(dir, "/logs") ? P_PCSX2 "/logs" : P_PCSX2;
+}
+
+/* One place's settings.log, with the settings.1.log before it (the settings page starts a new settings.log at
+ * 512 KB and the old one becomes settings.1.log). */
+static void read_settings_log(const char *dir, sbuf *slog) {
+  char p[PATH_LEN];
+  sbuf part;
+  sb_init(&part);
+  sb_clear(slog);
+  path_join(p, sizeof(p), dir, "settings.1.log");
+  if (fs_read_capped(p, 1u << 20, 0, &part, NULL, NULL) == 0 && part.len) {
+    sb_append(slog, part.data, part.len);
+    if (part.data[part.len - 1] != '\n')
+      sb_puts(slog, "\n");
+  }
+  path_join(p, sizeof(p), dir, "settings.log");
+  if (fs_read_capped(p, 2u << 20, 0, &part, NULL, NULL) == 0 && part.len)
+    sb_append(slog, part.data, part.len);
+  sb_free(&part);
+}
+
+/* The session's "app start: ... (pid N)" line: the last one, since pids come round again after a restart. */
+static const char *find_session(const sbuf *slog, pid_t pid) {
+  if (!slog->data || !slog->len)
+    return NULL;
+  const char *b = slog->data, *e = slog->data + slog->len, *sess = NULL;
+  char pidmark[32];
+  snprintf(pidmark, sizeof(pidmark), "(pid %d)", (int)pid);
+  for (const char *l = b; l < e; l = line_end(l, e)) {
+    const char *le = line_end(l, e);
+    if (line_has(l, le, "  app start: ") && line_has(l, le, pidmark))
+      sess = l;
+  }
+  return sess;
+}
+
+/* The session's own logs. PS5SX2 starts new ones at every start and the earlier ones move up (.1, .2, ...), so
+ * they are the set whose boot log has this session's "[boot] pid=N" line. Sets *dir (an index into dirs) and *sfx
+ * and keeps that boot log's start and end in text; returns 1. Without such a line: the newest boot log there is
+ * (dirs[*dir]/boot<*sfx>.log, *sfx left as given), and 0. */
+static int find_boot_log(char dirs[2][PATH_LEN], int ndirs, pid_t pid, int *dir, const char **sfx, sbuf *text) {
+  static const char *const sfxs[] = {"", ".1", ".2"};
+  char mark[48], name[32], p[PATH_LEN];
+  snprintf(mark, sizeof(mark), "[boot] pid=%d\n", (int)pid);
+  sb_clear(text);
+  for (int d = 0; d < ndirs; d++)
+    for (int k = 0; k < 3; k++) {
+      snprintf(name, sizeof(name), "boot%s.log", sfxs[k]);
+      path_join(p, sizeof(p), dirs[d], name);
+      if (fs_read_capped(p, 256u << 10, 128u << 10, text, NULL, NULL) == 0 && text->data &&
+          strstr(text->data, mark) != NULL) {
+        *dir = d;
+        *sfx = sfxs[k];
+        return 1;
+      }
+    }
+  sb_clear(text);
+  *dir = 0;
+  for (int d = 0; d < ndirs; d++) {
+    snprintf(name, sizeof(name), "boot%s.log", *sfx);
+    path_join(p, sizeof(p), dirs[d], name);
+    if (fs_exists(p)) {
+      *dir = d;
+      break;
+    }
+  }
+  return 0;
+}
+
+/* The last line of text starting with key, what follows it (to the end of the line) into dst. */
+static void last_value(char *dst, size_t size, const sbuf *text, const char *key) {
+  dst[0] = '\0';
+  if (!text->data)
+    return;
+  const char *b = text->data, *e = text->data + text->len;
+  for (const char *l = b; l < e; l = line_end(l, e))
+    if ((size_t)(e - l) > strlen(key) && !memcmp(l, key, strlen(key)))
+      copy_after(dst, size, l, line_end(l, e), key, NULL);
+}
+
 int report_build(session_info *s, sbuf *out) {
   sb_clear(out);
-  char logs[PATH_LEN], p[PATH_LEN];
-  path_join(logs, sizeof(logs), g_p.pcsx2, "logs");
+  char p[PATH_LEN];
+  char dirs[2][PATH_LEN];
+  const int ndirs = log_dirs(dirs);
 
-  /* settings.log: the session's lines */
-  sbuf slog, part;
+  /* settings.log: the session's lines, from whichever place has its start line */
+  sbuf slog;
   sb_init(&slog);
-  sb_init(&part);
-  /* the settings page starts a new settings.log at 512 KB (the old one becomes settings.1.log) */
-  path_join(p, sizeof(p), logs, "settings.1.log");
-  if (fs_read_capped(p, 1u << 20, 0, &part, NULL, NULL) == 0 && part.len) {
-    sb_append(&slog, part.data, part.len);
-    if (part.data[part.len - 1] != '\n')
-      sb_puts(&slog, "\n");
-  }
-  path_join(p, sizeof(p), logs, "settings.log");
-  if (fs_read_capped(p, 2u << 20, 0, &part, NULL, NULL) == 0 && part.len)
-    sb_append(&slog, part.data, part.len);
-  sb_free(&part);
-  const int have_slog = slog.data && slog.len;
   const char *sess = NULL, *sess_end = NULL, *ctx_start = NULL;
+  int slog_dir = -1;
+  for (int d = 0; d < ndirs && !sess; d++) {
+    read_settings_log(dirs[d], &slog);
+    sess = find_session(&slog, s->pid);
+    if (sess || (slog_dir < 0 && slog.len))
+      slog_dir = d;
+  }
+  if (!sess && slog_dir >= 0 && slog_dir != ndirs - 1)
+    read_settings_log(dirs[slog_dir], &slog); /* no start line anywhere: the end of the first settings.log found */
+  const int have_slog = slog.data && slog.len;
   s->label[0] = s->build[0] = s->game[0] = s->end_line[0] = '\0';
   str_copy(s->end, sizeof(s->end), "ok");
   if (have_slog) {
     const char *b = slog.data, *e = slog.data + slog.len;
-    char pidmark[32];
-    snprintf(pidmark, sizeof(pidmark), "(pid %d)", (int)s->pid);
-    for (const char *l = b; l < e; l = line_end(l, e)) {
-      const char *le = line_end(l, e);
-      if (line_has(l, le, "  app start: ") && line_has(l, le, pidmark))
-        sess = l;
-    }
     if (sess) {
       sess_end = e;
       for (const char *l = line_end(sess, e); l < e; l = line_end(l, e))
@@ -274,6 +364,24 @@ int report_build(session_info *s, sbuf *out) {
       snprintf(s->end, sizeof(s->end), "%s%s", ends[best], note ? "+note" : "");
     }
   }
+
+  /* this session's boot.log, emulog.txt and stderr.log */
+  const char *sfx = s->suffix ? s->suffix : "";
+  int ldir = 0;
+  sbuf boot;
+  sb_init(&boot);
+  const int boot_found = find_boot_log(dirs, ndirs, s->pid, &ldir, &sfx, &boot);
+  /* no start line in settings.log (it's gone, or a build that doesn't write one): the boot log names the build
+   * and the game too */
+  if (boot_found && !s->build[0])
+    last_value(s->build, sizeof(s->build), &boot, "[boot] build=");
+  if (boot_found && !sess) {
+    char path[512];
+    last_value(path, sizeof(path), &boot, "[boot] game: ");
+    if (path[0])
+      str_copy(s->game, sizeof(s->game), path_base(path));
+  }
+  sb_free(&boot);
   if (!s->build[0])
     str_copy(s->build, sizeof(s->build), "unknown");
 
@@ -297,6 +405,12 @@ int report_build(session_info *s, sbuf *out) {
   sb_printf(out, "Game: %s\n", s->game[0] ? s->game : "none (the shelf only)");
   sb_printf(out, "Session: pid %d, started %s\n", (int)s->pid, started);
   sb_printf(out, "Tester: %s  Console ID: %s\n", tester[0] ? tester : "(no tester-name.txt)", cid[0] ? cid : "-");
+  if (boot_found)
+    sb_printf(out, "Logs: %s%s (boot%s.log is this session's)\n", log_dir_name(dirs[ldir]),
+              ndirs == 1 ? ", no logs/ folder" : "", sfx);
+  else
+    sb_printf(out, "Logs: no boot log with this session's pid in %s\n",
+              ndirs == 2 ? P_PCSX2 "/logs or " P_PCSX2 : P_PCSX2 " (no logs/ folder)");
   sb_printf(out, "IP addresses in this report are replaced with x.x.x.x. No game list, no token.\n");
 
   /* settings.log */
@@ -324,29 +438,12 @@ int report_build(session_info *s, sbuf *out) {
   }
   sb_free(&slog);
 
-  /* this session's logs: PS5SX2 starts new ones at every start (the old ones get .1, .2), so the right set is
-   * the one whose boot.log has this session's "[boot] pid=N" line */
+  /* this session's logs (find_boot_log chose the place and the set) */
+  const char *logs = dirs[ldir];
   char name[64];
-  const char *sfx = s->suffix ? s->suffix : "";
-  {
-    static const char *const sfxs[] = {"", ".1", ".2"};
-    char mark[48];
-    snprintf(mark, sizeof(mark), "[boot] pid=%d\n", (int)s->pid);
-    for (int k = 0; k < 3; k++) {
-      sbuf bl;
-      sb_init(&bl);
-      snprintf(name, sizeof(name), "boot%s.log", sfxs[k]);
-      path_join(p, sizeof(p), logs, name);
-      const int hit = fs_read_capped(p, 256u << 10, 256u << 10, &bl, NULL, NULL) == 0 && bl.data &&
-                      strstr(bl.data, mark) != NULL;
-      sb_free(&bl);
-      if (hit) {
-        sfx = sfxs[k];
-        break;
-      }
-    }
-  }
-  const char *what = *sfx ? "the session before the last" : "this session";
+  const char *what = boot_found ? "this session"
+                     : *sfx     ? "the one before the newest; this session's pid isn't in it, so it may be another's"
+                                : "the newest; this session's pid isn't in it, so it may be another's";
   snprintf(name, sizeof(name), "boot%s.log", sfx);
   path_join(p, sizeof(p), logs, name);
   add_file(out, p, name, what, 512u << 10, 64u << 10, 0);

@@ -52,6 +52,10 @@ One text file per session is built from:
 
 - the session's lines in `settings.log`;
 - `boot.log`, `emulog.txt` and `stderr.log`, with the right set picked by `[boot] pid=N`;
+  - they're in `/data/PCSX2/logs/` when that folder exists, and otherwise in `/data/PCSX2/` itself, as on a console
+    set up from a release zip, which has no `logs/` folder. Both places are searched. 1.0 and 1.1 only looked in
+    `logs/`, so their reports from such consoles had no logs, build "unknown" and "the shelf";
+  - without a `settings.log` line, the build and the game come from the boot log;
 - a GPU hang dump, if one was written during the session;
 - `gs.ini`, `live.ini` and the game's own settings;
 - the switch names;

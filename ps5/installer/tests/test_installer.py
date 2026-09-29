@@ -1056,6 +1056,112 @@ def t_logger_short_and_relaunch(files112, z112):
     drop('logger2')
 
 
+def t_logger_release_layout(files112, z112):
+    """A console set up from a release zip has no logs/ folder, so PS5SX2 keeps its logs in /data/PCSX2 itself
+    (OrbisLogPath). 1.0 and 1.1 only looked in logs/: their reports from testers had no logs, build "unknown" and
+    "the shelf". Then: logs/ made while a session runs, and a session whose settings.log lines are gone."""
+    root = os.path.join(WORK, 'logger3')
+    shutil.rmtree(root, ignore_errors=True)
+    mk_user(root, files112, small=True)
+    publish('vk-285-112', z112)
+    run(root)
+    shutil.rmtree(os.path.join(WORK, 'relay'), ignore_errors=True)
+    pc = data(root, 'PCSX2')
+    shutil.rmtree(os.path.join(pc, 'logs'))
+    for n in os.listdir(pc):
+        if n.startswith(('boot', 'emulog', 'stderr', 'settings.')) and os.path.isfile(os.path.join(pc, n)):
+            os.remove(os.path.join(pc, n))
+    os.remove(os.path.join(pc, 'pid.txt'))
+    env = dict(os.environ)
+    env.update({'PS5SX2_ROOT': root, 'PS5SX2_TEST_CA_FILE': os.path.join(WORK, 'ca.pem'),
+                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2/releases/latest' % PORT,
+                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/' % PORT,
+                'PS5SX2_TEST_ALLOW_HOST': 'localhost', 'PS5SX2_TEST_RELAY_URL': 'https://localhost:%d/v1/logs' % PORT,
+                'ASAN_OPTIONS': 'detect_leaks=0:abort_on_error=1'})
+    logger = subprocess.Popen([BIN], env=env, stderr=open(os.path.join(WORK, 'logger3.stderr'), 'w'))
+
+    def rotate(d, name, ext):
+        # PS5SX2's orbis_rotate_log: <name>.<i-1> -> <name>.<i>, the newest one -> <name>.1
+        for i in range(7, 0, -1):
+            src = os.path.join(d, name + ext) if i == 1 else os.path.join(d, '%s.%d%s' % (name, i - 1, ext))
+            if os.path.exists(src):
+                os.replace(src, os.path.join(d, '%s.%d%s' % (name, i, ext)))
+
+    def start_session(marker, d=pc, settings=True):
+        for name, ext in (('boot', '.log'), ('emulog', '.txt'), ('stderr', '.log')):
+            rotate(d, name, ext)
+        g = subprocess.Popen(['sleep', '120'])
+        with open(os.path.join(d, 'boot.log'), 'w') as f:
+            f.write('[boot] stderr-ok\n[boot] build=vk-285-112\n[boot] pid=%d\n[fe] the shelf\n'
+                    '[boot] game: /data/PCSX2/games/%s.iso\n%s-BOOT running the game\n' % (g.pid, marker, marker))
+        with open(os.path.join(d, 'emulog.txt'), 'w') as f:
+            f.write('%s-EMU PCSX2 log of the game\n' % marker)
+        if settings:
+            with open(os.path.join(d, 'settings.log'), 'a') as f:
+                f.write('2026-09-29 06:00:00  app start: vk-285-112 (pid %d)\n' % g.pid)
+                f.write('2026-09-29 06:00:09  game start: %s.iso | its settings: no file | all games\n' % marker)
+        with open(os.path.join(pc, 'pid.txt'), 'w') as f:
+            f.write(str(g.pid))
+        return g
+
+    def section(body, name):
+        return body.split('===== %s ' % name)[1].split('===== end of %s' % name)[0]
+
+    try:
+        time.sleep(3)
+        # 1. one session, logs in /data/PCSX2
+        a = start_session('GAME-A')
+        time.sleep(7)
+        a.kill()
+        a.wait()
+        wait_reports(1)
+        h, body = report(0)
+        check(h.get('x-ps5sx2-game') == 'GAME-A.iso' and h.get('x-ps5sx2-build') == 'vk-285-112',
+              'no logs/ folder: game and build found (%s, %s)' % (h.get('x-ps5sx2-game'), h.get('x-ps5sx2-build')))
+        check('GAME-A-BOOT' in section(body, 'boot.log') and 'GAME-A-EMU' in section(body, 'emulog.txt'),
+              "no logs/ folder: the session's boot.log and emulog.txt are in")
+        check('Logs: /data/PCSX2, no logs/ folder (boot.log' in body, 'the header says where the logs were')
+        # 2. back to the menu: B re-executes into C between two checks; B's report has B's logs (now .1)
+        b = start_session('GAME-B')
+        time.sleep(7)
+        b.kill()
+        b.wait()
+        c = start_session('SHELF-C')
+        wait_reports(2)
+        h, body = report(1)
+        check(h.get('x-ps5sx2-game') == 'GAME-B.iso' and 'GAME-B-BOOT' in section(body, 'boot.1.log') and
+              'SHELF-C' not in section(body, 'boot.1.log') and 'GAME-B-EMU' in section(body, 'emulog.1.txt'),
+              "relaunch: B's report has B's logs, not C's")
+        # 3. logs/ made while C runs: C's logs are still found in /data/PCSX2
+        os.makedirs(os.path.join(pc, 'logs'))
+        c.kill()
+        c.wait()
+        wait_reports(3)
+        h, body = report(2)
+        check(h.get('x-ps5sx2-game') == 'SHELF-C.iso' and 'SHELF-C-BOOT' in section(body, 'boot.log'),
+              'logs/ made during the session: its logs still found in /data/PCSX2')
+        # 4. a session in logs/ whose settings.log lines are gone: build and game from its boot.log
+        d = start_session('GAME-D', d=os.path.join(pc, 'logs'), settings=False)
+        time.sleep(7)
+        d.kill()
+        d.wait()
+        wait_reports(4)
+        h, body = report(3)
+        check(h.get('x-ps5sx2-game') == 'GAME-D.iso' and h.get('x-ps5sx2-build') == 'vk-285-112',
+              'no settings.log line: build and game from boot.log (%s, %s)' % (h.get('x-ps5sx2-game'),
+                                                                               h.get('x-ps5sx2-build')))
+        check('GAME-D-BOOT' in section(body, 'boot.log') and 'Logs: /data/PCSX2/logs (boot.log' in body,
+              "logs/ now used: D's boot.log from there")
+        open(data(root, 'PS5SX2-Installer', 'no-log-upload'), 'w').close()
+        logger.wait(timeout=20)
+    finally:
+        if logger.poll() is None:
+            logger.kill()
+    err = open(os.path.join(WORK, 'logger3.stderr')).read()
+    check('AddressSanitizer' not in err and 'runtime error' not in err, 'sanitizer clean')
+    drop('logger3')
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -1125,6 +1231,8 @@ def main():
             ('a link in the work folder is refused', lambda: t_links_in_work(env113())),
             ('pid.txt from before the boot is ignored', lambda: t_stale_pid(env113())),
             ('logger: short session, relaunch between checks', lambda: t_logger_short_and_relaunch(files112, z112)),
+            ('logger: release layout (no logs/ folder), logs/ made later, no settings.log line',
+             lambda: t_logger_release_layout(files112, z112)),
         ]
         only = os.environ.get('ONLY')
         failed = 0

@@ -2,7 +2,7 @@
 #pragma once
 
 #define INSTALLER_NAME "PS5SX2 Installer"
-#define INSTALLER_VERSION "1.1"
+#define INSTALLER_VERSION "1.2"
 #define INSTALLER_UA "PS5SX2-Installer/" INSTALLER_VERSION
 
 /* Where builds are published: the official releases of Swordpdf/PS5SX2 (public since 2026-09-29). Version 1.0
