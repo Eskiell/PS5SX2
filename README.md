@@ -58,11 +58,23 @@ No BIOS, games or keys come with PS5SX2.
 
 ## Getting started
 
-1. Copy the app from the release to `/data/homebrew/PPSA99203/`. ShadowMountPlus finds it there and adds it to the home screen.
-2. Put your BIOS in `/data/PCSX2/bios/` and your games in `/data/PCSX2/games/`.
-3. Add `PPSA99203` to `/data/whitelist.txt`, on a line of its own.
-4. Load kstuff, ShadowMountPlus and the PS5SX2 Helper, then start PS5SX2 from the home screen.
+For the main release, use PS5SX2Helper.elf and PS5SX2Installer.elf to launch PS5SX2 and automatically keep your build up to date.
 
+For now, updates are planned to roll out weekly as we work toward full compatibility across the PS2 library. Bug fixes, compatibility improvements, and new features will be bundled into batches rather than pushed one by one.
+
+Thanks again for all the testing, logs, and feedback. It genuinely helps move this forward.
+
+TO GET IT RUNNING:
+
+Put PS5SX2Helper.elf and PS5SX2Installer.elf in your autoload. They’ll make sure you always get the latest build directly from GitHub.
+
+Place your legally acquired PS2 BIOS in:
+/data/PCSX2/bios
+
+Place your legally made game backups in:
+/data/PCSX2/games
+
+Enjoy.
 The first start downloads the covers for your games, then the shelf opens.
 
 ## Controls
