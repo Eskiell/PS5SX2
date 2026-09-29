@@ -1095,8 +1095,17 @@ static void orbis_log_flag_access(const char* when)
 
 // The Vulkan driver's environment: only setenv()s of flags, after the jailbreak, where they can
 // be read (vk-285-43 made this a function).
+//
+// vk-285-113 (AI-assisted): the HW renderer's variables follow the renderer that was CHOSEN (!g_sw_renderer), not
+// the flag file vk_renderer. A console with no flags/ folder (a manual copy of the eboot: the installer writes the
+// flags only on a first install) picks the HW renderer -- sw_renderer is absent -- but got none of these, i.e. the
+// driver ran without PS5VK_FULL_STATE, the state-leak fix of vk-285-16. vk-285-112's Hitman: Contracts (5x) and GTA
+// Vice City (2x) hung that way ("completion marker not written within 2 s", the vk-285-13..15 signature) on the one
+// console with no flags. The opt-in flags (vk_widemem, vk_triple, vk_recordthread, vk_fullstatecopy, vk_16k and the
+// vk_no* switches) still need their files.
 static void orbis_vk_environment()
 {
+  const bool hw = !g_sw_renderer;
   // The driver keeps its compiled shaders next to PCSX2's caches, not in /app0.
   setenv("PS5VK_SHADER_CACHE_DIR", (OrbisDir("cache") + "/ps5vk-shader-cache").c_str(), 0); // vk-285-33: cache/
   // The driver's queue profile (a stderr.log line every 10 s) unless novkprof.
@@ -1106,32 +1115,32 @@ static void orbis_vk_environment()
   setenv("PS5VK_HANG_DUMP", OrbisLogPath("ps5vk-hang").c_str(), 0); // vk-285-33: logs/
   // vk-285-15: GPU breadcrumbs (the driver writes each draw's serial after it completes) while
   // the HW renderer is being brought up, so a hang dump says which draw the GPU stopped at.
-  if (orbis_flag("vk_renderer")) setenv("PS5VK_BREADCRUMBS", "1", 0);
+  if (hw) setenv("PS5VK_BREADCRUMBS", "1", 0);
   // vk-285-16: full per-draw state in the driver for the HW renderer: every draw programs its
   // blend word (no more inheriting the last draw's dual-source blend), a colour-only rendering
   // unbinds the depth surface, and a depth rendering ends its submission step so the next pass
   // starts on a drained GPU -- the fix for the vk-285-14/15 hang at the first gameplay frame.
   // The flag file vk_nofullstate turns it off (A/B).
-  if (orbis_flag("vk_renderer") && !orbis_flag("vk_nofullstate")) setenv("PS5VK_FULL_STATE", "1", 0);
+  if (hw && !orbis_flag("vk_nofullstate")) setenv("PS5VK_FULL_STATE", "1", 0);
   // vk-285-17: the driver evicts the render targets' CPU cache lines only at a submission's ends
   // and around CPU work, not around each of the ~230 GPU syncs per frame (6.4 GiB, 97 ms a frame
   // in vk-285-16). The flag file vk_eagerflush restores the per-step eviction (A/B).
-  if (orbis_flag("vk_renderer") && !orbis_flag("vk_eagerflush")) setenv("PS5VK_LAZY_TARGET_FLUSH", "1", 0);
+  if (hw && !orbis_flag("vk_eagerflush")) setenv("PS5VK_LAZY_TARGET_FLUSH", "1", 0);
   // vk-285-22: live flag files, read by the driver about once a second while the game runs:
   // vk_gpuwait turns on the in-stream colour barrier (a GPU-side wait for the colour flush in
   // place of the ~220 CPU round trips a frame PCSX2's full-barrier draws caused, vk-285-21), and
   // vk_nocrumbs turns the per-draw breadcrumbs off. A barrier wait that never passes is released
   // by the driver after ~200 ms, which also turns the barrier off for the rest of the run.
-  if (orbis_flag("vk_renderer")) setenv("PS5VK_LIVE_DIR", OrbisDir("flags").c_str(), 0); // vk-285-33: flags/
+  if (hw) setenv("PS5VK_LIVE_DIR", OrbisDir("flags").c_str(), 0); // vk-285-33: flags/
   // vk-285-23: the driver reports 8192 for its image, framebuffer and viewport extent (4096 by
   // default): PCSX2 caps upscale_multiplier at maxImageDimension2D / 1280, so 4096 stopped it at
   // 3x and 6x ("4K") needs 7680.
   // vk-285-66: 16384 with the flag file vk_16k, so PCSX2 offers 8x (16384 / 1280 = 12.8; at 8192 it
   // stops at 6x). The descriptor and target size fields hold 14 bits (the driver's ps5vk_max_extent_2d).
-  if (orbis_flag("vk_renderer")) setenv("PS5VK_MAX_EXTENT_2D", orbis_flag("vk_16k") ? "16384" : "8192", 0);
+  if (hw) setenv("PS5VK_MAX_EXTENT_2D", orbis_flag("vk_16k") ? "16384" : "8192", 0);
   // vk-285-66: VkDeviceMemory outside the 4 GiB window and a 12 GiB heap (Mihawk's R86-R88) with the
   // flag file vk_widemem.
-  if (orbis_flag("vk_renderer") && orbis_flag("vk_widemem")) setenv("PS5VK_WIDE_MEMORY", "1", 0);
+  if (hw && orbis_flag("vk_widemem")) setenv("PS5VK_WIDE_MEMORY", "1", 0);
   // vk-285-24: two more live flag files the driver reads from PS5VK_LIVE_DIR: vk_noevict stops the
   // per-frame CPU-cache eviction of every render target (0.65 ms a frame at 1x, 9.5 ms at 6x), and
   // vk_async runs the queue on a worker thread, so the GS thread no longer waits for the GPU, and
@@ -1142,27 +1151,41 @@ static void orbis_vk_environment()
   // copying the back buffer out and then clearing it, and at 3x+ the clear overtook the copy's last
   // strip, so 32x32 blocks of the displayed frame showed the clear (sky) colour. The live flag file
   // vk_nowar switches it off again for comparison.
-  if (orbis_flag("vk_renderer") && !orbis_flag("vk_nowarenv")) setenv("PS5VK_WAR_BARRIER", "1", 0);
+  if (hw && !orbis_flag("vk_nowarenv")) setenv("PS5VK_WAR_BARRIER", "1", 0);
   // vk-285-62: three swapchain images with the flag file vk_triple (read when the swapchain is
   // created, so it applies from the next start). The original PS5 at firmware 4.03 started about a
   // third of R&C's frames ~15.7 ms late (vk-285-61's GPU trace: ~4.3 ms of GPU work, then the wait
   // for the display); with two images every late start cost a vblank, with three it has slack.
-  if (orbis_flag("vk_renderer") && orbis_flag("vk_triple")) setenv("PS5VK_SWAPCHAIN_IMAGES", "3", 0);
+  if (hw && orbis_flag("vk_triple")) setenv("PS5VK_SWAPCHAIN_IMAGES", "3", 0);
   // vk-285-72: texture uploads as GPU copies in the frame (CP DMA) instead of CPU copies at a
   // submission split. PCSX2 records an update of a texture the frame already drew with into the
   // frame's own command buffer; each such split was a step, and on a tester's original PS5 at 8.40
   // every step waited about a vblank (Gran Turismo 4: 2.4-3 steps a frame, 25-29 ms). The live flag
   // file vk_cpuupload puts the uploads back on the CPU while a game runs.
-  if (orbis_flag("vk_renderer")) setenv("PS5VK_GPU_UPLOAD", "1", 0);
+  if (hw) setenv("PS5VK_GPU_UPLOAD", "1", 0);
   // vk-285-86: the flag file vk_recordthread moves the driver's command encoding off the GS thread:
   // PCSX2's vkCmd* calls copy their arguments and return, and the driver's own thread encodes them
   // (~22% of the GS thread in Shadow of the Colossus's heavy views, vk-285-84). Read when the
   // device is created, so it applies from the next start; the live flag file vk_recordsync keeps
   // new recordings on the GS thread for an A/B within a run. Needs proper testing.
-  if (orbis_flag("vk_renderer") && orbis_flag("vk_recordthread")) setenv("PS5VK_RECORD_THREAD", "1", 0);
+  if (hw && orbis_flag("vk_recordthread")) setenv("PS5VK_RECORD_THREAD", "1", 0);
   // vk-285-86: the flag file vk_fullstatecopy binds pipelines with Mesa's whole dynamic-state copy
   // instead of the driver's per-group copy (A/B for the per-draw state cost).
-  if (orbis_flag("vk_renderer") && orbis_flag("vk_fullstatecopy")) setenv("PS5VK_FULL_STATE_COPY", "1", 0);
+  if (hw && orbis_flag("vk_fullstatecopy")) setenv("PS5VK_FULL_STATE_COPY", "1", 0);
+  // vk-285-113: which of them the driver will see, so a report shows whether a console ran with the environment.
+  {
+    static const char* const names[] = {"PS5VK_FULL_STATE", "PS5VK_WAR_BARRIER", "PS5VK_LAZY_TARGET_FLUSH", "PS5VK_LIVE_DIR",
+                                        "PS5VK_MAX_EXTENT_2D", "PS5VK_GPU_UPLOAD", "PS5VK_BREADCRUMBS", "PS5VK_WIDE_MEMORY",
+                                        "PS5VK_SWAPCHAIN_IMAGES", "PS5VK_HANG_DUMP"};
+    std::string line;
+    for (const char* name : names)
+    {
+      const char* value = getenv(name);
+      line += std::string(" ") + name + "=" + (value ? value : "-");
+    }
+    printf("[boot] ps5vk environment (hardware renderer %s):%s\n", hw ? "yes" : "no", line.c_str());
+    fflush(stdout);
+  }
 }
 #endif
 
