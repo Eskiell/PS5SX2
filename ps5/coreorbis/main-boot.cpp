@@ -349,8 +349,87 @@ extern "C" void orbis_pad_vibration(unsigned pad_index, float large, float small
   const auto to_byte = [](float v) { return static_cast<u32>(std::min(std::max(v, 0.0f), 1.0f) * 255.0f + 0.5f); };
   g_orbis_rumble_state[pad_index].store((to_byte(large) << 8) | to_byte(small), std::memory_order_relaxed);
 }
-// vk-285-113: L2 + D-pad down held for 2 s toggles the settings page's QR code over the game (GSRenderer.cpp).
+// vk-285-113: the settings page's QR code over the game (GSRenderer.cpp): the fallback when the PS5's browser can't be opened.
 extern std::atomic<int> g_orbis_qr_show;
+
+// vk-285-113: L2 + D-pad down held for 2 s opens the settings page in the PS5's own web browser (SceShellCore's launcher,
+// libSceSystemService). The game keeps running behind it (the page is served by this app's own web thread). The thread
+// below logs what the console answers and then whether the page loads and how often it asks; if the console refuses to
+// open the browser, the page's QR code goes over the game instead (the same hold hides it again).
+extern "C" int sceSystemServiceLaunchWebBrowser(const char* url, const void* param);
+static std::atomic<bool> g_orbis_browser_busy{false};
+
+static double orbis_mono_seconds()
+{
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void orbis_browser_qr_fallback(const char* why)
+{
+  printf("[browser] %s: the settings page's QR code goes over the game instead\n", why);
+  fflush(stdout);
+  g_orbis_qr_show.store(1, std::memory_order_relaxed);
+}
+
+static void* orbis_browser_thread(void*)
+{
+  std::string url, shown;
+  if (!orbis_web_browser_url(url, shown))
+  {
+    orbis_browser_qr_fallback("no web server or no network address");
+    g_orbis_browser_busy.store(false);
+    return nullptr;
+  }
+  orbis_web_log_next_requests(40); // who loads the page (the console's browser comes from its own address or 127.0.0.1)
+  uint64_t base = 0;
+  double age = 0.0;
+  orbis_web_request_stats(base, age);
+  const double t0 = orbis_mono_seconds();
+  printf("[browser] opening http://%s/ in the PS5's browser\n", shown.c_str());
+  fflush(stdout);
+  const int rc = sceSystemServiceLaunchWebBrowser(url.c_str(), nullptr);
+  printf("[browser] sceSystemServiceLaunchWebBrowser returned 0x%x after %.0f ms\n", static_cast<unsigned>(rc),
+    (orbis_mono_seconds() - t0) * 1000.0);
+  fflush(stdout);
+  if (rc != 0)
+  {
+    orbis_browser_qr_fallback("the console refused to open its browser");
+    g_orbis_browser_busy.store(false);
+    return nullptr;
+  }
+  // Watch for a minute: does the page load, and does this app keep running while the browser is in front? A gap
+  // between these lines longer than 5 s means the system stopped the app.
+  double prev = orbis_mono_seconds();
+  for (int i = 0; i < 12; i++)
+  {
+    usleep(5000000);
+    const double now = orbis_mono_seconds();
+    uint64_t count = 0;
+    orbis_web_request_stats(count, age);
+    printf("[browser] +%.0f s: %llu page requests since, the last %.0f s ago%s\n", now - t0,
+      static_cast<unsigned long long>(count - base), age, now - prev > 8.0 ? " (this app was stopped for a while)" : "");
+    fflush(stdout);
+    prev = now;
+  }
+  g_orbis_browser_busy.store(false);
+  return nullptr;
+}
+
+static void orbis_open_settings_browser()
+{
+  pthread_t th;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 256 * 1024);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  const int rc = pthread_create(&th, &attr, &orbis_browser_thread, nullptr);
+  pthread_attr_destroy(&attr);
+  if (rc != 0)
+  {
+    orbis_browser_qr_fallback("the browser thread could not start");
+    g_orbis_browser_busy.store(false);
+  }
+}
 
 namespace {
 struct OrbisPadData { uint32_t buttons; uint8_t lx, ly, rx, ry, l2, r2, pad0, pad1; uint8_t rest[256]; };
@@ -695,8 +774,8 @@ static void *orbis_pad_thread(void *)
         if (s_x_consumed)
           d.buttons &= ~0x00004000u;
       }
-      // vk-285-113: L2 + D-pad down held for 2 s: the settings page's QR code and address over the game, or off
-      // again. The game keeps running (and sees the buttons: a 2 s hold is nobody's move).
+      // vk-285-113: L2 + D-pad down held for 2 s: the settings page in the PS5's own browser (or, with the QR code up,
+      // takes the QR code down). The game keeps running (and sees the buttons: a 2 s hold is nobody's move).
       {
         static bool s_holding = false, s_fired = false;
         static std::chrono::steady_clock::time_point s_since;
@@ -714,11 +793,20 @@ static void *orbis_pad_thread(void *)
           else if (!s_fired && now - s_since >= std::chrono::seconds(2))
           {
             s_fired = true;
-            const int show = g_orbis_qr_show.load(std::memory_order_relaxed) ? 0 : 1;
-            g_orbis_qr_show.store(show, std::memory_order_relaxed);
-            printf("[pad] L2 + D-pad down held for 2 s: settings QR %s\n", show ? "shown" : "hidden");
-            fflush(stdout);
-            orbis_eventf("settings page QR code %s over the game (L2 + D-pad down held for 2 s)", show ? "shown" : "hidden");
+            if (g_orbis_qr_show.load(std::memory_order_relaxed))
+            {
+              g_orbis_qr_show.store(0, std::memory_order_relaxed);
+              printf("[pad] L2 + D-pad down held for 2 s: settings QR hidden\n");
+              fflush(stdout);
+              orbis_eventf("settings page QR code hidden (L2 + D-pad down held for 2 s)");
+            }
+            else if (!g_orbis_browser_busy.exchange(true))
+            {
+              printf("[pad] L2 + D-pad down held for 2 s: opening the settings page in the PS5's browser\n");
+              fflush(stdout);
+              orbis_eventf("settings page: opening it in the PS5's browser (L2 + D-pad down held for 2 s)");
+              orbis_open_settings_browser();
+            }
           }
         }
         else

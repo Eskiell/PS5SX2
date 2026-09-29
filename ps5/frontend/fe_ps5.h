@@ -63,9 +63,17 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag);
 // The disc image PCSX2 runs, for the page's "now playing".
 void orbis_web_now_playing(const std::string& image_path);
 // vk-285-113: the page's address as the QR code the shelf shows: `modules` (one byte a module, row by row), its
-// side length in `size`, and the short "<ip>:<port>" in `shown`. GSRenderer.cpp draws it over the game while
-// L2 + D-pad down is held for 2 s. False without a web server or a network.
+// side length in `size`, and the short "<ip>:<port>" in `shown`. GSRenderer.cpp draws it over the game when the
+// PS5's browser can't be opened (L2 + D-pad down held for 2 s). False without a web server or a network.
 bool orbis_web_qr(std::vector<unsigned char>& modules, int& size, std::string& shown);
+// vk-285-113: the page's address for the console's own web browser (L2 + D-pad down held for 2 s opens it there):
+// the LAN one, else the loopback one; `shown` is the short "<ip>:<port>" (no access token, safe to log). False
+// without a web server.
+bool orbis_web_browser_url(std::string& url, std::string& shown);
+// How many requests the page's server has had, and how long ago the last one came (-1 while none has).
+void orbis_web_request_stats(uint64_t& count, double& age_s);
+// Log the next `n` requests to boot.log (who loads the page).
+void orbis_web_log_next_requests(int n);
 
 // vk-285-51: the settings log, logs/settings.log. The settings page writes what it changed there
 // (fe_web.cpp) and the app what it did around it: starts, games, live applies, crashes and GPU

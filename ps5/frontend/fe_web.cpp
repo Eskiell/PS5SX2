@@ -836,6 +836,18 @@ void WebServer::Stop()
 	}
 }
 
+std::string WebServer::LoopbackUrl() const
+{
+	return "http://127.0.0.1:" + std::to_string(m_port) + "/?t=" + m_token;
+}
+
+void WebServer::RequestStats(uint64_t& count, double& age_s) const
+{
+	count = m_requests.load(std::memory_order_relaxed);
+	const double last = m_last_request.load(std::memory_order_relaxed);
+	age_s = last < 0.0 ? -1.0 : Now() - last;
+}
+
 void* WebServer::ThreadMain(void* self)
 {
 	static_cast<WebServer*>(self)->Run();
@@ -962,6 +974,13 @@ void WebServer::Serve(int fd, const char* peer)
 		if (req.token.empty())
 			req.token = QueryValue(req.query, "t");
 		const double t0 = Now();
+		m_requests.fetch_add(1, std::memory_order_relaxed);
+		m_last_request.store(t0, std::memory_order_relaxed);
+		if (m_log_requests.load(std::memory_order_relaxed) > 0 && m_log_requests.fetch_sub(1, std::memory_order_relaxed) > 0)
+		{
+			std::printf("[web] %s %s from %s\n", req.method.c_str(), req.path.c_str(), req.peer.c_str());
+			std::fflush(stdout);
+		}
 		Route(req, res);
 		if (req.method == "POST" || res.status >= 400)
 		{

@@ -1043,6 +1043,33 @@ bool orbis_web_qr(std::vector<unsigned char>& modules, int& size, std::string& s
 	return true;
 }
 
+bool orbis_web_browser_url(std::string& url, std::string& shown)
+{
+	if (!g_web)
+		return false;
+	if (g_web->Address(url, shown))
+		return true;
+	if (g_web->Port() == 0)
+		return false;
+	url = g_web->LoopbackUrl();
+	shown = "127.0.0.1:" + std::to_string(g_web->Port());
+	return true;
+}
+
+void orbis_web_request_stats(uint64_t& count, double& age_s)
+{
+	count = 0;
+	age_s = -1.0;
+	if (g_web)
+		g_web->RequestStats(count, age_s);
+}
+
+void orbis_web_log_next_requests(int n)
+{
+	if (g_web)
+		g_web->LogNextRequests(n);
+}
+
 int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budget_s, void (*notify)(const char*))
 {
 	if (!paths.allow_download)

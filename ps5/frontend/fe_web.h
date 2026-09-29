@@ -87,6 +87,15 @@ public:
 	// under it. False (both empty) without a network.
 	bool Address(std::string& url, std::string& shown) const;
 
+	// vk-285-113: for a browser on the console itself, "http://127.0.0.1:<port>/?t=<token>".
+	std::string LoopbackUrl() const;
+
+	// vk-285-113: how many requests came in and how long ago the last one was (-1 while none has). The browser
+	// launch (main-boot.cpp) watches this to see the page load and to know when the browser is closed.
+	void RequestStats(uint64_t& count, double& age_s) const;
+	// Log the next `n` requests ("[web] GET /api/state from <ip>") to see who loads the page.
+	void LogNextRequests(int n) { m_log_requests = n; }
+
 private:
 	struct Request
 	{
@@ -136,6 +145,9 @@ private:
 	bool m_thread_started = false;
 	static void* ThreadMain(void* self);
 	std::atomic<bool> m_stop{false};
+	std::atomic<uint64_t> m_requests{0};
+	std::atomic<double> m_last_request{-1.0}; // steady clock seconds
+	std::atomic<int> m_log_requests{0};
 	std::unique_ptr<CoverFinder> m_covers; // the server thread only (vk-285-110)
 	double m_covers_time = -1e9;
 
