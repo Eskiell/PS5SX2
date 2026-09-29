@@ -635,10 +635,12 @@ void LoadDbLocked()
 	if (!f)
 		return;
 	std::string text;
-	char buf[65536];
+	// On the heap, not the stack: this runs on the settings page's server thread too (/api/games), and a 64 KB array
+	// there overflowed its stack and ended the app the first time the page opened (vk-285-113).
+	std::vector<char> buf(65536);
 	size_t n;
-	while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
-		text.append(buf, n);
+	while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
+		text.append(buf.data(), n);
 	std::fclose(f);
 	std::string serial, name, name_en, region;
 	const auto flush = [&]() {

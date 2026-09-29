@@ -407,6 +407,9 @@ $(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(CHD_CSRCS)): CFLAGS += $(CHD_INCLUDES) -
   -DZSTD_DISABLE_ASM=1 -DZSTD_LEGACY_SUPPORT=0 -DZSTD_NO_TRACE=1
 $(OBJDIR)/pcsx2/CDVD/ChdFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -I$(PCSX2)/3rdparty/libchdr/include
 $(OBJDIR)/pcsx2/CDVD/CsoFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += $(CSO_INCLUDES)
+# vk-285-113: the settings page's server thread runs fe_web.cpp's handlers and fe_games.cpp's scans; a 64 KB array in
+# one of them ended the app the first time the page opened. Warn about any frame over 12 KB in the two files.
+$(OBJDIR)/frontend/fe_web.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -Wframe-larger-than=12288
 
 all: $(OBJS)
 	@echo "VK COMPILE OK: $(words $(OBJS)) objects"

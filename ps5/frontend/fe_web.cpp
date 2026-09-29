@@ -127,7 +127,7 @@ bool ReadFile(const std::string& path, std::string& out)
 	if (!f)
 		return false;
 	out.clear();
-	char buf[16384];
+	char buf[4096]; // small: this runs on the server thread's stack
 	size_t n;
 	while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
 		out.append(buf, n);
@@ -800,7 +800,22 @@ bool WebServer::Start(const WebConfig& cfg)
 	if (m_listen < 0)
 		return false;
 	m_stop = false;
-	m_thread = std::thread([this]() { Run(); });
+	// vk-285-113: a thread of its own with a roomy stack. A std::thread's default stack is small on the PS5, and the
+	// page's handlers build JSON, read files and parse the game database: a 64 KB array on it ended the app the
+	// first time the page opened.
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, 1024 * 1024);
+	m_thread_started = pthread_create(&m_thread, &attr, &WebServer::ThreadMain, this) == 0;
+	pthread_attr_destroy(&attr);
+	if (!m_thread_started)
+	{
+		std::printf("[web] the server thread could not start\n");
+		std::fflush(stdout);
+		close(m_listen);
+		m_listen = -1;
+		return false;
+	}
 	std::printf("[web] listening on port %u (token %.4s…)\n", static_cast<unsigned>(m_port), m_token.c_str());
 	std::fflush(stdout);
 	return true;
@@ -814,8 +829,17 @@ void WebServer::Stop()
 	shutdown(m_listen, SHUT_RDWR);
 	close(m_listen);
 	m_listen = -1;
-	if (m_thread.joinable())
-		m_thread.join();
+	if (m_thread_started)
+	{
+		pthread_join(m_thread, nullptr);
+		m_thread_started = false;
+	}
+}
+
+void* WebServer::ThreadMain(void* self)
+{
+	static_cast<WebServer*>(self)->Run();
+	return nullptr;
 }
 
 void WebServer::SetNowPlaying(const std::string& image_path)

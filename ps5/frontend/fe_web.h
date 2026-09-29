@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -131,7 +132,9 @@ private:
 	int m_listen = -1;
 	uint16_t m_port = 0;
 	std::string m_token;
-	std::thread m_thread;
+	pthread_t m_thread{};          // vk-285-113: a thread of its own with a roomy stack (see Start)
+	bool m_thread_started = false;
+	static void* ThreadMain(void* self);
 	std::atomic<bool> m_stop{false};
 	std::unique_ptr<CoverFinder> m_covers; // the server thread only (vk-285-110)
 	double m_covers_time = -1e9;
