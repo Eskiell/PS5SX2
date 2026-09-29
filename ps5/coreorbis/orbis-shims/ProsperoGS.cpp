@@ -145,9 +145,13 @@ void GSDumpBase::Transfer(int index, const u8* mem, size_t size)
 // which isn't built for the PS5, so until now every file in textures/<serial>/replacements was skipped. This
 // loads PNG files with stb_image, the decoder the shelf already uses for covers, the way PCSX2's PNG loader does:
 // 8-bit RGBA, and alpha 0x80 (the PS2's opaque) for a file without an alpha channel. (PCSX2's loader handles
-// only 8-bit RGB and RGBA files; stb also takes grey, palette and 16-bit ones, converted to 8-bit RGBA.) DDS
-// files aren't loaded: the driver has no BC formats, and the uncompressed DDS kinds are rare in packs. Dumping
-// textures stays off (SavePNGImage below). Needs proper testing.
+// only 8-bit RGB and RGBA files; stb also takes grey, palette and 16-bit ones, converted to 8-bit RGBA.)
+// vk-285-113: DDS files load too (OrbisDDS.h): the driver has no BC formats, so BC1, BC2, BC3 and BC7 textures are
+// decoded to RGBA8 on the CPU, the uncompressed kinds are converted, and the file's mip levels are kept when the
+// game uses mipmaps for the texture. Dumping textures stays off (SavePNGImage below). Needs proper testing.
+#include "OrbisDDS.h"
+#include "OrbisDeferredLog.h" // OrbisDeferredPrintf: the game's log lines go through the deferred log
+#include <atomic>
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
 #define STBI_ONLY_PNG
@@ -190,11 +194,46 @@ static bool OrbisPNGLoader(const std::string& filename, GSTextureReplacements::R
   return true;
 }
 
+// vk-285-113: a DDS file (BC1/2/3/7 or uncompressed) as an RGBA8 replacement with its mip levels.
+static bool OrbisDDSLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
+{
+  std::optional<std::vector<u8>> file = FileSystem::ReadBinaryFile(filename.c_str());
+  if (!file || file->empty())
+    return false;
+  std::vector<OrbisDDS::Image> levels;
+  const char* why = "";
+  if (!OrbisDDS::Decode(file->data(), file->size(), only_base_image, levels, why))
+  {
+    static std::atomic<unsigned> s_reported{0};
+    if (s_reported.fetch_add(1) < 10)
+      OrbisDeferredPrintf("[texrep] %s: %s\n", filename.c_str(), why);
+    return false;
+  }
+  OrbisDDS::Image& base = levels[0];
+  tex->width = base.width;
+  tex->height = base.height;
+  tex->format = GSTexture::Format::Color;
+  tex->pitch = base.width * 4u;
+  tex->data = std::move(base.rgba);
+  for (size_t i = 1; i < levels.size(); i++)
+  {
+    GSTextureReplacements::ReplacementTexture::MipData md;
+    md.width = levels[i].width;
+    md.height = levels[i].height;
+    md.pitch = levels[i].width * 4u;
+    md.data = std::move(levels[i].rgba);
+    tex->mips.push_back(std::move(md));
+  }
+  return true;
+}
+
 GSTextureReplacements::ReplacementTextureLoader GSTextureReplacements::GetLoader(const std::string_view filename)
 {
   const std::string_view ext = Path::GetExtension(filename);
   if (ext.size() == 3 && StringUtil::Strncasecmp(ext.data(), "png", 3) == 0)
     return OrbisPNGLoader;
+  if (ext.size() == 3 && StringUtil::Strncasecmp(ext.data(), "dds", 3) == 0)
+    return OrbisDDSLoader;
   return nullptr;
 }
 bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)

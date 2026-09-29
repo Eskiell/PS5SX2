@@ -549,7 +549,7 @@ void GSTextureReplacements::ReloadReplacementMap()
 		s_replacement_textures_without_clut_hash.insert(name.value());
 	}
 #ifdef ORBIS_VULKAN
-	OrbisDeferredPrintf("[texrep] %s: %zu replacement textures in %s (%zu files: %u not PNG, %u not named like a "
+	OrbisDeferredPrintf("[texrep] %s: %zu replacement textures in %s (%zu files: %u not PNG or DDS, %u not named like a "
 						"replacement%s%s%s); scan %.0f ms; async %d, precache %d, GPU palettes %d, preloading %d\n",
 		s_current_serial.c_str(), s_replacement_texture_filenames.size(), replacement_dir.c_str(), files.size(),
 		orbis_no_loader, orbis_bad_name, orbis_example_skipped.empty() ? "" : ", e.g. '",
