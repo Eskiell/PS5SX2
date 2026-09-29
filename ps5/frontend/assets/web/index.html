@@ -293,6 +293,12 @@ const GROUPS = [
       options: [["0","Off"],["1","Mild"],["2","Moderate"],["3","Max"]] },
     { key: "EmuCore/Speedhacks/vuThread", label: "MTVU (VU1 on its own thread)", type: "toggle", def: "false", restart: true, later: "MTVU",
       short: "MTVU %" },
+    // vk-285-113: PCSX2's hardware download mode (GS local memory reads, pcsx2/GS/Renderers/HW/GSTextureCache.cpp, MTGS.cpp).
+    // Guitar Hero II and III and OutRun 2006 read the picture back every frame, and each read makes the GPU stop and the PS5's
+    // driver copy the picture on the CPU (the logs' [readbacks] line and the settings log's "readbacks" line say how many).
+    { key: "HWDownloadMode", label: "GPU readbacks", type: "seg", def: "0", short: "Readbacks %", cols: 2,
+      options: [["0","Accurate"],["1","Whole area"],["3","Don't wait"],["4","Skip"]],
+      hint: "Some games read the picture back from the GPU, which is slow on the PS5. Accurate is PCSX2's default. Whole area reads everything drawn since the last read in one go, so there are fewer stops. Don't wait doesn't stop the game for the GPU: quicker, but effects that depend on it can flicker. Skip ignores the reads: fastest, and those effects break." },
   ]},
   // vk-285-110: the PS2 system language games are told (main-boot.cpp, pcsx2/CDVD/CDVD.cpp). Read when the game starts.
   { title: "Game", items: [

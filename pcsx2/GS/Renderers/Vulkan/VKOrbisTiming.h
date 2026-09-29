@@ -62,6 +62,29 @@ enum : int
 };
 extern unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_COPY_KINDS];
 
+// vk-285-113: the GS's readbacks (GSDownloadTextureVK): the copies recorded (count, bytes), and the GS thread's waits for them
+// (GSDownloadTextureVK::Flush: one that submitted the command buffer or waited on its fence) with the longest since the ticker
+// last took it. Main-boot prints them as [readbacks] and the settings log's minute line sums them. Guitar Hero II and III and
+// OutRun 2006 read their frame back every frame, and each one stalls the GPU pipeline. The GS thread is the one writer.
+extern unsigned long long g_orbis_readback_n, g_orbis_readback_bytes, g_orbis_readback_wait_ns, g_orbis_readback_wait_n,
+	g_orbis_readback_wait_max_ns, g_orbis_readback_wait_max_min_ns; // the last: the longest of the settings log's minute
+
+struct OrbisReadbackWaitTimer
+{
+	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	~OrbisReadbackWaitTimer()
+	{
+		const unsigned long long ns = static_cast<unsigned long long>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+		g_orbis_readback_wait_ns += ns;
+		g_orbis_readback_wait_n++;
+		if (ns > g_orbis_readback_wait_max_ns)
+			g_orbis_readback_wait_max_ns = ns;
+		if (ns > g_orbis_readback_wait_max_min_ns)
+			g_orbis_readback_wait_max_min_ns = ns;
+	}
+};
+
 #else
 
 #define ORBIS_VKW(kind) \

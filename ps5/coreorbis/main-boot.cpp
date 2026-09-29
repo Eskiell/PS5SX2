@@ -2373,6 +2373,22 @@ int main()
                  n[ORBIS_COPY_RT_TEX], mb[ORBIS_COPY_RT_TEX], n[ORBIS_COPY_DS_DS], mb[ORBIS_COPY_DS_DS],
                  n[ORBIS_COPY_DS_TEX], mb[ORBIS_COPY_DS_TEX], n[ORBIS_COPY_OTHER], mb[ORBIS_COPY_OTHER]);
       }
+      {
+        // vk-285-113: the GS's readbacks this second, only when there were any: copies recorded (MB), and the GS thread's
+        // waits for them -- how many, their total and the longest (GSDownloadTextureVK, VKOrbisTiming.h).
+        static unsigned long long prev_n, prev_bytes, prev_wait_ns, prev_wait_n;
+        const unsigned long long n = g_orbis_readback_n - prev_n, wn = g_orbis_readback_wait_n - prev_wait_n;
+        const double mb = (g_orbis_readback_bytes - prev_bytes) / 1048576.0, wms = (g_orbis_readback_wait_ns - prev_wait_ns) / 1e6;
+        const double max_ms = g_orbis_readback_wait_max_ns / 1e6;
+        prev_n = g_orbis_readback_n;
+        prev_bytes = g_orbis_readback_bytes;
+        prev_wait_ns = g_orbis_readback_wait_ns;
+        prev_wait_n = g_orbis_readback_wait_n;
+        g_orbis_readback_wait_max_ns = 0;
+        if (n || wn)
+          printf("[readbacks] copies=%llu(%.1fMB) waits=%llu %.1fms (max %.1fms) mode=%d\n", n, mb, wn, wms, max_ms,
+                 static_cast<int>(EmuConfig.GS.HWDownloadMode));
+      }
 #endif
       printf("[boot] t+%ds state=%d eepc=%08x eecy=%llu ioppc=%08x iopcy=%llu rec=%d/%d\n", i + 1,
         (int)VMManager::GetState(), cpuRegs.pc, (unsigned long long)cpuRegs.cycle,

@@ -12,6 +12,7 @@
 #include "common/BitUtils.h"
 
 #ifdef ORBIS_VULKAN
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-113: the readback counters
 // vk-285-14: GPU-hang forensics ring (GSDeviceVK.cpp).
 void OrbisVkTraceClear(const GSTexture* tex, u32 value);
 void OrbisVkTraceTransfer(u8 kind, const GSTexture* tex, const GSVector4i& r);
@@ -911,6 +912,8 @@ void GSDownloadTextureVK::CopyFromTexture(
 	vkTex->CommitClear();
 #ifdef ORBIS_VULKAN
 	OrbisVkTraceTransfer(6, vkTex, src);
+	g_orbis_readback_n++; // vk-285-113
+	g_orbis_readback_bytes += copy_size;
 #endif
 
 	const VkCommandBuffer cmdbuf = GSDeviceVK::GetInstance()->GetCurrentCommandBuffer();
@@ -985,6 +988,10 @@ void GSDownloadTextureVK::Flush()
 
 	if (GSDeviceVK::GetInstance()->GetCompletedFenceCounter() >= m_copy_fence_counter)
 		return;
+
+#ifdef ORBIS_VULKAN
+	OrbisReadbackWaitTimer orbis_readback_timer; // vk-285-113: what the GS thread waits for a readback
+#endif
 
 	// Need to execute command buffer.
 	if (GSDeviceVK::GetInstance()->GetCurrentFenceCounter() == m_copy_fence_counter)

@@ -12,6 +12,7 @@ extern "C" int sceKernelAvailableFlexibleMemorySize(unsigned long long* size); /
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
+#include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-113: the readback counters (OrbisPerfMinute)
 #include "GSDumpReplayer.h"
 #include "Host.h"
 #include "PerformanceMetrics.h"
@@ -908,6 +909,26 @@ static void OrbisPerfMinute(unsigned fps, float speed, float ee, float gs, float
 			s_n, s_fps / s_n, s_min, s_max, s_speed / s_n, s_slow, s_ee / s_n, s_gs / s_n, s_vu / s_n,
 			static_cast<int>(GSConfig.UpscaleMultiplier));
 		OrbisDeferredEvent(line); // vk-285-107: the ticker writes it (a file write here held the GS thread)
+#ifdef ORBIS_VULKAN
+		// vk-285-113: the minute's GPU readbacks (GSDownloadTextureVK), on a line of their own so the line above keeps
+		// its shape: how many a second, the megabytes, what the GS thread waited for them, and the longest wait.
+		static unsigned long long s_rb_n0 = 0, s_rb_bytes0 = 0, s_rb_wait0 = 0;
+		const unsigned long long rb_n = g_orbis_readback_n - s_rb_n0, rb_bytes = g_orbis_readback_bytes - s_rb_bytes0,
+								 rb_wait = g_orbis_readback_wait_ns - s_rb_wait0;
+		s_rb_n0 = g_orbis_readback_n;
+		s_rb_bytes0 = g_orbis_readback_bytes;
+		s_rb_wait0 = g_orbis_readback_wait_ns;
+		const double rb_max_ms = g_orbis_readback_wait_max_min_ns / 1e6;
+		g_orbis_readback_wait_max_min_ns = 0;
+		if (rb_n != 0)
+		{
+			char rb_line[192];
+			snprintf(rb_line, sizeof(rb_line), "readbacks, last %u s: %.1f/s (%.1f MB/s), the GS thread waited %.0f ms/s for them (longest %.1f ms), mode %d",
+				s_n, static_cast<double>(rb_n) / s_n, static_cast<double>(rb_bytes) / 1048576.0 / s_n,
+				static_cast<double>(rb_wait) / 1e6 / s_n, rb_max_ms, static_cast<int>(GSConfig.HWDownloadMode));
+			OrbisDeferredEvent(rb_line);
+		}
+#endif
 	}
 	s_n = s_slow = s_max = 0;
 	s_min = ~0u;

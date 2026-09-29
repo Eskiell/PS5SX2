@@ -50,6 +50,8 @@ extern "C" void orbis_event_log(const char* line) __attribute__((weak));
 unsigned long long g_orbis_vkw_ns[ORBIS_VKW_KINDS], g_orbis_vkw_n[ORBIS_VKW_KINDS],
 	g_orbis_vkw_max_ns[ORBIS_VKW_KINDS];
 unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_COPY_KINDS];
+unsigned long long g_orbis_readback_n, g_orbis_readback_bytes, g_orbis_readback_wait_ns, g_orbis_readback_wait_n,
+	g_orbis_readback_wait_max_ns, g_orbis_readback_wait_max_min_ns; // vk-285-113
 
 namespace
 {
