@@ -2,8 +2,15 @@
 #pragma once
 
 #define INSTALLER_NAME "PS5SX2 Installer"
-#define INSTALLER_VERSION "1.2"
+#define INSTALLER_VERSION "1.3"
 #define INSTALLER_UA "PS5SX2-Installer/" INSTALLER_VERSION
+
+/* The no-log build (make ps5 NOLOG=1): installs and leaves, with no logger in it. */
+#ifdef INSTALLER_NO_LOGGER
+#define INSTALLER_VARIANT " (no log upload)"
+#else
+#define INSTALLER_VARIANT ""
+#endif
 
 /* Where builds are published: the official releases of Swordpdf/PS5SX2 (public since 2026-09-29). Version 1.0
  * installed the test builds from Swordpdf/PS5SX2TESTS. */

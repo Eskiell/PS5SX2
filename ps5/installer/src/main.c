@@ -2,15 +2,19 @@
  *
  * Every time it is sent to the console:
  *   1. it installs the latest release from GitHub if it is newer than the one installed (install.c);
- *   2. if no copy of it is running yet, it stays running as the logger: when PS5SX2 closes, that session's logs
- *      are sent (logger.c). A copy sent later in the same boot installs and then exits, because the first
- *      copy already holds logger.lock.
- * Switches (empty files in /data/PS5SX2-Installer): no-install, no-log-upload, reinstall (used once). */
+ *   2. if no copy of it is running yet, it stays running as the logger: when PS5SX2 closes after a game or a
+ *      problem, that session's logs are sent (logger.c). A copy sent later in the same boot installs and then
+ *      exits, because the first copy already holds logger.lock.
+ * The no-log build (INSTALLER_NO_LOGGER, make ps5 NOLOG=1) only does 1: it has no logger in it.
+ * Switches (empty files in /data/PS5SX2-Installer): no-install, no-log-upload, send-shelf-logs, reinstall (used
+ * once). */
 #include "config.h"
 #include "fsx.h"
 #include "install.h"
 #include "log.h"
+#ifndef INSTALLER_NO_LOGGER
 #include "logger.h"
+#endif
 #include "paths.h"
 #include "plat.h"
 #include "tls.h"
@@ -50,7 +54,7 @@ int main(int argc, char **argv) {
       }
     }
   }
-  log_line("---- %s %s started (pid %d)", INSTALLER_NAME, INSTALLER_VERSION, (int)getpid());
+  log_line("---- %s %s%s started (pid %d)", INSTALLER_NAME, INSTALLER_VERSION, INSTALLER_VARIANT, (int)getpid());
 
   const int tls_ok = tls_global_init() == 0;
   if (!tls_ok)
@@ -58,6 +62,9 @@ int main(int argc, char **argv) {
   else
     install_run();
 
+#ifdef INSTALLER_NO_LOGGER
+  log_line("---- done (the no-log build: no logs are kept or sent)");
+#else
   if (plat_test_env("PS5SX2_TEST_NO_LOGGER")) {
     log_line("---- done (host test: no logger)");
     return 0;
@@ -73,6 +80,7 @@ int main(int argc, char **argv) {
     log_line("logger: %s", err_get());
   }
   log_line("---- done");
+#endif
   if (tls_ok)
     tls_global_free();
   return 0;

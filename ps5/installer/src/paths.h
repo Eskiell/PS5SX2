@@ -27,6 +27,7 @@ typedef struct {
   /* Switches (files the user creates) */
   char no_install[PATH_LEN];    /* no-install: only the logger */
   char no_log_upload[PATH_LEN]; /* no-log-upload: no logger */
+  char send_shelf_logs[PATH_LEN]; /* send-shelf-logs: also send sessions that only showed the shelf (1.3) */
   char reinstall[PATH_LEN];     /* reinstall: install even if up to date (used once) */
   char tester_name[PATH_LEN];   /* tester-name.txt */
   char upload_url[PATH_LEN];    /* upload-url.txt */

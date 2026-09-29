@@ -1162,6 +1162,179 @@ def t_logger_release_layout(files112, z112):
     drop('logger3')
 
 
+def logger_env(root):
+    env = dict(os.environ)
+    env.update({'PS5SX2_ROOT': root, 'PS5SX2_TEST_CA_FILE': os.path.join(WORK, 'ca.pem'),
+                'PS5SX2_TEST_API_URL': 'https://localhost:%d/repos/Swordpdf/PS5SX2/releases/latest' % PORT,
+                'PS5SX2_TEST_DOWNLOAD_PREFIX': 'https://localhost:%d/Swordpdf/PS5SX2/releases/download/' % PORT,
+                'PS5SX2_TEST_ALLOW_HOST': 'localhost', 'PS5SX2_TEST_RELAY_URL': 'https://localhost:%d/v1/logs' % PORT,
+                'ASAN_OPTIONS': 'detect_leaks=0:abort_on_error=1'})
+    return env
+
+
+def wait_log(root, text, timeout=40):
+    path = data(root, 'PS5SX2-Installer', 'installer.log')
+    t = time.time() + timeout
+    while time.time() < t:
+        if os.path.exists(path) and text in open(path, errors='replace').read():
+            return
+        time.sleep(0.3)
+    raise AssertionError('installer.log never said: %s' % text)
+
+
+def relay_count():
+    rd = os.path.join(WORK, 'relay')
+    return len([x for x in os.listdir(rd) if x.endswith('.json')]) if os.path.isdir(rd) else 0
+
+
+def t_logger_shelf_filter(files112, z112):
+    """1.3: a session that only showed the shelf and ended normally isn't sent; one with a game or a problem is,
+    and says how many weren't. No notification at start or when sending. The send-shelf-logs switch sends them."""
+    root = os.path.join(WORK, 'logger4')
+    shutil.rmtree(root, ignore_errors=True)
+    mk_user(root, files112, small=True)
+    publish('vk-285-112', z112)
+    run(root)
+    shutil.rmtree(os.path.join(WORK, 'relay'), ignore_errors=True)
+    pc = data(root, 'PCSX2')
+    shutil.rmtree(os.path.join(pc, 'logs'))  # the release layout: logs in /data/PCSX2
+    for n in os.listdir(pc):
+        if n.startswith(('boot', 'emulog', 'stderr', 'settings.')) and os.path.isfile(os.path.join(pc, n)):
+            os.remove(os.path.join(pc, n))
+    os.remove(os.path.join(pc, 'pid.txt'))
+    nf = os.path.join(root, 'notifications.txt')
+    notes_before = len(open(nf).read().splitlines()) if os.path.exists(nf) else 0
+    logger = subprocess.Popen([BIN], env=logger_env(root), stderr=open(os.path.join(WORK, 'logger4.stderr'), 'w'))
+
+    def session(boot_lines, events, boot=True):
+        for name in ('boot.log', 'emulog.txt', 'stderr.log'):
+            if os.path.exists(os.path.join(pc, name)):
+                stem, ext = os.path.splitext(name)
+                os.replace(os.path.join(pc, name), os.path.join(pc, stem + '.1' + ext))
+        g = subprocess.Popen(['sleep', '120'])
+        if boot:
+            with open(os.path.join(pc, 'boot.log'), 'w') as f:
+                f.write('[boot] stderr-ok\n[boot] build=vk-285-112\n[boot] pid=%d\n' % g.pid)
+                f.write(''.join(l + '\n' for l in boot_lines))
+        if events is not None:
+            with open(os.path.join(pc, 'settings.log'), 'a') as f:
+                f.write('2026-09-29 10:00:00  app start: vk-285-112 (pid %d)\n' % g.pid)
+                f.write(''.join('2026-09-29 10:00:05  %s\n' % e for e in events))
+        with open(os.path.join(pc, 'pid.txt'), 'w') as f:
+            f.write(str(g.pid))
+        time.sleep(6)  # seen running at a check
+        g.kill()
+        g.wait()
+        return g.pid
+
+    shelf = ['[frontend] 12 disc image(s), 0 on USB, scanned in 40 ms']
+    try:
+        time.sleep(3)
+        # 1. the shelf, closed from the system menu: not sent
+        pid = session(shelf, ['console: firmware 11.40'])
+        wait_log(root, 'session pid %d (vk-285-112, the shelf only, ended ok) not sent' % pid)
+        check('(1 since the last report' in open(data(root, 'PS5SX2-Installer', 'installer.log')).read(), 'counted')
+        # 2. the shelf left without picking a game ("no game to start"): not sent
+        pid = session(shelf + ['[boot] no game to start: closing'],
+                      ['no game to start (no disc image found, or none picked): the app closed'])
+        wait_log(root, 'session pid %d (vk-285-112, the shelf only, ended no-game) not sent' % pid)
+        check(relay_count() == 0, 'nothing sent for the shelf')
+        # 3. an empty game list: sent, and it says how many weren't
+        session(['[frontend] 0 disc image(s), 0 on USB, scanned in 3 ms', '[boot] no game to start: closing'],
+                ['no game to start (no disc image found, or none picked): the app closed'])
+        wait_reports(1)
+        h, body = report(0)
+        check(h.get('x-ps5sx2-end') == 'no-game' and not h.get('x-ps5sx2-game'), 'empty game list sent: %s' % h)
+        check('Not sent since the last report: 2 session(s) that only showed the shelf' in body, 'count in the header')
+        # 4. a crash on the shelf (settings.log line): sent
+        session(shelf, ["crash: signal 11 at eboot+0x1234 (fault address 0); the details are in this session's boot.log"])
+        wait_reports(2)
+        h, body = report(1)
+        check(h.get('x-ps5sx2-end') == 'crash' and 'Not sent since' not in body, 'shelf crash sent: %s' % h)
+        # 5. a crash only boot.log shows (no settings.log line for the session): sent
+        session(shelf + ['[crash] signal=11 fault_addr=0x0 pc=0x401234 tid=1'], None)
+        wait_reports(3)
+        h, body = report(2)
+        check(not h.get('x-ps5sx2-game') and h.get('x-ps5sx2-end') == 'crash' and
+              'Ended: crash - [crash] signal=11' in body, "crash in boot.log only: sent as a crash (%s)" % h)
+        # 6. a tester note on the shelf: sent
+        session(shelf, ['web x.x.x.x: tester note: the covers are wrong'])
+        wait_reports(4)
+        h, _ = report(3)
+        check(h.get('x-ps5sx2-end') == 'ok+note', 'tester note sent: %s' % h.get('x-ps5sx2-end'))
+        # 7. a game: sent
+        session(shelf + ['[boot] game: /data/PCSX2/games/Black (USA).iso'],
+                ['game start: Black (USA).iso | its settings: no file | all games'])
+        wait_reports(5)
+        h, _ = report(4)
+        check(h.get('x-ps5sx2-game') == 'Black (USA).iso' and h.get('x-ps5sx2-end') == 'ok', 'game sent: %s' % h)
+        # 8. a game boot.log names but settings.log doesn't: sent, with the game
+        session(shelf + ['[boot] game: /data/PCSX2/games/Oni (USA).iso'], ['console: firmware 11.40'])
+        wait_reports(6)
+        h, _ = report(5)
+        check(h.get('x-ps5sx2-game') == 'Oni (USA).iso', "boot.log's game when settings.log has none: %s" % h)
+        # 9. no logs of the session anywhere: sent as no-logs
+        pid = session([], None, boot=False)
+        wait_reports(7)
+        h, body = report(6)
+        check(h.get('x-ps5sx2-end') == 'no-logs' and "Game: unknown (this session's logs weren't found)" in body,
+              'no logs: sent as no-logs (%s)' % h.get('x-ps5sx2-end'))
+        # 10. the switch: the shelf sent too
+        open(data(root, 'PS5SX2-Installer', 'send-shelf-logs'), 'w').close()
+        session(shelf, ['console: firmware 11.40'])
+        wait_reports(8)
+        h, body = report(7)
+        check(h.get('x-ps5sx2-end') == 'ok' and 'Game: none (the shelf only)' in body, 'send-shelf-logs: sent')
+        open(data(root, 'PS5SX2-Installer', 'no-log-upload'), 'w').close()
+        logger.wait(timeout=20)
+    finally:
+        if logger.poll() is None:
+            logger.kill()
+    notes = open(nf).read().splitlines()[notes_before:]
+    check(not any('logs sent' in n or 'log upload is on' in n or 'logs of' in n for n in notes),
+          'no notification when starting or sending: %s' % notes)
+    check('logger: running (relay https://localhost' in open(data(root, 'PS5SX2-Installer', 'installer.log')).read(),
+          'installer.log says the logger runs')
+    state = open(data(root, 'PS5SX2-Installer', 'logger-state.txt')).read()
+    check('skipped_shelf=0' in state, 'the count restarts after a report: %s' % state)
+    err = open(os.path.join(WORK, 'logger4.stderr')).read()
+    check('AddressSanitizer' not in err and 'runtime error' not in err, 'sanitizer clean')
+    drop('logger4')
+
+
+BIN_NOLOG = os.path.join(TOP, 'build', 'host-nolog', 'ps5sx2-installer-nolog')
+
+
+def t_nolog(files112, z112):
+    """The no-log build installs and leaves: no logger, nothing kept or sent, whatever sessions there are."""
+    root = os.path.join(WORK, 'nolog')
+    shutil.rmtree(root, ignore_errors=True)
+    mk_user(root, files112, small=True)
+    publish('vk-285-112', z112)
+    shutil.rmtree(os.path.join(WORK, 'relay'), ignore_errors=True)
+    pc = data(root, 'PCSX2')
+    with open(os.path.join(pc, 'logs', 'boot.log'), 'w') as f:  # a finished game session, which 1.3 would send
+        f.write('[boot] build=vk-285-111\n[boot] pid=3999999\n[boot] game: /data/PCSX2/games/Black (USA).iso\n')
+    env = logger_env(root)
+    env['ASAN_OPTIONS'] = 'detect_leaks=1:abort_on_error=1'
+    t0 = time.time()
+    p = subprocess.run([BIN_NOLOG], env=env, capture_output=True, text=True, timeout=120)
+    check(p.returncode == 0 and time.time() - t0 < 100, 'no-log build: installed and left (rc %d)' % p.returncode)
+    for bad in ('ERROR: AddressSanitizer', 'runtime error:', 'LeakSanitizer'):
+        check(bad not in p.stderr, 'sanitizer: ' + bad)
+    work = data(root, 'PS5SX2-Installer')
+    log = open(os.path.join(work, 'installer.log')).read()
+    check('1.3 (no log upload) started' in log and 'the no-log build: no logs are kept or sent' in log, 'its log says so')
+    check('PS5SX2 vk-285-112 installed' in open(os.path.join(root, 'notifications.txt')).read(), 'it installed')
+    for name in ('outbox', 'console-id.txt', 'logger-state.txt', 'logger.lock'):
+        check(not os.path.exists(os.path.join(work, name)), 'no-log build: no %s' % name)
+    check(relay_count() == 0, 'no-log build: nothing reached the relay')
+    notes = open(os.path.join(root, 'notifications.txt')).read()
+    check('PS5SX2 Installer 1.3 (no log upload): checking' in notes and 'log upload is on' not in notes,
+          'no-log build: its notifications')
+    drop('nolog')
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -1233,6 +1406,9 @@ def main():
             ('logger: short session, relaunch between checks', lambda: t_logger_short_and_relaunch(files112, z112)),
             ('logger: release layout (no logs/ folder), logs/ made later, no settings.log line',
              lambda: t_logger_release_layout(files112, z112)),
+            ('logger 1.3: shelf-only sessions not sent, problems and games are; no notifications',
+             lambda: t_logger_shelf_filter(files112, z112)),
+            ('the no-log build: installs and leaves, nothing kept or sent', lambda: t_nolog(files112, z112)),
         ]
         only = os.environ.get('ONLY')
         failed = 0

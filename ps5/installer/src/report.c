@@ -4,7 +4,8 @@
  * settings.log, its boot.log, emulog.txt and stderr.log, a GPU hang dump written during it, the settings files,
  * the switch names, and the end of the helper's log. Not included: the game list, the settings page's token.
  * IPv4 addresses are replaced with x.x.x.x. The logs are in /data/PCSX2/logs or, on a console set up from a
- * release (no logs/ folder), in /data/PCSX2 itself (log_dirs). */
+ * release (no logs/ folder), in /data/PCSX2 itself (log_dirs). report_build also tells the logger whether the
+ * session only showed the shelf and ended normally (report_quiet_shelf): 1.3 doesn't send those. */
 #include "report.h"
 
 #include "config.h"
@@ -292,6 +293,10 @@ static void last_value(char *dst, size_t size, const sbuf *text, const char *key
       copy_after(dst, size, l, line_end(l, e), key, NULL);
 }
 
+int report_quiet_shelf(const session_info *s) {
+  return s->logs_found && !s->game[0] && !s->problem && (!strcmp(s->end, "ok") || !strcmp(s->end, "no-game"));
+}
+
 int report_build(session_info *s, sbuf *out) {
   sb_clear(out);
   char p[PATH_LEN];
@@ -375,15 +380,61 @@ int report_build(session_info *s, sbuf *out) {
    * and the game too */
   if (boot_found && !s->build[0])
     last_value(s->build, sizeof(s->build), &boot, "[boot] build=");
-  if (boot_found && !sess) {
+  if (boot_found && !s->game[0]) {
     char path[512];
     last_value(path, sizeof(path), &boot, "[boot] game: ");
     if (path[0])
       str_copy(s->game, sizeof(s->game), path_base(path));
   }
+  s->logs_found = sess != NULL || boot_found;
+  s->problem = 0;
+  if (boot_found) {
+    /* what went wrong, as PS5SX2 prints it to boot.log: the crash handler (ProsperoCrash.cpp), a GPU hang
+     * (GSDeviceVK.cpp), a game that didn't start (main-boot.cpp), and a game list with nothing in it (the shelf,
+     * fe_ps5.cpp, or the plain list, game_select.cpp). settings.log has most of these too, when it has the session. */
+    static const char *const marks[] = {"[crash] ", "GPU hang (", "the game didn't start",
+                                        "[frontend] 0 disc image(s)", "[menu] 0 disc image(s)"};
+    for (size_t k = 0; k < sizeof(marks) / sizeof(marks[0]) && !s->problem; k++)
+      s->problem = strstr(boot.data, marks[k]) != NULL;
+    if (!sess) {
+      /* no settings.log lines for the session: how it ended, from the boot log (the most serious first) */
+      static const struct {
+        const char *mark, *end;
+      } boot_ends[] = {{"[crash] ", "crash"},
+                       {"GPU hang (", "gpu-hang"},
+                       {"the game didn't start", "no-start"},
+                       {"[boot] no game to start", "no-game"}};
+      for (size_t k = 0; k < sizeof(boot_ends) / sizeof(boot_ends[0]); k++) {
+        const char *m = strstr(boot.data, boot_ends[k].mark);
+        if (!m)
+          continue;
+        str_copy(s->end, sizeof(s->end), boot_ends[k].end);
+        while (m > boot.data && m[-1] != '\n')
+          m--;
+        const char *le = line_end(m, boot.data + boot.len);
+        size_t n = (size_t)(le - m);
+        while (n && (m[n - 1] == '\n' || m[n - 1] == '\r'))
+          n--;
+        if (n >= sizeof(s->end_line))
+          n = sizeof(s->end_line) - 1;
+        memcpy(s->end_line, m, n);
+        s->end_line[n] = '\0';
+        break;
+      }
+    }
+  }
   sb_free(&boot);
+  if (!s->logs_found)
+    str_copy(s->end, sizeof(s->end), "no-logs");
   if (!s->build[0])
     str_copy(s->build, sizeof(s->build), "unknown");
+
+  /* a GPU hang dump written during the session */
+  for (int k = 0; k < 2 && !s->problem; k++) {
+    path_join(p, sizeof(p), dirs[ldir], k ? "ps5vk-hang.txt" : "vkhang.txt");
+    const time_t t = fs_mtime(p);
+    s->problem = t != 0 && t + 5 >= s->started;
+  }
 
   /* header */
   char tester[64] = "", cid[40] = "", started[32];
@@ -402,7 +453,9 @@ int report_build(session_info *s, sbuf *out) {
             s->watched ? "" : " (this session ended before the installer was running: the PS5 may have restarted)");
   sb_printf(out, "Build: %s\n", s->label[0] ? s->label : s->build);
   sb_printf(out, "Ended: %s%s%s\n", s->end, s->end_line[0] ? " - " : "", s->end_line);
-  sb_printf(out, "Game: %s\n", s->game[0] ? s->game : "none (the shelf only)");
+  sb_printf(out, "Game: %s\n", s->game[0]       ? s->game
+                               : s->logs_found ? "none (the shelf only)"
+                                               : "unknown (this session's logs weren't found)");
   sb_printf(out, "Session: pid %d, started %s\n", (int)s->pid, started);
   sb_printf(out, "Tester: %s  Console ID: %s\n", tester[0] ? tester : "(no tester-name.txt)", cid[0] ? cid : "-");
   if (boot_found)
@@ -411,6 +464,9 @@ int report_build(session_info *s, sbuf *out) {
   else
     sb_printf(out, "Logs: no boot log with this session's pid in %s\n",
               ndirs == 2 ? P_PCSX2 "/logs or " P_PCSX2 : P_PCSX2 " (no logs/ folder)");
+  if (s->shelf_skipped)
+    sb_printf(out, "Not sent since the last report: %u session(s) that only showed the shelf and ended normally\n",
+              s->shelf_skipped);
   sb_printf(out, "IP addresses in this report are replaced with x.x.x.x. No game list, no token.\n");
 
   /* settings.log */

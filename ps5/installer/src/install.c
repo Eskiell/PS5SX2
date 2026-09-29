@@ -818,7 +818,7 @@ int install_run(void) {
     return INSTALL_FAILED;
   }
 
-  notify("PS5SX2 Installer %s: checking for a new build...", INSTALLER_VERSION);
+  notify("PS5SX2 Installer %s%s: checking for a new build...", INSTALLER_VERSION, INSTALLER_VARIANT);
   gh_release rel;
   if (gh_latest(&rel) != 0) {
     notify("PS5SX2 update: %s. Nothing was changed.", err_get());

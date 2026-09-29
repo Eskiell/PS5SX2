@@ -34,6 +34,7 @@ int paths_init(void) {
       work_join(g_p.notes, "release-notes") || work_join(g_p.outbox, "outbox") ||
       work_join(g_p.console_id, "console-id.txt") || work_join(g_p.logger_state, "logger-state.txt") ||
       work_join(g_p.no_install, "no-install") || work_join(g_p.no_log_upload, "no-log-upload") ||
+      work_join(g_p.send_shelf_logs, "send-shelf-logs") ||
       work_join(g_p.reinstall, "reinstall") || work_join(g_p.tester_name, "tester-name.txt") ||
       work_join(g_p.upload_url, "upload-url.txt"))
     return -1;

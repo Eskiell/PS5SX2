@@ -3,7 +3,11 @@
  * How a session is seen: PS5SX2 writes its pid to /data/PCSX2/pid.txt when it starts (main-boot.cpp). The
  * logger checks every few seconds whether that process still exists (kill(pid, 0)). When it's gone, the
  * session's report goes into outbox/ and is sent to the relay (a Cloudflare Worker that posts it to a private
- * Discord channel). Reports that can't be sent wait in the outbox (at most 20 / 60 MB, oldest dropped). */
+ * Discord channel). Reports that can't be sent wait in the outbox (at most 20 / 60 MB, oldest dropped).
+ *
+ * 1.3: a session that only showed the shelf and ended normally isn't sent (report_quiet_shelf; the next report's
+ * header counts them); the send-shelf-logs switch sends them too. The logger shows no notification when it starts
+ * or sends (only when it can't run, or is switched off while running). */
 #include "logger.h"
 
 #include "app.h"
@@ -28,6 +32,7 @@ typedef struct {
 } sess_id;
 
 static char g_relay[1024];
+static unsigned g_shelf_skipped; /* sessions not sent since the last report (logger-state.txt, skipped_shelf=) */
 
 const char *logger_relay_url(void) {
   g_relay[0] = '\0';
@@ -72,18 +77,21 @@ static void state_load(sess_id *last) {
   if (fs_read_file(g_p.logger_state, 4096, &t) == 0 && t.data) {
     const char *p = strstr(t.data, "last_pid=");
     const char *q = strstr(t.data, "last_started=");
+    const char *k = strstr(t.data, "skipped_shelf=");
     if (p)
       last->pid = (pid_t)strtol(p + 9, NULL, 10);
     if (q)
       last->started = (time_t)strtoll(q + 13, NULL, 10);
+    if (k)
+      g_shelf_skipped = (unsigned)strtoul(k + 14, NULL, 10);
   }
   sb_free(&t);
 }
 
 static void state_save(const sess_id *last) {
-  char buf[128];
-  const int n = snprintf(buf, sizeof(buf), "last_pid=%d\nlast_started=%lld\n", (int)last->pid,
-                         (long long)last->started);
+  char buf[160];
+  const int n = snprintf(buf, sizeof(buf), "last_pid=%d\nlast_started=%lld\nskipped_shelf=%u\n", (int)last->pid,
+                         (long long)last->started, g_shelf_skipped);
   fs_write_atomic(g_p.logger_state, buf, (size_t)n, 0666);
 }
 
@@ -318,10 +326,10 @@ int logger_send_outbox(void) {
       log_line("outbox: sending %s failed: %s", l.names[i], err_get());
       stop = 1; /* no network or no server: try again later */
     } else if (resp.status >= 200 && resp.status < 300) {
-      log_line("outbox: %s sent (HTTP %d)", l.names[i], resp.status);
+      /* 1.3: no notification (it came after every session, over whatever was on the screen) */
+      log_line("outbox: %s sent (HTTP %d; %s%s%s)", l.names[i], resp.status, game[0] ? game : "the shelf",
+               end[0] && strcmp(end, "ok") ? ", " : "", end[0] && strcmp(end, "ok") ? end : "");
       outbox_remove(l.names[i]);
-      notify("PS5SX2 logs sent (%s%s%s)", game[0] ? game : "the shelf", end[0] && strcmp(end, "ok") ? ", " : "",
-             end[0] && strcmp(end, "ok") ? end : "");
       sent++;
     } else if (resp.status == 408 || resp.status == 429) {
       log_line("outbox: the log server is busy (HTTP %d); trying later", resp.status);
@@ -363,13 +371,23 @@ static void report_session(pid_t pid, time_t started, int watched, const char *s
   s.started = started;
   s.watched = watched;
   s.suffix = suffix;
+  s.shelf_skipped = g_shelf_skipped;
   sbuf out;
   sb_init(&out);
-  if (report_build(&s, &out) == 0 && outbox_add(&s, &out) == 0)
+  if (report_build(&s, &out) != 0) {
+    log_line("report: session pid %d not reported: %s", (int)pid, err_get());
+  } else if (report_quiet_shelf(&s) && !fs_exists(g_p.send_shelf_logs)) {
+    g_shelf_skipped++;
+    log_line("report: session pid %d (%s, the shelf only, ended %s) not sent: only sessions with a game or a "
+             "problem are (%u since the last report; the switch send-shelf-logs sends these too)",
+             (int)pid, s.build, s.end, g_shelf_skipped);
+  } else if (outbox_add(&s, &out) == 0) {
     log_line("report: session pid %d (%s, %s, ended %s) is in the outbox (%zu bytes)", (int)pid, s.build,
              s.game[0] ? s.game : "shelf", s.end, out.len);
-  else
+    g_shelf_skipped = 0;
+  } else {
     log_line("report: session pid %d not reported: %s", (int)pid, err_get());
+  }
   sb_free(&out);
   last->pid = pid;
   last->started = started;
@@ -401,12 +419,10 @@ int logger_run(void) {
   } else if (r == 0 && pid > 0 && started > 0 && now_utc() - started < 24 * 3600) {
     report_session(pid, started, 0, "", &last); /* ended while we weren't running (or with the last boot) */
   }
+  /* 1.3: no notice on the screen (Spyros: less clutter); the testers are told when they get the ELF */
   const int relay = logger_relay_url()[0] != '\0';
-  notify(relay ? "PS5SX2 log upload is on: each session's logs are sent when PS5SX2 closes. Off: create "
-                 "/data/PS5SX2-Installer/no-log-upload"
-               : "PS5SX2 logs of each session are saved in /data/PS5SX2-Installer/outbox (sending isn't set up "
-                 "yet)");
-  log_line("logger: running (relay %s)", relay ? logger_relay_url() : "not set");
+  log_line("logger: running (relay %s): the logs of game sessions and problems are %s when PS5SX2 closes",
+           relay ? logger_relay_url() : "not set", relay ? "sent" : "kept in outbox/");
 
   uint64_t next_send = 0, backoff_ms = 60000;
   for (;;) {
