@@ -6,6 +6,8 @@
 #include "fe_games.h"
 
 #include "libchdr/chd.h" // vk-285-108: CHD images (3rdparty/libchdr)
+#include "lz4.h"          // vk-285-113: ZSO images (ps5/third_party/lz4)
+#include "zlib.h"         // vk-285-113: CSO images (ps5/third_party/zlib, inflate only)
 
 #include <algorithm>
 #include <cctype>
@@ -237,6 +239,127 @@ private:
 	std::string m_what;
 };
 
+// vk-285-113: a CSO (zlib blocks) or ZSO (LZ4 blocks) image. A 24-byte header ("CISO" or "ZISO", header size,
+// total bytes, block size, version, index shift), then an index of one 32-bit offset per block and one more (the
+// end): offset << shift, bit 31 set when the block is stored as it is. The blocks follow, each padded to the shift.
+// PCSX2's own CsoFileReader plays the game; this reads the volume descriptor and SYSTEM.CNF for the shelf.
+class CsoSectors final : public SectorReader
+{
+public:
+	~CsoSectors() override
+	{
+		if (m_fd >= 0)
+			close(m_fd);
+	}
+
+	bool Open(const std::string& path)
+	{
+		m_fd = open(path.c_str(), O_RDONLY);
+		if (m_fd < 0)
+			return false;
+		uint8_t h[24];
+		if (!ReadAt(m_fd, 0, h, sizeof(h)))
+			return false;
+		m_lz4 = std::memcmp(h, "ZISO", 4) == 0;
+		if (!m_lz4 && std::memcmp(h, "CISO", 4) != 0)
+			return false;
+		m_total = Le32(h + 8) | (static_cast<uint64_t>(Le32(h + 12)) << 32);
+		m_frame = Le32(h + 16);
+		m_shift = h[21];
+		if (m_frame < 2048 || m_frame > (1u << 20) || (m_frame & (m_frame - 1)) != 0 || m_shift > 8 || m_total == 0)
+			return false;
+		m_frames = static_cast<uint32_t>((m_total + m_frame - 1) / m_frame);
+		m_out.resize(m_frame);
+		m_in.resize(static_cast<size_t>(m_frame) * 2 + 4096);
+		return true;
+	}
+
+	bool Read(uint32_t lba, void* buf, size_t len) override
+	{
+		uint64_t pos = static_cast<uint64_t>(lba) * 2048;
+		uint8_t* p = static_cast<uint8_t*>(buf);
+		while (len)
+		{
+			const uint64_t frame = pos / m_frame;
+			const size_t in = static_cast<size_t>(pos % m_frame);
+			if (frame >= m_frames || !Load(static_cast<uint32_t>(frame)) || in >= m_out_len)
+				return false;
+			const size_t n = std::min<size_t>(len, m_out_len - in);
+			std::memcpy(p, m_out.data() + in, n);
+			p += n;
+			pos += n;
+			len -= n;
+		}
+		return true;
+	}
+
+private:
+	// Frame `index` into m_out (m_out_len bytes: the last frame may be short).
+	bool Load(uint32_t index)
+	{
+		if (index == m_cached)
+			return true;
+		uint8_t e[8];
+		if (!ReadAt(m_fd, 24 + static_cast<uint64_t>(index) * 4, e, sizeof(e)))
+			return false;
+		const uint32_t a = Le32(e), b = Le32(e + 4);
+		const bool stored = (a & 0x80000000u) != 0;
+		const uint64_t begin = static_cast<uint64_t>(a & 0x7fffffffu) << m_shift;
+		const uint64_t end = static_cast<uint64_t>(b & 0x7fffffffu) << m_shift;
+		if (end <= begin || end - begin > m_in.size())
+			return false;
+		const size_t size = static_cast<size_t>(end - begin);
+		const size_t want = static_cast<size_t>(std::min<uint64_t>(m_frame, m_total - static_cast<uint64_t>(index) * m_frame));
+		if (!ReadAt(m_fd, begin, m_in.data(), size))
+			return false;
+		m_cached = ~0u;
+		if (stored)
+		{
+			if (size < want)
+				return false;
+			std::memcpy(m_out.data(), m_in.data(), want);
+			m_out_len = want;
+		}
+		else if (m_lz4)
+		{
+			// The block may be followed by padding: the partial call stops at `want` bytes of output.
+			const int got = LZ4_decompress_safe_partial(reinterpret_cast<const char*>(m_in.data()), reinterpret_cast<char*>(m_out.data()),
+				static_cast<int>(size), static_cast<int>(want), static_cast<int>(m_frame));
+			if (got < static_cast<int>(want))
+				return false;
+			m_out_len = want;
+		}
+		else
+		{
+			z_stream z = {};
+			if (inflateInit2(&z, -15) != Z_OK)
+				return false;
+			z.next_in = m_in.data();
+			z.avail_in = static_cast<uInt>(size);
+			z.next_out = m_out.data();
+			z.avail_out = static_cast<uInt>(m_frame);
+			const int rc = inflate(&z, Z_FINISH);
+			const size_t got = z.total_out;
+			inflateEnd(&z);
+			if ((rc != Z_STREAM_END && rc != Z_BUF_ERROR) || got < want)
+				return false;
+			m_out_len = want;
+		}
+		m_cached = index;
+		return true;
+	}
+
+	int m_fd = -1;
+	bool m_lz4 = false;
+	uint64_t m_total = 0; // the image's size when uncompressed
+	uint32_t m_frame = 0; // bytes per block
+	uint32_t m_frames = 0;
+	uint8_t m_shift = 0;
+	uint32_t m_cached = ~0u;
+	size_t m_out_len = 0;
+	std::vector<uint8_t> m_in, m_out;
+};
+
 // "SLUS-21351" from SYSTEM.CNF's BOOT2 line, found in the root directory of the ISO 9660 file system.
 std::string SerialFromDisc(SectorReader& disc)
 {
@@ -345,8 +468,17 @@ std::string ChdSerial(const std::string& path)
 		if (it != s_serials.end())
 			return it->second;
 	}
-	ChdSectors disc;
-	const std::string serial = disc.Open(path) ? SerialFromDisc(disc) : std::string();
+	std::string serial;
+	if (HasExtension(path.c_str(), ".chd"))
+	{
+		ChdSectors disc;
+		serial = disc.Open(path) ? SerialFromDisc(disc) : std::string();
+	}
+	else
+	{
+		CsoSectors disc; // vk-285-113
+		serial = disc.Open(path) ? SerialFromDisc(disc) : std::string();
+	}
 	if (!serial.empty() && !key.empty())
 	{
 		std::lock_guard<std::mutex> lock(s_serial_mutex);
@@ -379,7 +511,7 @@ std::string DescribeImage(const std::string& image_path)
 
 bool IsDiscImageName(const char* name)
 {
-	return HasExtension(name, ".iso") || HasExtension(name, ".chd");
+	return HasExtension(name, ".iso") || HasExtension(name, ".chd") || HasExtension(name, ".cso") || HasExtension(name, ".zso");
 }
 
 void SetSerialCacheFile(const std::string& path)
@@ -394,8 +526,8 @@ void SetSerialCacheFile(const std::string& path)
 
 std::string ReadSerial(const std::string& image_path)
 {
-	if (HasExtension(image_path.c_str(), ".chd"))
-		return ChdSerial(image_path);
+	if (HasExtension(image_path.c_str(), ".chd") || HasExtension(image_path.c_str(), ".cso") || HasExtension(image_path.c_str(), ".zso"))
+		return ChdSerial(image_path); // vk-285-113: the compressed formats keep their serials in the cache file
 	const int fd = open(image_path.c_str(), O_RDONLY);
 	if (fd < 0)
 		return {};
@@ -460,6 +592,206 @@ void MakeTitle(const std::string& stem, std::string& title, std::string& region,
 		title = stem;
 }
 
+namespace
+{
+// vk-285-113: the game database's entries, serial -> English name (name-en, else name) and region.
+struct DbEntry
+{
+	std::string name;
+	std::string region; // PCSX2's "NTSC-U", "PAL-E", ...
+};
+std::mutex s_db_mutex;
+std::string s_db_file;
+bool s_db_loaded = false;
+std::unordered_map<std::string, DbEntry> s_db;
+
+// The value of a `key: "text"` line's double-quoted scalar (GameIndex.yaml has no escapes), or a bare one up to " #".
+std::string YamlValue(const char* p, const char* end)
+{
+	while (p < end && (*p == ' ' || *p == '\t'))
+		p++;
+	if (p < end && *p == '"')
+	{
+		p++;
+		const char* q = p;
+		while (q < end && *q != '"')
+			q++;
+		return std::string(p, q);
+	}
+	const char* q = p;
+	while (q < end && !(*q == '#' && q > p && q[-1] == ' '))
+		q++;
+	while (q > p && (q[-1] == ' ' || q[-1] == '\r'))
+		q--;
+	return std::string(p, q);
+}
+
+void LoadDbLocked()
+{
+	if (s_db_loaded || s_db_file.empty())
+		return;
+	s_db_loaded = true;
+	FILE* f = std::fopen(s_db_file.c_str(), "rb");
+	if (!f)
+		return;
+	std::string text;
+	char buf[65536];
+	size_t n;
+	while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+		text.append(buf, n);
+	std::fclose(f);
+	std::string serial, name, name_en, region;
+	const auto flush = [&]() {
+		if (!serial.empty() && !(name_en.empty() && name.empty()))
+			s_db[serial] = DbEntry{name_en.empty() ? name : name_en, region};
+		serial.clear();
+		name.clear();
+		name_en.clear();
+		region.clear();
+	};
+	const char* p = text.data();
+	const char* const end = p + text.size();
+	while (p < end)
+	{
+		const char* eol = static_cast<const char*>(std::memchr(p, '\n', static_cast<size_t>(end - p)));
+		if (!eol)
+			eol = end;
+		if (p < eol && *p != ' ' && *p != '#' && *p != '\r' && *p != '\t')
+		{
+			// "SLUS-20552:" (maybe followed by a comment) starts an entry.
+			const char* colon = static_cast<const char*>(std::memchr(p, ':', static_cast<size_t>(eol - p)));
+			flush();
+			if (colon && colon > p)
+				serial.assign(p, colon);
+		}
+		else if (!serial.empty())
+		{
+			const char* q = p;
+			while (q < eol && *q == ' ')
+				q++;
+			const auto is_key = [&](const char* key) {
+				const size_t kl = std::strlen(key);
+				return static_cast<size_t>(eol - q) > kl && std::memcmp(q, key, kl) == 0;
+			};
+			if (is_key("name-en:"))
+				name_en = YamlValue(q + 8, eol);
+			else if (is_key("name-sort:"))
+			{
+			}
+			else if (is_key("name:"))
+				name = YamlValue(q + 5, eol);
+			else if (is_key("region:"))
+				region = YamlValue(q + 7, eol);
+		}
+		p = eol + 1;
+	}
+	flush();
+}
+
+// The shelf's region word for the database's region code ("" when it doesn't say).
+const char* DbRegion(const std::string& r)
+{
+	if (r == "NTSC-U")
+		return "USA";
+	if (r == "NTSC-J")
+		return "Japan";
+	if (r == "NTSC-K")
+		return "Korea";
+	if (r == "NTSC-C")
+		return "China";
+	if (r == "PAL-A")
+		return "Australia";
+	if (r == "PAL-F")
+		return "France";
+	if (r == "PAL-G")
+		return "Germany";
+	if (r == "PAL-I")
+		return "Italy";
+	if (r == "PAL-S")
+		return "Spain";
+	if (r == "PAL-R")
+		return "Russia";
+	if (r.compare(0, 4, "PAL-") == 0 && r != "PAL-Unk")
+		return "Europe"; // PAL-E, PAL-M5 (multi-language), ...
+	return "";
+}
+
+// A title to compare: letters and digits only, lower case, "&" as "and"; kana, kanji and Hangul bytes stay as they are.
+std::string CompareForm(const std::string& s)
+{
+	std::string out;
+	for (const char ch : s)
+	{
+		const unsigned char c = static_cast<unsigned char>(ch);
+		if (c == '&')
+			out += "and";
+		else if (std::isalnum(c))
+			out += static_cast<char>(std::tolower(c));
+		else if (c >= 0x80)
+			out += ch;
+	}
+	return out;
+}
+
+// Whether a title has Japanese, Chinese or Korean letters (UTF-8 lead bytes 0xE3-0xED), which the shelf's font may lack.
+bool HasCjk(const std::string& s)
+{
+	for (const char ch : s)
+	{
+		const unsigned char c = static_cast<unsigned char>(ch);
+		if (c >= 0xE3 && c <= 0xED)
+			return true;
+	}
+	return false;
+}
+} // namespace
+
+void SetGameDbFile(const std::string& path)
+{
+	std::lock_guard<std::mutex> lock(s_db_mutex);
+	if (path == s_db_file)
+		return;
+	s_db_file = path;
+	s_db_loaded = false;
+	s_db.clear();
+}
+
+bool ApplyGameDbTitle(GameInfo& g)
+{
+	if (g.serial.empty())
+		return false;
+	DbEntry entry;
+	{
+		std::lock_guard<std::mutex> lock(s_db_mutex);
+		LoadDbLocked();
+		const auto it = s_db.find(g.serial);
+		if (it == s_db.end())
+			return false;
+		entry = it->second;
+	}
+	std::string title, region, extra;
+	MakeTitle(entry.name, title, region, extra);
+	if (g.region.empty())
+		g.region = DbRegion(entry.region);
+	const std::string db_form = CompareForm(title);
+	if (db_form.empty() || CompareForm(g.title).find(db_form) != std::string::npos)
+		return false; // the file's name already holds the game's
+	if (HasCjk(title) && !HasCjk(g.title))
+		return false; // only a Japanese name known: the file's Latin one reads better on the shelf
+	g.title = title;
+	if (g.extra.empty())
+		g.extra = extra;
+	return true;
+}
+
+void SortGames(std::vector<GameInfo>& games)
+{
+	std::sort(games.begin(), games.end(), [](const GameInfo& a, const GameInfo& b) {
+		const std::string la = Lower(a.title), lb = Lower(b.title);
+		return la != lb ? la < lb : a.file < b.file;
+	});
+}
+
 std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs)
 {
 	std::vector<GameInfo> games;
@@ -481,17 +813,14 @@ std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs)
 			if (stat(g.path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
 				continue;
 			g.file = file;
-			g.stem = file.substr(0, file.size() - 4); // ".iso" and ".chd"
+			g.stem = file.substr(0, file.size() - 4); // ".iso", ".chd", ".cso", ".zso"
 			g.bytes = static_cast<uint64_t>(st.st_size);
 			MakeTitle(g.stem, g.title, g.region, g.extra);
 			games.push_back(g);
 		}
 		closedir(d);
 	}
-	std::sort(games.begin(), games.end(), [](const GameInfo& a, const GameInfo& b) {
-		const std::string la = Lower(a.title), lb = Lower(b.title);
-		return la != lb ? la < lb : a.file < b.file;
-	});
+	SortGames(games);
 	return games;
 }
 

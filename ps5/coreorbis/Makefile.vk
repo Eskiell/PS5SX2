@@ -50,7 +50,7 @@ CXXFLAGS := -Wall -g -O3 -DNDEBUG -std=c++20 -march=znver2 -msse4.1 -mavx2 -mno-
   -fvisibility=hidden \
   -Wno-macro-redefined -Wno-unused-function \
   -include common/Threading.h \
-  -I./include-orbis -I$(PCSX2) -I$(PCSX2)/pcsx2 -I$(PCSX2)/3rdparty/include \
+  -I./include-orbis -I$(PCSX2)/ps5/third_party/zlib -I$(PCSX2) -I$(PCSX2)/pcsx2 -I$(PCSX2)/3rdparty/include \
   -I$(PCSX2)/3rdparty/fmt/include \
   -I$(PCSX2)/3rdparty/fast_float/include \
   -I$(PCSX2)/3rdparty/rapidjson/include \
@@ -199,6 +199,7 @@ CDVD_SRCS := $(PCSX2)/pcsx2/CDVD/BlockdumpFileReader.cpp \
   $(PCSX2)/pcsx2/CDVD/CDVDdiscReader.cpp \
   $(PCSX2)/pcsx2/CDVD/CDVDisoReader.cpp \
   $(PCSX2)/pcsx2/CDVD/CDVDdiscThread.cpp \
+  $(PCSX2)/pcsx2/CDVD/CsoFileReader.cpp \
   $(PCSX2)/pcsx2/CDVD/FlatFileReader.cpp \
   $(PCSX2)/pcsx2/CDVD/InputIsoFile.cpp \
   $(PCSX2)/pcsx2/CDVD/IsoHasher.cpp \
@@ -283,6 +284,12 @@ CHD_CSRCS := $(wildcard $(PCSX2)/3rdparty/libchdr/src/*.c) \
 CHD_INCLUDES := -I$(PCSX2)/3rdparty/libchdr/include -I$(PCSX2)/3rdparty/lzma/include \
   -I$(PS5_THIRD)/zlib -I$(PS5_THIRD)/zstd/lib
 C_SRCS := $(C_SRCS) $(CHD_CSRCS)
+
+# vk-285-113: CSO (zlib) and ZSO (LZ4) images. PCSX2's CsoFileReader (CDVD_SRCS) reads a CSO's blocks with the
+# vendored inflate and a ZSO's with the vendored lz4.c; the frontend's serial reader (fe_games.cpp) too.
+LZ4_CSRCS := $(PS5_THIRD)/lz4/lz4.c
+CSO_INCLUDES := -I$(PS5_THIRD)/lz4
+C_SRCS := $(C_SRCS) $(LZ4_CSRCS)
 
 # The GL build's shims minus glprobe, GLContextPS5 and gl_loader_table; plus the
 # shaderc shim and the Vulkan build's stand-ins for GL-only hooks.
@@ -399,6 +406,7 @@ OBJS := $(patsubst $(PCSX2)/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(SRCS))) \
 $(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(CHD_CSRCS)): CFLAGS += $(CHD_INCLUDES) -DZ7_ST \
   -DZSTD_DISABLE_ASM=1 -DZSTD_LEGACY_SUPPORT=0 -DZSTD_NO_TRACE=1
 $(OBJDIR)/pcsx2/CDVD/ChdFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -I$(PCSX2)/3rdparty/libchdr/include
+$(OBJDIR)/pcsx2/CDVD/CsoFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += $(CSO_INCLUDES)
 
 all: $(OBJS)
 	@echo "VK COMPILE OK: $(words $(OBJS)) objects"

@@ -857,6 +857,7 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 	if (g_web)
 		return true;
 	SetSerialCacheFile(paths.serial_cache); // vk-285-108
+	SetGameDbFile(paths.gamedb_file);       // vk-285-113
 	WebConfig cfg;
 	cfg.game_dirs = {paths.games_dir, paths.top_dir};
 	cfg.game_dirs.insert(cfg.game_dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1
@@ -909,6 +910,7 @@ int orbis_frontend_prefetch_covers(const OrbisFrontendPaths& paths, double budge
 		return 0;
 	const double t0 = Now();
 	SetSerialCacheFile(paths.serial_cache); // vk-285-108
+	SetGameDbFile(paths.gamedb_file);       // vk-285-113
 	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
 	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives, when visible here
 	std::vector<GameInfo> games = ScanGames(dirs);
@@ -946,6 +948,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	*ran = false;
 	const double t0 = Now();
 	SetSerialCacheFile(paths.serial_cache); // vk-285-108
+	SetGameDbFile(paths.gamedb_file);       // vk-285-113
 	std::vector<std::string> dirs = {paths.games_dir, paths.top_dir};
 	dirs.insert(dirs.end(), paths.usb_dirs.begin(), paths.usb_dirs.end()); // test build 1: USB drives
 	std::vector<GameInfo> games = ScanGames(dirs);
@@ -953,8 +956,13 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	for (GameInfo& g : games)
 	{
 		g.serial = ReadSerial(g.path);
+		// vk-285-113: a CHD (or an ISO) named after its file shows the game's name from the game database.
+		const std::string file_title = g.title;
+		const bool renamed = ApplyGameDbTitle(g);
 		ReadBadges(g, paths.settings_dir, paths.gs_ini, paths.patches_dir);
 		on_usb += OnUsb(g.path) ? 1 : 0;
+		if (renamed)
+			std::printf("[frontend] %s: titled \"%s\" (the file name gave \"%s\")\n", g.file.c_str(), g.title.c_str(), file_title.c_str());
 		// Test build 1: the size too (a disc image of an odd size is often a bad dump), and the folder.
 		std::printf("[frontend] %s | %s | %s | %llu bytes | %s\n", g.file.c_str(), g.serial.empty() ? "no serial" : g.serial.c_str(),
 			g.title.c_str(), static_cast<unsigned long long>(g.bytes), g.path.substr(0, g.path.rfind('/')).c_str());
@@ -966,6 +974,7 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 				std::printf("[frontend]   chd: %s\n", what.c_str());
 		}
 	}
+	SortGames(games); // vk-285-113: by the titles the game database may have changed
 	std::printf("[frontend] %zu disc image(s), %d on USB, scanned in %.0f ms\n", games.size(), on_usb, (Now() - t0) * 1000.0);
 	std::fflush(stdout);
 	WriteUsbList(paths.usb_list, games);

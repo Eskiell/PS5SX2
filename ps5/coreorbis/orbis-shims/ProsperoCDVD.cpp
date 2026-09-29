@@ -1,9 +1,8 @@
-// Orbis CDVD stubs: .cso/.zso/.gz images need zlib/lz4 readers that aren't built,
-// so those backends refuse. Raw .iso/.bin works fully via the real InputIsoFile
-// (kept in build); .chd too since vk-285-108 (the real ChdFileReader over libchdr,
-// with zlib and zstd vendored in ps5/third_party). Physical-disc reader (Linux
-// ioctl) likewise unavailable.
-#include "CDVD/CsoFileReader.h"
+// Orbis CDVD stubs: .gz images need PCSX2's indexed-zlib reader (GzippedFileReader), which isn't
+// built, so that backend refuses. Raw .iso/.bin works fully via the real InputIsoFile
+// (kept in build); .chd since vk-285-108 (the real ChdFileReader over libchdr, with zlib and
+// zstd vendored in ps5/third_party); .cso and .zso since vk-285-113 (the real CsoFileReader over
+// the vendored inflate and lz4). Physical-disc reader (Linux ioctl) likewise unavailable.
 #include "CDVD/GzippedFileReader.h"
 #include "CDVD/CDVDdiscReader.h"
 #include "common/Error.h"
@@ -71,43 +70,12 @@ static bool Unsupported(Error* error, const char* what)
   return false;
 }
 
-CsoFileReader::CsoFileReader() = default;
-CsoFileReader::~CsoFileReader() = default;
-bool CsoFileReader::Open2(std::string filename, Error* error)
-{
-  (void)filename;
-  return Unsupported(error, "CSO/ZSO not supported on Orbis (no zlib)");
-}
-bool CsoFileReader::Precache2(ProgressCallback* progress, Error* error)
-{
-  (void)progress;
-  return Unsupported(error, "CSO/ZSO not supported on Orbis (no zlib)");
-}
-ThreadedFileReader::Chunk CsoFileReader::ChunkForOffset(u64 offset)
-{
-  (void)offset;
-  return ThreadedFileReader::Chunk{-1, 0, 0};
-}
-int CsoFileReader::ReadChunk(void* dst, s64 chunkID)
-{
-  (void)dst;
-  (void)chunkID;
-  return -1;
-}
-void CsoFileReader::Close2()
-{
-}
-u32 CsoFileReader::GetBlockCount() const
-{
-  return 0;
-}
-
 GzippedFileReader::GzippedFileReader() = default;
 GzippedFileReader::~GzippedFileReader() = default;
 bool GzippedFileReader::Open2(std::string filename, Error* error)
 {
   (void)filename;
-  return Unsupported(error, "GZIP images not supported on Orbis (no zlib)");
+  return Unsupported(error, "GZIP images not supported on Orbis (use .cso, .zso or .chd)");
 }
 ThreadedFileReader::Chunk GzippedFileReader::ChunkForOffset(u64 offset)
 {

@@ -58,7 +58,7 @@ struct Game
 	unsigned long long bytes;
 };
 
-// .iso, or .chd (vk-285-108), in any case.
+// .iso, .chd (vk-285-108), .cso or .zso (vk-285-113), in any case.
 bool IsDiscImage(const char* name)
 {
 	const size_t n = std::strlen(name);
@@ -66,7 +66,9 @@ bool IsDiscImage(const char* name)
 		return false;
 	const char* ext = name + n - 4;
 	const char e1 = static_cast<char>(ext[1] | 0x20), e2 = static_cast<char>(ext[2] | 0x20), e3 = static_cast<char>(ext[3] | 0x20);
-	return ext[0] == '.' && ((e1 == 'i' && e2 == 's' && e3 == 'o') || (e1 == 'c' && e2 == 'h' && e3 == 'd'));
+	return ext[0] == '.' &&
+	       ((e1 == 'i' && e2 == 's' && e3 == 'o') || (e1 == 'c' && e2 == 'h' && e3 == 'd') ||
+	        (e1 == 'c' && e2 == 's' && e3 == 'o') || (e1 == 'z' && e2 == 's' && e3 == 'o'));
 }
 
 std::string Lower(const std::string& s)

@@ -954,8 +954,10 @@ std::vector<GameInfo> WebServer::Games()
 				g.serial = ReadSerial(g.path);
 				m_serials[g.path] = {g.bytes, g.serial};
 			}
+			ApplyGameDbTitle(g); // vk-285-113: the game's name from the game database, as on the shelf
 			ReadBadges(g, m_cfg.settings_dir, m_cfg.gs_ini, m_cfg.patches_dir);
 		}
+		SortGames(m_games);
 		m_games_time = Now();
 	}
 	return m_games;

@@ -32,6 +32,7 @@ struct OrbisFrontendPaths
 	std::string logs_dir;              // logs/: the settings page's logs download reads the sessions there
 	std::string report_header;         // that download's first lines: build, sources, console
 	std::string serial_cache;          // vk-285-108: cache/chd-serials.txt, the CHD serials found (fe::SetSerialCacheFile)
+	std::string gamedb_file;           // vk-285-113: resources/GameIndex.yaml, the games' names by serial (fe::SetGameDbFile)
 };
 
 // Test build 1 (vk-285-55): the folders on USB drives PS5SX2 lists games from: each drive's root
