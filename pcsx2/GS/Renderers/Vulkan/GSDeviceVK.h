@@ -297,6 +297,9 @@ private:
 	u32 m_current_frame = 0;
 
 	bool m_last_submit_failed = false;
+	// vk-285-113 (AI-assisted): draws recorded into the current command buffer (PS5 port: RenderHW submits early past a budget, the
+	// driver's 2 MiB submission stream holds ~8-10k draws). Reset when a command buffer becomes current.
+	u32 m_orbis_submit_draws = 0;
 
 	std::map<u32, VkRenderPass> m_render_pass_cache;
 

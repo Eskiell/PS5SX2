@@ -1291,6 +1291,7 @@ namespace
 		u32 blend;
 		u64 ps_lo, ps_hi;
 		u32 nverts, nindices;
+		u32 groups; // vk-285-113: drawlist groups of a full-barrier draw (one barrier + one driver draw each), 0 otherwise
 		const void* a;
 		const void* b;
 		const void* c;
@@ -1301,9 +1302,25 @@ namespace
 		u64 extra;
 	};
 	constexpr u32 ORBIS_VK_TRACE_N = 16384; // a frame of R&C draws more than 2,000 times, plus a pipe entry per pass
+	// vk-285-113 (AI-assisted): without flags/vkring the LAST 512 entries (~60 KB, they stay in the cache) are kept anyway, so every
+	// hang dump lists the draws before it. the six distinct dumps in the vk-285-108..112 reports all said "the draw ring was off".
+	constexpr u32 ORBIS_VK_TRACE_SMALL_N = 512;
+	static_assert((ORBIS_VK_TRACE_N & (ORBIS_VK_TRACE_N - 1)) == 0 && (ORBIS_VK_TRACE_SMALL_N & (ORBIS_VK_TRACE_SMALL_N - 1)) == 0, "ring sizes are masks");
 	OrbisVkTraceEntry s_orbis_trace[ORBIS_VK_TRACE_N];
 	u64 s_orbis_trace_seq = 0;
 	u32 s_orbis_submit = 0;
+	// vk-285-113: what one submission holds, from the GS thread's side: PCSX2 draw configs, driver draws (a full-barrier config is
+	// one draw per drawlist group, SendHWDraw) and other traced operations, since the last submit ("cur"), in the last submit
+	// ("last") and the largest submit of the last 600 ("peak"). The driver's stream holds ~7,800 feedback draws or ~10,500 plain ones.
+	struct OrbisSubmitCounts
+	{
+		u32 configs = 0, draws = 0, ops = 0;
+	};
+	OrbisSubmitCounts s_orbis_sub_cur, s_orbis_sub_last, s_orbis_sub_peak;
+	// The driver's "a submission of more than N words" refusal (ps5vk_queue.c:1528), seen by DebugMessengerCallback.
+	std::atomic<u32> s_orbis_overflow_reports{0};
+	std::atomic<u64> s_orbis_overflow_words{0}; // the limit the message names
+	std::atomic<u64> s_orbis_overflow_total{0}; // "this one holds N" (the driver patch adds it): the refused submission's words, 0 if not there
 
 	// vk-285-90: the ring only runs with the flag file flags/vkring (read at the first traced call). Two
 	// fresh ~128-byte entries per draw in a 2 MB ring (always out of the caches) were ~2% of the GS thread in
@@ -1316,15 +1333,30 @@ namespace
 		{
 			s_orbis_trace_read = true;
 			s_orbis_trace_on = OrbisFlag("vkring");
-			printf("[vkhw] draw ring for GPU-hang dumps: %s (flags/vkring)\n", s_orbis_trace_on ? "on" : "off");
+			// vk-285-113: the run after a hang gets the big ring by itself (OrbisVkHangExit leaves the file, this run takes it), so the
+			// next report of the same game has every draw of the hung submission without asking the tester for a flag.
+			bool after_hang = false;
+			{
+				const std::string once = OrbisLogPath("vkring-next.txt");
+				if (FILE* f = fopen(once.c_str(), "rb"))
+				{
+					fclose(f);
+					unlink(once.c_str());
+					after_hang = true;
+					s_orbis_trace_on = true;
+				}
+			}
+			printf("[vkhw] draw ring for GPU-hang dumps: %s (%s); the last %u entries are always kept\n", s_orbis_trace_on ? "on" : "off",
+				after_hang ? "the run after a GPU hang" : "flags/vkring", ORBIS_VK_TRACE_SMALL_N);
 			fflush(stdout);
 		}
 		return s_orbis_trace_on;
 	}
+	__fi u32 OrbisVkTraceCap() { return OrbisVkTraceOn() ? ORBIS_VK_TRACE_N : ORBIS_VK_TRACE_SMALL_N; }
 
 	OrbisVkTraceEntry& OrbisVkTraceNew(u8 kind)
 	{
-		OrbisVkTraceEntry& e = s_orbis_trace[s_orbis_trace_seq % ORBIS_VK_TRACE_N];
+		OrbisVkTraceEntry& e = s_orbis_trace[s_orbis_trace_seq & (OrbisVkTraceCap() - 1)]; // both sizes are powers of two
 		e = {};
 		e.seq = s_orbis_trace_seq++;
 		e.submit = s_orbis_submit;
@@ -1345,8 +1377,11 @@ namespace
 
 	void OrbisVkTraceDraw(const GSHWDrawConfig& config)
 	{
-		if (!OrbisVkTraceOn()) // vk-285-90
-			return;
+		// vk-285-113: counted and recorded always (the small ring); vk-285-90's flag only sizes the ring now.
+		s_orbis_sub_cur.configs++;
+		s_orbis_sub_cur.draws += (config.require_full_barrier && config.drawlist && !config.drawlist->empty()) ?
+		                             static_cast<u32>(config.drawlist->size()) :
+		                             1u;
 		OrbisVkTraceEntry& e = OrbisVkTraceNew(1);
 		e.topology = static_cast<u8>(config.topology);
 		e.vs = config.vs.key;
@@ -1362,6 +1397,7 @@ namespace
 		e.ps_hi = config.ps.key_hi;
 		e.nverts = config.nverts;
 		e.nindices = config.nindices;
+		e.groups = (config.require_full_barrier && config.drawlist) ? static_cast<u32>(config.drawlist->size()) : 0;
 		OrbisVkTraceTex(config.rt, e.a, e.aw, e.ah, e.af);
 		OrbisVkTraceTex(config.ds, e.b, e.bw, e.bh, e.bf);
 		OrbisVkTraceTex(config.tex, e.c, e.cw, e.ch, e.cf);
@@ -1379,8 +1415,7 @@ namespace
 
 	void OrbisVkTraceOp(u8 kind, const GSTexture* dst, const GSTexture* src, const GSVector4i& r, u64 extra)
 	{
-		if (!OrbisVkTraceOn()) // vk-285-90
-			return;
+		s_orbis_sub_cur.ops++; // vk-285-113
 		OrbisVkTraceEntry& e = OrbisVkTraceNew(kind);
 		OrbisVkTraceTex(dst, e.a, e.aw, e.ah, e.af);
 		OrbisVkTraceTex(src, e.b, e.bw, e.bh, e.bf);
@@ -1397,23 +1432,25 @@ namespace
 		if (FILE* f = fopen(path, "w"))
 		{
 			fprintf(f, "%s\n", header);
-			if (!s_orbis_trace_on) // vk-285-90
-				fprintf(f, "the draw ring was off: put the flag file flags/vkring in place and relaunch to record it\n");
+			if (!s_orbis_trace_on) // vk-285-90; vk-285-113: the last 512 entries are there anyway
+				fprintf(f, "the big draw ring was off: only the last %u entries below (put flags/vkring in place, or relaunch: the run after a hang has it on)\n",
+					ORBIS_VK_TRACE_SMALL_N);
 			fprintf(f, "kinds: 1 draw, 2 copy, 3 clear, 4 stretch, 5 multi-stretch, 6 readback, 7 upload; tex = ptr WxH f<GSTexture::Format>\n");
-			fprintf(f, "draw: topo(0 pt,1 line,2 tri) vs depth colormask date(0 off,1 stencil,2 stencilone,3 primid,4 full) sampler flags(1 one-barrier,2 full-barrier,4 alpha2,8 blend-mp,16 line-expand,32+ hazard) blend ps nv/ni rt ds tex pal drawarea scissor\n");
-			const u64 first = s_orbis_trace_seq > ORBIS_VK_TRACE_N ? s_orbis_trace_seq - ORBIS_VK_TRACE_N : 0;
+			fprintf(f, "draw: topo(0 pt,1 line,2 tri) vs depth colormask date(0 off,1 stencil,2 stencilone,3 primid,4 full) sampler flags(1 one-barrier,2 full-barrier,4 alpha2,8 blend-mp,16 line-expand,32+ hazard) blend ps nv/ni grp(drawlist groups of a full-barrier draw) rt ds tex pal drawarea scissor\n");
+			const u32 cap = OrbisVkTraceCap();
+			const u64 first = s_orbis_trace_seq > cap ? s_orbis_trace_seq - cap : 0;
 			for (u64 q = first; q < s_orbis_trace_seq; q++)
 			{
-				const OrbisVkTraceEntry& e = s_orbis_trace[q % ORBIS_VK_TRACE_N];
+				const OrbisVkTraceEntry& e = s_orbis_trace[q & (cap - 1)];
 				if (e.submit + 2 < hung)
 					continue;
 				if (e.kind == 1)
 					fprintf(f,
 						"%llu s%u draw topo=%u vs=%02x depth=%02x cm=%x date=%u samp=%02x fl=%02x blend=%08x ps=%016llx.%016llx "
-						"nv=%u ni=%u rt=%p %ux%u f%u ds=%p %ux%u f%u tex=%p %ux%u f%u pal=%p f%u area=%d,%d,%d,%d sc=%llx\n",
+						"nv=%u ni=%u grp=%u rt=%p %ux%u f%u ds=%p %ux%u f%u tex=%p %ux%u f%u pal=%p f%u area=%d,%d,%d,%d sc=%llx\n",
 						static_cast<unsigned long long>(e.seq), e.submit, e.topology, e.vs, e.depth, e.colormask, e.date,
 						e.sampler, e.flags, e.blend, static_cast<unsigned long long>(e.ps_hi),
-						static_cast<unsigned long long>(e.ps_lo), e.nverts, e.nindices, e.a, e.aw, e.ah, e.af, e.b, e.bw,
+						static_cast<unsigned long long>(e.ps_lo), e.nverts, e.nindices, e.groups, e.a, e.aw, e.ah, e.af, e.b, e.bw,
 						e.bh, e.bf, e.c, e.cw, e.ch, e.cf, e.d, e.df, e.r[0], e.r[1], e.r[2], e.r[3],
 						static_cast<unsigned long long>(e.extra));
 				else if (e.kind == 8)
@@ -1439,9 +1476,7 @@ namespace
 	// really uses, its feedback-loop flags and the TFX texture slots 0-2.
 	void OrbisVkTracePipe(u64 ps_lo, u64 ps_hi, u8 feedback, const void* t0, const void* t1, const void* t2, u64 pipeline)
 	{
-		if (!OrbisVkTraceOn()) // vk-285-90
-			return;
-		OrbisVkTraceEntry& e = OrbisVkTraceNew(8);
+		OrbisVkTraceEntry& e = OrbisVkTraceNew(8); // vk-285-113: always (the small ring)
 		e.ps_lo = ps_lo;
 		e.ps_hi = ps_hi;
 		e.flags = feedback;
@@ -1451,24 +1486,108 @@ namespace
 		e.extra = pipeline;
 	}
 
+	// vk-285-113: the counters for the last submits and for one submission the driver refused; every 600 submits the largest one
+	// is logged (peaks, not the driver profile's per-frame averages: a frame that overflows is a spike).
+	void OrbisVkSubmitDone()
+	{
+		s_orbis_sub_last = s_orbis_sub_cur;
+		if (s_orbis_sub_cur.draws > s_orbis_sub_peak.draws)
+			s_orbis_sub_peak = s_orbis_sub_cur;
+		s_orbis_sub_cur = {};
+		if (((s_orbis_submit + 1) % 600) == 0)
+		{
+			if (s_orbis_sub_peak.draws >= 1000)
+			{
+				printf("[vkhw] largest of the last 600 submits: %u driver draws (%u draw configs, %u other ops); the driver's stream holds ~7,800 feedback draws or ~10,500 plain ones\n",
+					s_orbis_sub_peak.draws, s_orbis_sub_peak.configs, s_orbis_sub_peak.ops);
+				fflush(stdout);
+			}
+			s_orbis_sub_peak = {};
+		}
+	}
+
+	// vk-285-113: the last max_bytes of a log, kept under another name (the previous copy as `older`). The console keeps 8 sessions of logs but
+	// the report carries this one and the two before it, so a tester who plays on after a hang (vk-285-112's Zatch Bell: three hangs, then three
+	// other games) sends a report without the hung session's stderr.log and emulog.txt.
+	void OrbisKeepLogTail(const std::string& from, const std::string& to, const std::string& older, size_t max_bytes)
+	{
+		FILE* in = fopen(from.c_str(), "rb");
+		if (!in)
+			return;
+		std::string data;
+		if (fseek(in, 0, SEEK_END) == 0)
+		{
+			const long size = ftell(in);
+			const long start = size > static_cast<long>(max_bytes) ? size - static_cast<long>(max_bytes) : 0;
+			if (size > 0 && fseek(in, start, SEEK_SET) == 0)
+			{
+				data.resize(static_cast<size_t>(size - start));
+				data.resize(fread(data.data(), 1, data.size(), in));
+			}
+		}
+		fclose(in);
+		if (data.empty())
+			return;
+		rename(to.c_str(), older.c_str());
+		if (FILE* out = fopen(to.c_str(), "wb"))
+		{
+			fwrite(data.data(), 1, data.size(), out);
+			fclose(out);
+		}
+	}
+
 	[[noreturn]] void OrbisVkHangExit(const char* where)
 	{
 		const u32 hung = s_orbis_submit;
-		char header[160];
-		snprintf(header, sizeof(header), "GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.", where,
-			hung);
+		const u32 overflows = s_orbis_overflow_reports.load();
+		std::string header = StringUtil::StdStringFromFormat("GPU hang: VK_ERROR_DEVICE_LOST in %s; the hung command buffer is submit %u.", where, hung);
+		if (overflows)
+		{
+			const unsigned long long held = s_orbis_overflow_total.load();
+			header += StringUtil::StdStringFromFormat(
+				"\nclass: STREAM OVERFLOW, not a GPU stall: the driver refused a submission of more than %llu words %u time(s) (ps5vk_queue.c:1528, "
+				"emulog.txt has the 'VK: debug report' lines). A frame put more draws into one vkQueueSubmit than its 2 MiB stream holds",
+				static_cast<unsigned long long>(s_orbis_overflow_words.load()), overflows);
+			if (held)
+				header += StringUtil::StdStringFromFormat("; the last refused submission held %llu words.", held);
+			else
+				header += " (its size is not in the message: a driver without the vk-285-113 note).";
+		}
+		else
+		{
+			header += "\nclass: no stream-overflow refusal seen. A completion-marker timeout (a GPU stall) writes ps5vk-hang.txt and a "
+			          "'[ps5vk] GPU hang' line in stderr.log; other refusals show in emulog.txt as 'VK: debug report'.";
+		}
+		header += StringUtil::StdStringFromFormat(
+			"\ndraws (configs/driver draws/other ops): not yet submitted %u/%u/%u, last submit %u/%u/%u, largest since the last log line %u/%u/%u"
+			" (with vk_async the failing submit is up to 4 submits before this one).",
+			s_orbis_sub_cur.configs, s_orbis_sub_cur.draws, s_orbis_sub_cur.ops, s_orbis_sub_last.configs, s_orbis_sub_last.draws,
+			s_orbis_sub_last.ops, s_orbis_sub_peak.configs, s_orbis_sub_peak.draws, s_orbis_sub_peak.ops);
 		// vk-285-51: the previous hang's dump is kept as vkhang.1.txt, and the hang goes in the
 		// settings log (frontend/fe_ps5.cpp), next to the settings changes that may have caused it.
 		const std::string path = OrbisLogPath("vkhang.txt");
 		std::rename(path.c_str(), OrbisLogPath("vkhang.1.txt").c_str());
-		OrbisVkTraceWrite(path.c_str(), header, hung);
+		OrbisVkTraceWrite(path.c_str(), header.c_str(), hung);
 		printf("[vkhw] GPU hang (VK_ERROR_DEVICE_LOST in %s, submit %u): wrote %s; closing the app\n", where, hung, path.c_str());
 		orbis_log_drain(); // vk-285-104: the deferred lines (this one included) to boot.log before _exit
 		fflush(stderr);
+		// vk-285-113: this session's stderr.log and emulog.txt outlive the report's three-session window.
+		OrbisKeepLogTail(OrbisLogPath("stderr.log"), OrbisLogPath("hang-stderr.txt"), OrbisLogPath("hang-stderr.1.txt"), 96 * 1024);
+		OrbisKeepLogTail(OrbisLogPath("emulog.txt"), OrbisLogPath("hang-emulog.txt"), OrbisLogPath("hang-emulog.1.txt"), 96 * 1024);
+		// vk-285-113: the run after a hang has the big draw ring on (OrbisVkTraceOn takes this file).
+		if (FILE* f = fopen(OrbisLogPath("vkring-next.txt").c_str(), "wb"))
+		{
+			fputs("the next run records the full draw ring (deleted by that run)\n", f);
+			fclose(f);
+		}
 		if (orbis_event_log)
 		{
-			char line[200];
-			snprintf(line, sizeof(line), "GPU hang (VK_ERROR_DEVICE_LOST in %s); the app closed itself. The dump is logs/vkhang.txt", where);
+			// vk-285-113: the class and the counters stay in settings.log (kept whole) after the rotated logs are gone.
+			char line[400];
+			snprintf(line, sizeof(line),
+				"GPU hang (VK_ERROR_DEVICE_LOST in %s); the app closed itself. The dump is logs/vkhang.txt [%s; submit %u; driver draws not yet submitted %u, last submit %u, peak %u; refused submission %llu words]",
+				where, overflows ? "class: stream overflow" : "class: no overflow refusal", hung, s_orbis_sub_cur.draws, s_orbis_sub_last.draws,
+				s_orbis_sub_peak.draws, static_cast<unsigned long long>(s_orbis_overflow_total.load()));
 			orbis_event_log(line);
 		}
 		_exit(3);
@@ -2349,6 +2468,7 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		return;
 	}
 #ifdef ORBIS_VULKAN
+	OrbisVkSubmitDone(); // vk-285-113
 	s_orbis_submit++;
 	// vk-285-18: `putdata vktrace` asks for the last submits' draws while the game runs. Every
 	// 64th submit (about once a second) checks for the flag file; the dump goes to vktrace.txt.
@@ -2524,6 +2644,9 @@ void GSDeviceVK::ActivateCommandBuffer(u32 index)
 
 	m_current_frame = index;
 	m_current_command_buffer = resources.command_buffers[1];
+#ifdef ORBIS_VULKAN
+	m_orbis_submit_draws = 0; // vk-285-113
+#endif
 
 	// using the lower 32 bits of the fence index should be sufficient here, I hope...
 	vmaSetCurrentFrameIndex(m_allocator, static_cast<u32>(m_next_fence_counter));
@@ -2596,6 +2719,14 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(VkDebugUtilsMessageSeverit
 		static std::mutex s_lock;
 		static std::array<std::pair<u64, u32>, 128> s_seen{};
 		const char* msg = pCallbackData->pMessage ? pCallbackData->pMessage : "";
+		// vk-285-113: "a submission of more than 523503 words" (the driver's stream is full): the class of the hang that follows.
+		if (const char* p = std::strstr(msg, "a submission of more than "))
+		{
+			s_orbis_overflow_words = std::strtoull(p + 25, nullptr, 10);
+			if (const char* held = std::strstr(p, "this one holds "))
+				s_orbis_overflow_total = std::strtoull(held + 15, nullptr, 10);
+			s_orbis_overflow_reports++;
+		}
 		u64 h = 1469598103934665603ull;
 		for (const char* c = msg; *c; c++)
 			h = (h ^ static_cast<u8>(*c)) * 1099511628211ull;
@@ -3960,6 +4091,9 @@ bool GSDeviceVK::CheckFeatures()
 void GSDeviceVK::DrawPrimitive()
 {
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+#ifdef ORBIS_VULKAN
+	m_orbis_submit_draws++;
+#endif
 	vkCmdDraw(GetCurrentCommandBuffer(), m_vertex.count, 1, m_vertex.start, 0);
 }
 
@@ -3972,6 +4106,9 @@ void GSDeviceVK::DrawIndexedPrimitive(int offset, int count)
 {
 	pxAssert(offset + count <= (int)m_index.count);
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+#ifdef ORBIS_VULKAN
+	m_orbis_submit_draws++;
+#endif
 	vkCmdDrawIndexed(GetCurrentCommandBuffer(), count, 1, m_index.start + offset, m_vertex.start, 0);
 }
 
@@ -3980,6 +4117,9 @@ void GSDeviceVK::DrawIndexedPrimitiveVSExpand(int offset, int count, bool vs_ind
 	pxAssert(offset + count <= (int)m_index.count);
 
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+#ifdef ORBIS_VULKAN
+	m_orbis_submit_draws++;
+#endif
 	if (vs_indexing)
 	{
 		SetVSPushConstants(m_vertex.start, m_index.start + offset);
@@ -7535,6 +7675,27 @@ GSTextureVK* GSDeviceVK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 {
 #ifdef ORBIS_VULKAN
+	// vk-285-113 (AI-assisted): the PS5 driver copies every command buffer of one vkQueueSubmit into a 2 MiB stream and refuses more
+	// than 523,503 words (ps5vk_queue.c:1528; a draw is ~50-90 words, an in-stream feedback barrier 17). SendHWDraw makes one barrier +
+	// one draw per drawlist group of a full-barrier draw, so one frame can hold thousands of driver draws; vk-285-108..112's Sims,
+	// Stuntman and Area 51 died on it ("a submission of more than 523503 words", then VK_ERROR_DEVICE_LOST). Submit early instead, here at
+	// a draw boundary before this draw has touched any state (the uniform-space flush in ApplyTFXState is the precedent).
+	// 3500 draws x 90 words (the driver's per-draw maximum) = 315k words, leaving room for uploads, clears and the present pass.
+	{
+		constexpr u32 ORBIS_SUBMIT_DRAW_BUDGET = 3500;
+		u32 groups = 1; // a full-barrier draw is one barrier + one driver draw per drawlist group (SendHWDraw)
+		if (config.require_full_barrier && config.drawlist && !config.drawlist->empty())
+			groups = static_cast<u32>(config.drawlist->size());
+		const u32 draws = groups + (config.alpha_second_pass.enable ? groups : 0) + (config.blend_multi_pass.enable ? 1 : 0);
+		if (m_orbis_submit_draws != 0 && m_orbis_submit_draws + draws > ORBIS_SUBMIT_DRAW_BUDGET)
+		{
+			static u32 s_budget_flushes = 0;
+			if (++s_budget_flushes <= 3 || (s_budget_flushes % 500) == 0)
+				Console.Warning("VK: %u draws in this submission and %u more coming, submitting early (%u times)",
+					m_orbis_submit_draws, draws, s_budget_flushes);
+			ExecuteCommandBuffer(false);
+		}
+	}
 	OrbisVkTraceDraw(config);
 #endif
 	const GSVector2i rtsize(config.rt ? config.rt->GetSize() : config.ds->GetSize());
