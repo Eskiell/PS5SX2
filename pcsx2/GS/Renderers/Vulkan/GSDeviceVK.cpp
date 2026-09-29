@@ -53,6 +53,12 @@ unsigned long long g_orbis_copy_n[ORBIS_COPY_KINDS], g_orbis_copy_bytes[ORBIS_CO
 unsigned long long g_orbis_readback_n, g_orbis_readback_bytes, g_orbis_readback_wait_ns, g_orbis_readback_wait_n,
 	g_orbis_readback_wait_max_ns, g_orbis_readback_wait_max_min_ns; // vk-285-113
 
+// vk-285-113 (AI-assisted): draws one Vulkan command buffer may hold before it is submitted early. The PS5 driver copies all the command
+// buffers of one vkQueueSubmit into a 2 MiB stream and refuses more than 523,503 words (ps5vk_queue.c); a draw is ~50-90 words (a feedback
+// barrier adds 17), so 3500 draws x 90 = 315k words leaves room for uploads, clears and the present pass. RenderHW submits before a draw
+// that would pass it, SendHWDraw between the groups of one full-barrier draw that is bigger than the whole budget by itself.
+static constexpr u32 ORBIS_SUBMIT_DRAW_BUDGET = 3500;
+
 namespace
 {
 	// vk-285-39: the flag file vk_cputransfer (/data/PCSX2/flags) keeps every CopyRect the image
@@ -7684,7 +7690,6 @@ void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 	// a draw boundary before this draw has touched any state (the uniform-space flush in ApplyTFXState is the precedent).
 	// 3500 draws x 90 words (the driver's per-draw maximum) = 315k words, leaving room for uploads, clears and the present pass.
 	{
-		constexpr u32 ORBIS_SUBMIT_DRAW_BUDGET = 3500;
 		u32 groups = 1; // a full-barrier draw is one barrier + one driver draw per drawlist group (SendHWDraw)
 		if (config.require_full_barrier && config.drawlist && !config.drawlist->empty())
 			groups = static_cast<u32>(config.drawlist->size());
@@ -8310,8 +8315,57 @@ void GSDeviceVK::SendHWDraw(const GSHWDrawConfig& config, GSTextureVK* draw_rt, 
 		GL_PUSH("Split the draw");
 		g_perfmon.Put(GSPerfMon::Barriers, n_barriers * static_cast<u32>(draw_list_size));
 
+#ifdef ORBIS_VULKAN
+		// vk-285-113 (AI-assisted): one full-barrier draw is one barrier + one driver draw per drawlist group, and a big one (a
+		// screen of overlapping sprites, thousands of groups) holds more words than the driver's 2 MiB submission stream takes,
+		// however early RenderHW submitted before it: the driver refuses the submission and the queue is lost (Sims, Stuntman, Area 51 in
+		// vk-285-108..112; Zatch Bell Mamodo Fury probably too: three hangs, ~6 s after its start). So when the command buffer has reached the budget
+		// between two groups, submit it and go on in a fresh one, restarting like ExecuteCommandBufferAndRestartRenderPass does
+		// (without its warning per call), and putting back what InvalidateCachedState() wipes: the texture bindings.
+		const auto SubmitBetweenGroups = [&]() -> bool {
+			const VkRenderPass render_pass = m_current_render_pass;
+			if (render_pass == VK_NULL_HANDLE)
+				return true; // no render pass, nothing to restart (not seen; the draws below would not record either)
+			const std::array<GSTextureVK*, NUM_TFX_TEXTURES> textures = m_tfx_textures;
+			const VkPipeline pipeline = m_current_pipeline;
+			const GSVector4i render_pass_area = m_current_render_pass_area;
+			const GSVector4i scissor = m_scissor;
+			GSTexture* const current_rt = m_current_render_target;
+			GSTexture* const current_ds = m_current_depth_target;
+			const FeedbackLoopFlag current_feedback_loop = m_current_framebuffer_feedback_loop;
+
+			static u32 s_mid_draw_submits = 0;
+			if (++s_mid_draw_submits <= 3 || (s_mid_draw_submits % 500) == 0)
+				Console.Warning("VK: %u draws in this submission, in the middle of one draw of %u groups: submitting early (%u times)",
+					m_orbis_submit_draws, draw_list_size, s_mid_draw_submits);
+
+			EndRenderPass();
+			ExecuteCommandBuffer(GetWaitType(false, GSConfig.HWSpinCPUForReadbacks));
+			if (m_last_submit_failed)
+				return false;
+
+			// The new command buffer samples the same images; their use counters name the one just submitted, and a texture update that
+			// sees an older counter would go into the init buffer, which runs before this command buffer's remaining groups.
+			m_tfx_textures = textures;
+			for (GSTextureVK* tex : m_tfx_textures)
+			{
+				if (tex)
+					tex->SetUseFenceCounter(GetCurrentFenceCounter());
+			}
+			m_dirty_flags |= DIRTY_FLAG_TFX_TEXTURES;
+			OMSetRenderTargets(current_rt, current_ds, scissor, current_feedback_loop);
+			BeginRenderPass(GetRenderPassForRestarting(render_pass), render_pass_area);
+			SetPipeline(pipeline);
+			return ApplyTFXState();
+		};
+#endif
+
 		for (u32 n = 0, p = 0; n < draw_list_size; n++)
 		{
+#ifdef ORBIS_VULKAN
+			if (n != 0 && m_orbis_submit_draws >= ORBIS_SUBMIT_DRAW_BUDGET && !SubmitBetweenGroups())
+				break;
+#endif
 			IssueBarriers();
 
 			const u32 count = config.drawlist->at(n) * indices_per_prim;
