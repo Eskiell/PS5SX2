@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <csignal>
 #include <dirent.h>
+#include <fcntl.h>
 #include <thread>
 #include <chrono>
 #include <pthread.h>
@@ -100,6 +101,211 @@ static void orbis_rotate_log(const std::string& path, int keep)
   {
     const std::string from = i == 1 ? path : stem + "." + std::to_string(i - 1) + suffix;
     rename(from.c_str(), (stem + "." + std::to_string(i) + suffix).c_str());
+  }
+}
+
+// vk-285-113: boot.log on a console that shows /data only after the jailbreak (v112's console ...575 on firmware
+// 10.20: its Helper's hook on the mount didn't take, and the sandbox has no /data before the jailbreak). The
+// freopen() of stdout onto a file that can't be created closed it, so the whole boot log of that session was empty:
+// nothing was kept of what the app printed until it could write. Now, when boot.log can't be created at the start,
+// stdout and stderr go into a pipe that a thread empties into memory (8 MiB at most, then it just throws the rest
+// away), and orbis_boot_log_release() writes what was held at the top of boot.log as soon as /data is there.
+static bool orbis_boot_log_open(bool rotate)
+{
+  const std::string boot_log = OrbisLogPath("boot.log");
+  // vk-285-51: keep the last 8 sessions' logs (orbis_rotate_log): a crash's log survives a restart.
+  if (rotate)
+    for (const char* name : {"boot.log", "stderr.log", "emulog.txt"})
+      orbis_rotate_log(OrbisLogPath(name), 8);
+  // vk-285-51: both streams append, so neither writes over the other. With "w" they still had
+  // separate offsets on the console despite the dup2 below: vk-285-50's boot logs start with
+  // "[boot] stderr-ok" and the driver's first stderr lines, written over the boot header, and on
+  // 2026-09-25 the "[boot] game:"/settings lines vanished under the shelf's driver profile.
+  FILE* t = fopen(boot_log.c_str(), "w");
+  if (!t)
+    return false; // stdout and stderr are as they were: no freopen() that would close them
+  fclose(t);
+  freopen(boot_log.c_str(), "a", stdout);
+  freopen(boot_log.c_str(), "a", stderr);
+  // Orbis: the two freopen()s give independent file offsets, so stdout and
+  // stderr overwrite each other (crash-time stderr peeks land on top of the
+  // boot header). Merge them onto one description: everything appends in
+  // order. NOTE: use fileno(), not assumed 1/2 (no console here, so the fds
+  // are whatever was free - dup2(1,2) aliased the wrong pair).
+  dup2(fileno(stdout), fileno(stderr));
+  return true;
+}
+
+namespace
+{
+struct OrbisBootLogHold
+{
+  std::mutex mutex;
+  std::string text;
+  size_t dropped = 0;
+  int read_fd = -1;
+  bool done = false; // the pump saw the end of the pipe
+};
+OrbisBootLogHold* g_boot_hold = nullptr; // never freed: the pump thread may still be running at exit
+std::atomic<bool> g_boot_held{false};
+constexpr size_t kBootHoldMax = 8u << 20;
+} // namespace
+
+static void* orbis_boot_log_pump(void* arg)
+{
+  OrbisBootLogHold* h = static_cast<OrbisBootLogHold*>(arg);
+  const int fd = h->read_fd;
+  char buf[4096];
+  for (;;)
+  {
+    const ssize_t n = read(fd, buf, sizeof(buf));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      break;
+    std::lock_guard<std::mutex> lock(h->mutex);
+    if (h->text.size() + static_cast<size_t>(n) <= kBootHoldMax)
+      h->text.append(buf, static_cast<size_t>(n));
+    else
+      h->dropped += static_cast<size_t>(n);
+  }
+  close(fd);
+  std::lock_guard<std::mutex> lock(h->mutex);
+  h->done = true;
+  return nullptr;
+}
+
+static void orbis_boot_log_hold()
+{
+  int p[2];
+  if (pipe(p) != 0)
+    return;
+  // Both ends well above 0-2: those numbers are free in this process (no console), and stdout and stderr
+  // are about to be dup2()ed onto them.
+  const int rd = fcntl(p[0], F_DUPFD, 64), wr = fcntl(p[1], F_DUPFD, 64);
+  close(p[0]);
+  close(p[1]);
+  if (rd < 0 || wr < 0)
+  {
+    if (rd >= 0)
+      close(rd);
+    if (wr >= 0)
+      close(wr);
+    return;
+  }
+  // A full pipe must never stop the app: the write end doesn't block, the pump empties the other end.
+  fcntl(wr, F_SETFL, fcntl(wr, F_GETFL, 0) | O_NONBLOCK);
+  OrbisBootLogHold* h = new OrbisBootLogHold;
+  h->read_fd = rd;
+  pthread_t pump;
+  if (pthread_create(&pump, nullptr, &orbis_boot_log_pump, h) == 0)
+    pthread_detach(pump);
+  else
+    close(rd); // nobody reads: writes now fail (SIGPIPE is ignored) instead of filling the pipe and blocking
+  dup2(wr, fileno(stdout));
+  dup2(wr, fileno(stderr));
+  close(wr);
+  g_boot_hold = h;
+  g_boot_held.store(true, std::memory_order_release);
+}
+
+// Called after the jailbreak, and again at the later steps of the start: when boot.log can be created now, the held
+// lines go to the top of it and stdout and stderr are the file's, as they are at a normal start.
+static void orbis_boot_log_release(const char* when)
+{
+  if (!g_boot_held.load(std::memory_order_acquire))
+    return;
+  struct stat st = {};
+  if (stat("/data/PCSX2", &st) != 0 || !S_ISDIR(st.st_mode))
+    return; // still not there
+  OrbisBootLogHold* h = g_boot_hold;
+  fflush(stdout);
+  fflush(stderr);
+  if (!orbis_boot_log_open(true))
+    return; // the folder is there but boot.log can't be made: keep holding
+  g_boot_held.store(false, std::memory_order_release);
+  setvbuf(stdout, nullptr, _IOFBF, 1 << 20);
+  // The pipe's write ends are gone now (freopen() closed them): the pump reads what is left and stops.
+  for (int i = 0; i < 100; i++)
+  {
+    {
+      std::lock_guard<std::mutex> lock(h->mutex);
+      if (h->done)
+        break;
+    }
+    usleep(10000);
+  }
+  std::string text;
+  size_t dropped;
+  {
+    std::lock_guard<std::mutex> lock(h->mutex);
+    text.swap(h->text);
+    dropped = h->dropped;
+  }
+  printf("[boot] the next %zu bytes were printed before /data could be written to and are written here (%s)\n", text.size(), when);
+  if (dropped)
+    printf("[boot] (%zu more bytes of them were dropped: the hold is 8 MiB)\n", dropped);
+  fwrite(text.data(), 1, text.size(), stdout);
+  printf("[boot] end of the held lines; boot.log goes on directly from here (%s)\n", when);
+  // pf.log: the page-fault handler's file, named in logs/ now that it's visible; a fresh one, as at a normal start.
+  snprintf(g_orbis_pf_log, sizeof(g_orbis_pf_log), "%s", OrbisLogPath("pf.log").c_str());
+  if (FILE* pflog = fopen(g_orbis_pf_log, "w"))
+    fclose(pflog);
+  fflush(stdout);
+}
+
+// vk-285-113: signals. The crash printer (orbis-shims/ProsperoCrash.cpp) covered SIGABRT, SIGILL and SIGFPE (SIGSEGV is the
+// page-fault handler's, which hands what it can't map to the printer). Many of v112's sessions ended with no closing
+// line at all; they could have died of any of the others: SIGBUS (a file mapped past its end, a misaligned access),
+// SIGTRAP (int3), SIGSYS (a system call the kernel refuses), SIGXCPU and SIGXFSZ, or of the system asking the app to end
+// (SIGTERM, SIGHUP, SIGINT, SIGQUIT). The first group goes to the printer; the second writes one line to the settings log
+// and to boot.log and then ends the app as it would have ended (the handler resets itself, and the signal is raised
+// again). SIGKILL can't be caught: the next start says the log had no closing line (fe_ps5.cpp, orbis_event_log).
+static int g_orbis_stdout_fd = -1;
+
+static void orbis_quit_signal(int sig)
+{
+#ifdef ORBIS_VULKAN
+  char line[96];
+  snprintf(line, sizeof(line), "the system ended the app (signal %d)", sig);
+  orbis_event_log(line);
+#endif
+  if (g_orbis_stdout_fd >= 0)
+  {
+    static const char msg[] = "[boot] the system ended the app (a signal)\n"; // a raw write: stdio's lock may be held by the thread this interrupted
+    (void)!write(g_orbis_stdout_fd, msg, sizeof(msg) - 1);
+  }
+  raise(sig); // SA_RESETHAND: the default action, once this returns
+}
+
+static void orbis_exit_hook()
+{
+#ifdef ORBIS_VULKAN
+  orbis_event_log("app exit (the process is ending)");
+#endif
+}
+
+static void orbis_install_signal_handlers()
+{
+  g_orbis_stdout_fd = fileno(stdout);
+  struct sigaction fatal;
+  memset(&fatal, 0, sizeof(fatal));
+  fatal.sa_flags = SA_SIGINFO;
+  fatal.sa_sigaction = &CrashHandler::CrashSignalHandler;
+  for (const int sig : {SIGABRT, SIGILL, SIGFPE, SIGBUS, SIGTRAP, SIGSYS, SIGXCPU, SIGXFSZ})
+    sigaction(sig, &fatal, nullptr);
+  struct sigaction quit;
+  memset(&quit, 0, sizeof(quit));
+  quit.sa_flags = SA_RESETHAND;
+  quit.sa_handler = &orbis_quit_signal;
+  for (const int sig : {SIGTERM, SIGHUP, SIGINT, SIGQUIT})
+    sigaction(sig, &quit, nullptr);
+  signal(SIGPIPE, SIG_IGN);
+  static bool s_exit_hook = false;
+  if (!s_exit_hook)
+  {
+    s_exit_hook = true;
+    atexit(&orbis_exit_hook);
   }
 }
 
@@ -1334,24 +1540,12 @@ int main()
 {
   // Bigapp: no elfldr socket. Log to file (read back over FTP) + notify.
   // vk-285-33: in logs/ when that folder exists (OrbisPaths.h).
-  const std::string boot_log = OrbisLogPath("boot.log");
-  // vk-285-51: keep the last 8 sessions' logs (orbis_rotate_log): a crash's log survives a restart.
-  for (const char* name : {"boot.log", "stderr.log", "emulog.txt"})
-    orbis_rotate_log(OrbisLogPath(name), 8);
-  // vk-285-51: both streams append, so neither writes over the other. With "w" they still had
-  // separate offsets on the console despite the dup2 below: vk-285-50's boot logs start with
-  // "[boot] stderr-ok" and the driver's first stderr lines, written over the boot header, and on
-  // 2026-09-25 the "[boot] game:"/settings lines vanished under the shelf's driver profile.
-  if (FILE* t = fopen(boot_log.c_str(), "w"))
-    fclose(t);
-  freopen(boot_log.c_str(), "a", stdout);
-  freopen(boot_log.c_str(), "a", stderr);
-  // Orbis: the two freopen()s give independent file offsets, so stdout and
-  // stderr overwrite each other (crash-time stderr peeks land on top of the
-  // boot header). Merge them onto one description: everything appends in
-  // order. NOTE: use fileno(), not assumed 1/2 (no console here, so the fds
-  // are whatever was free - dup2(1,2) aliased the wrong pair).
-  dup2(fileno(stdout), fileno(stderr));
+  // vk-285-113: a broken pipe (a network peer that went away) is an error return, not the end of the app.
+  signal(SIGPIPE, SIG_IGN);
+  // stdout and stderr go to boot.log; when /data isn't visible yet (a console whose Helper's mount hook didn't take),
+  // into memory until it is (orbis_boot_log_release, after the jailbreak).
+  if (!orbis_boot_log_open(true))
+    orbis_boot_log_hold();
   // Orbis: fresh fault history per run (pf.log otherwise appends forever).
   {
     snprintf(g_orbis_pf_log, sizeof(g_orbis_pf_log), "%s", OrbisLogPath("pf.log").c_str()); // vk-285-33
@@ -1404,13 +1598,7 @@ int main()
   {
     // vk-285-51: the crash printer (orbis-shims/ProsperoCrash.cpp) from the start, so the shelf and
     // the settings page's thread are covered too; it was installed only just before PCSX2 started.
-    struct sigaction sa0;
-    memset(&sa0, 0, sizeof(sa0));
-    sa0.sa_flags = SA_SIGINFO;
-    sa0.sa_sigaction = &CrashHandler::CrashSignalHandler;
-    sigaction(SIGABRT, &sa0, nullptr);
-    sigaction(SIGILL, &sa0, nullptr);
-    sigaction(SIGFPE, &sa0, nullptr);
+    orbis_install_signal_handlers(); // vk-285-113: more signals, and the ones that end the app
   }
 #if defined(ORBIS_DRIVER_REV) && defined(ORBIS_PCSX2_REV)
   // vk-285-35: the exact sources (link-vk.sh; a trailing + marks uncommitted changes).
@@ -1481,6 +1669,7 @@ int main()
 #ifdef ORBIS_VULKAN
   orbis_log_flag_access("after the jailbreak");
 #endif
+  orbis_boot_log_release("after the jailbreak"); // vk-285-113: boot.log's first lines, when /data wasn't there yet
   orbis_frontend_set_language(OrbisDir("lang")); // vk-285-110: lang/<code>.txt may only be readable now
   // Test build 1 (vk-285-55): what the console is, in boot.log and the settings log.
   s_console_info = orbis_console_survey();
@@ -1605,6 +1794,7 @@ int main()
   // vk-285-50: the settings page (frontend/fe_web.cpp) for phones and PCs, before the shelf that
   // shows its QR code; it keeps running in the game. The nowebui flag leaves it off.
   orbis_scan_usb("after the jailbreak"); // test build 1: games on USB drives
+  orbis_boot_log_release("before the settings page starts"); // vk-285-113: still holding? (the folder can show up late)
   if (!orbis_flag("nowebui"))
     orbis_web_start(orbis_frontend_paths(false), orbis_build_label().c_str());
   // vk-285-110: the shelf tries the missing covers of games on USB drives (the prefetch above can't see
@@ -1620,6 +1810,7 @@ int main()
   // shelf hides it on its first frame; without the shelf this does, before the plain list or the game.
   orbis_hide_splash();
 #endif
+  orbis_boot_log_release("after the shelf"); // vk-285-113
   if (!frontend_ran)
     s_game_path = orbis_select_game(OrbisDir("games").c_str(), "/data/PCSX2", ORBIS_BUILD_TAG); // vk-285-33: games/ too
   if (s_game_path.empty())
@@ -1849,13 +2040,7 @@ int main()
     // (see stdout above), so the libc writes an unbuffered stream a character at a time.
     setvbuf(stderr, nullptr, _IOLBF, 4096);
 #endif
-    struct sigaction sa2;
-    memset(&sa2, 0, sizeof(sa2));
-    sa2.sa_flags = SA_SIGINFO;
-    sa2.sa_sigaction = &CrashHandler::CrashSignalHandler;
-    sigaction(SIGABRT, &sa2, nullptr);
-    sigaction(SIGILL, &sa2, nullptr);
-    sigaction(SIGFPE, &sa2, nullptr);
+    orbis_install_signal_handlers();
     printf("[boot] crash handlers installed\n");
     fflush(stdout);
   }

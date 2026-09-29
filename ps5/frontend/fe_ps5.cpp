@@ -821,12 +821,87 @@ void orbis_frontend_set_language(const std::string& lang_dir)
 	fe::SetLanguage(orbis_ps5_language(), lang_dir);
 }
 
-static char g_event_log_path[256];
+// vk-285-113: the settings log on a console that shows /data only after the jailbreak. The path given at the start
+// is then the top folder's (logs/ isn't visible yet) and every line written before the jailbreak was lost, the
+// "app start" line with them (v112's console ...575 on firmware 10.20: sessions with no build and no game). Now:
+//   - logs/ is looked for at every write, so the file is logs/settings.log as soon as that folder is there;
+//   - a line that can't be written yet waits in a small buffer and goes out, in order, with the next one that can;
+//   - the first write of a run first looks at the end of the file for the previous run's closing line and, when
+//     there is none, says so: the app was closed from the PS button, the system killed it, the console lost power,
+//     or it crashed without a signal.
+// All of it is open()/pread()/write() on stack buffers, so the crash handler and the exit hooks can still call it.
+static char g_event_log_path[256];     // as given
+static char g_event_log_dir_logs[256]; // <dir>/logs, checked at each write ("" when the path already is inside a logs folder)
+static char g_event_log_in_logs[256];  // <dir>/logs/<name>
+static char g_event_pending[8192];     // formatted lines waiting for a folder
+static size_t g_event_pending_len = 0;
+static std::atomic<bool> g_event_busy{false};
+static bool g_event_previous_checked = false;
 
 void orbis_event_log_init(const std::string& path)
 {
 	std::snprintf(g_event_log_path, sizeof(g_event_log_path), "%s", path.c_str());
+	g_event_log_dir_logs[0] = g_event_log_in_logs[0] = 0;
+	const size_t slash = path.rfind('/');
+	if (slash != std::string::npos && slash > 0)
+	{
+		const std::string dir = path.substr(0, slash);
+		const size_t dslash = dir.rfind('/');
+		const std::string last = dslash == std::string::npos ? dir : dir.substr(dslash + 1);
+		if (last != "logs")
+		{
+			std::snprintf(g_event_log_dir_logs, sizeof(g_event_log_dir_logs), "%s/logs", dir.c_str());
+			std::snprintf(g_event_log_in_logs, sizeof(g_event_log_in_logs), "%s/logs/%s", dir.c_str(), path.c_str() + slash + 1);
+		}
+	}
 	fe::g_utc_to_local = &SettingsLogLocalTime;
+}
+
+// Whether a log line's text (after the time) says the run that wrote it is over. The lines the app itself writes
+// as it ends: main-boot.cpp's exits, the crash printer, the GPU-hang exit and the new signal and exit hooks.
+static bool EventEndsARun(const char* text)
+{
+	static const char* const kEnds[] = {"back to the menu", "the app closed", "GPU hang", "crash:", "no game to start",
+		"the game didn't start", "the system ended the app", "app exit"};
+	for (const char* e : kEnds)
+		if (std::strstr(text, e))
+			return true;
+	return false;
+}
+
+// The note about the previous run, or 0 when it closed itself properly (or there is no earlier log).
+static int EventPreviousRunNote(int fd, char* out, size_t out_size)
+{
+	struct stat st = {};
+	if (fstat(fd, &st) != 0 || st.st_size <= 0)
+		return 0;
+	char tail[2048];
+	const off_t from = st.st_size > static_cast<off_t>(sizeof(tail)) ? st.st_size - static_cast<off_t>(sizeof(tail)) : 0;
+	const ssize_t got = pread(fd, tail, sizeof(tail) - 1, from);
+	if (got <= 0)
+		return 0;
+	tail[got] = 0;
+	// the last line: after the last newline that isn't the final character
+	ssize_t end = got;
+	while (end > 0 && (tail[end - 1] == '\n' || tail[end - 1] == '\r'))
+		end--;
+	if (end <= 0)
+		return 0;
+	ssize_t begin = end;
+	while (begin > 0 && tail[begin - 1] != '\n')
+		begin--;
+	tail[end] = 0;
+	const char* last = tail + begin;
+	// "YYYY-MM-DD HH:MM:SS  text"
+	const bool stamped = end - begin > 21 && last[4] == '-' && last[7] == '-' && last[10] == ' ' && last[13] == ':' && last[16] == ':';
+	if (stamped && EventEndsARun(last + 21))
+		return 0;
+	if (!stamped)
+		return 0; // not a line of ours
+	return std::snprintf(out, out_size,
+		"previous run: its log ends without a closing line (last entry %.19s: \"%.50s\"): the app was closed from the PS button or "
+		"by the system, the console lost power, or the app crashed without a signal",
+		last, last + 21);
 }
 
 extern "C" void orbis_event_log(const char* line)
@@ -846,11 +921,54 @@ extern "C" void orbis_event_log(const char* line)
 		n = static_cast<int>(sizeof(buf)) - 1;
 		buf[n - 1] = '\n';
 	}
-	const int fd = open(g_event_log_path, O_WRONLY | O_APPEND | O_CREAT, 0666);
+	// logs/ once it is there, else the path as given.
+	const char* path = g_event_log_path;
+	if (g_event_log_dir_logs[0])
+	{
+		struct stat st = {};
+		if (stat(g_event_log_dir_logs, &st) == 0 && S_ISDIR(st.st_mode))
+			path = g_event_log_in_logs;
+	}
+	// One thread at a time in the buffer; a caller that finds it taken (another thread, or a signal that interrupted
+	// it) writes its line by itself and leaves the buffer alone.
+	const bool own = !g_event_busy.exchange(true, std::memory_order_acquire);
+	const int fd = open(path, O_RDWR | O_APPEND | O_CREAT, 0666);
 	if (fd < 0)
+	{
+		if (own)
+		{
+			if (g_event_pending_len + static_cast<size_t>(n) <= sizeof(g_event_pending))
+			{
+				std::memcpy(g_event_pending + g_event_pending_len, buf, static_cast<size_t>(n));
+				g_event_pending_len += static_cast<size_t>(n);
+			}
+			g_event_busy.store(false, std::memory_order_release);
+		}
 		return;
+	}
+	if (own && !g_event_previous_checked)
+	{
+		g_event_previous_checked = true;
+		char note[400];
+		const int m = EventPreviousRunNote(fd, note + 0, sizeof(note) - 1);
+		if (m > 0)
+		{
+			char stamped[480];
+			const int k = std::snprintf(stamped, sizeof(stamped), "%04d-%02d-%02d %02d:%02d:%02d  %s\n", tm.tm_year + 1900, tm.tm_mon + 1,
+				tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, note);
+			if (k > 0)
+				(void)!write(fd, stamped, static_cast<size_t>(k < static_cast<int>(sizeof(stamped)) ? k : sizeof(stamped) - 1));
+		}
+	}
+	if (own && g_event_pending_len)
+	{
+		(void)!write(fd, g_event_pending, g_event_pending_len);
+		g_event_pending_len = 0;
+	}
 	(void)!write(fd, buf, static_cast<size_t>(n));
 	close(fd);
+	if (own)
+		g_event_busy.store(false, std::memory_order_release);
 }
 
 bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)

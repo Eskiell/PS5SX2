@@ -904,7 +904,7 @@ static void OrbisPerfMinute(unsigned fps, float speed, float ee, float gs, float
 	{
 		char line[256];
 		snprintf(line, sizeof(line),
-			"perf, last %u s: %.1f fps (min %u, max %u), speed %.0f%%, below 95%% for %u s; EE %.0f%% GS %.0f%% VU %.0f%%; %dx",
+			"perf, last %u s: %.1f fps (min %u, max %u), speed %.0f%%, below 95%% for %u s; CPU thread load EE %.0f%% GS %.0f%% VU %.0f%%; %dx",
 			s_n, s_fps / s_n, s_min, s_max, s_speed / s_n, s_slow, s_ee / s_n, s_gs / s_n, s_vu / s_n,
 			static_cast<int>(GSConfig.UpscaleMultiplier));
 		OrbisDeferredEvent(line); // vk-285-107: the ticker writes it (a file write here held the GS thread)
