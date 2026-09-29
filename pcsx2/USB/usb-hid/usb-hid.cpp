@@ -35,6 +35,15 @@
 #include "IconsPromptFont.h"
 #include "common/Console.h"
 
+#include <atomic>
+
+// PS5SX2 (vk-285-113): how often a game has read the emulated keyboard's and mouse's interrupt endpoint. A game that
+// takes a USB keyboard or mouse polls it every few milliseconds; one that only looked at the port (GT4's wheel driver
+// looks at every device) never does. ps5/coreorbis/orbis-shims/ProsperoKbdMouse.cpp watches the counts at each vsync and
+// keeps the PS5's keyboard and mouse away from the PS2 controller while a game reads them.
+std::atomic<unsigned> g_orbis_hid_kbd_polls{0};
+std::atomic<unsigned> g_orbis_hid_mouse_polls{0};
+
 namespace usb_hid
 {
 	struct UsbHIDState
@@ -665,7 +674,12 @@ namespace usb_hid
 				{
 					if (hs->kind == HID_MOUSE || hs->kind == HID_TABLET)
 					{
+						g_orbis_hid_mouse_polls.fetch_add(1, std::memory_order_relaxed);
 						hid_pointer_activate(hs);
+					}
+					else if (hs->kind == HID_KEYBOARD)
+					{
+						g_orbis_hid_kbd_polls.fetch_add(1, std::memory_order_relaxed);
 					}
 					if (!hid_has_events(hs))
 					{

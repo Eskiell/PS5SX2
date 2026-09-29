@@ -320,6 +320,21 @@ const GROUPS = [
     { key: "PS5SX2/Rumble", label: "Rumble", type: "toggle", def: "true", short: "Rumble %",
       hint: "The game's vibration on the controller. Hold L2 and D-pad down for 2 seconds to show this page's QR code over the game." },
   ]},
+  // vk-285-113: a USB keyboard and mouse plugged into the PS5 (orbis-shims/ProsperoKbdMouse.cpp, main-boot.cpp).
+  { title: "Keyboard and mouse", items: [
+    { key: "PS5SX2/KeyboardMouse", label: "Keyboard and mouse", type: "seg", def: "0", short: "Keyboard and mouse %", cols: 2,
+      options: [["0","Auto"],["1","Controller"],["2","USB devices"],["3","Off"]],
+      hint: "Controller: the keys and the mouse press the PS2 controller's buttons, as in PCSX2 on a PC. Arrows are the D-pad, W A S D the left stick, T F G H the right stick, Enter is Start, Backspace Select, I J K L are Triangle Square Cross Circle, Q and E the shoulder buttons, 1 and 3 the triggers, 2 and 4 the stick clicks. F1 saves and F3 loads a state; hold Esc for a second to go back to the menu. USB devices: the PS2 sees a USB keyboard and mouse, for games made for them (Half-Life, Unreal Tournament, chat in online games). Auto: the controller, until a game starts reading the PS2's USB keyboard or mouse." },
+    { key: "PS5SX2/MouseAim", label: "Mouse movement", type: "seg", def: "1", short: "Mouse movement %", cols: 3,
+      options: [["1","Right stick"],["2","Left stick"],["0","Nothing"]],
+      hint: "Which stick the mouse moves in the controller mode. The right stick turns the camera in most games." },
+    { key: "PS5SX2/MouseSpeed", label: "Mouse speed", type: "seg", def: "2", short: "Mouse speed %", cols: 4,
+      options: [["1","Slow"],["2","Normal"],["3","Fast"],["4","Very fast"]],
+      hint: "How far a mouse movement pushes the stick. Faster reaches a full stick with less movement." },
+    { key: "PS5SX2/MouseButtons", label: "Mouse buttons", type: "seg", def: "0", short: "Mouse buttons %", cols: 2,
+      options: [["0","R1 and L1"],["1","R2 and L2"]],
+      hint: "Left click and right click. Most shooters fire with R1 or R2 and aim with L1 or L2. The wheel click is R3." },
+  ]},
 ];
 
 // ---- vk-285-113: memory cards. The files in memcards/ and a form that makes a blank one of 8, 16, 32 or 64 MB. Which card

@@ -50,6 +50,7 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "OrbisEEDiag.h"                // vk-285-100: OrbisCoreCyclesPerTsc
 #include "OrbisDeferredLog.h"            // vk-285-104: orbis_log_drain (the ticker)
 #include "orbis-shims/OrbisTextureRoots.h" // vk-285-113: a game's texture pack on a USB drive
+#include "orbis-shims/ProsperoKbdMouse.h" // vk-285-72, vk-285-113: the PS5's USB keyboard and mouse
 #include <mutex>
 // vk-285-108 (GSRenderer.cpp): the helper threads' CPUs and the ticker's heartbeat for the GS thread's watchdog.
 void OrbisHelperThreadAdd(pthread_t thread);
@@ -65,7 +66,6 @@ bool g_orbis_sw_on_gl = false;
 // eerec-278: bumped by the pad thread when L3+R3 are held ~0.4 s (cycles the present filter).
 std::atomic<int> g_orbis_filter_cycle{0};
 extern std::atomic<int> g_orbis_state_request; // eerec-282 (StubHost.cpp)
-void OrbisKbdMouseStart(); // vk-285-72 (orbis-shims/ProsperoKbdMouse.cpp)
 // vk-285-48: back to the menu. The pad thread asks with request 3: since vk-285-49 on a touchpad
 // click with L1+R1 held (48 used L3+R3 + D-pad Left). StubHost's PumpMessagesOnCPUThread then calls
 // OrbisBackToMenuCpu() at vsync on the CPU thread, which stops the VM; main() writes the memory
@@ -587,7 +587,40 @@ static void *orbis_pad_thread(void *)
   {
     OrbisPadData d;
     memset(&d, 0, sizeof(d));
-    const int rc = p_read(handle, &d);
+    int rc = p_read(handle, &d);
+    // vk-285-113: the PS5's USB keyboard and mouse as the PS2 controller (orbis-shims/ProsperoKbdMouse.cpp): the keys held,
+    // the mouse's buttons and its aim are added to what the DualSense reports (a button held on either is held; a stick the
+    // keyboard or mouse moves is theirs while they move it). With no DualSense data at all they stand alone.
+    {
+      static bool s_kbm_was_active = false;
+      OrbisKbdMousePad kp;
+      const bool kbm = OrbisKbdMousePadState(kp);
+      const bool active = kbm && (kp.buttons != 0 || kp.l2 != 0 || kp.r2 != 0 || kp.lx != 128 || kp.ly != 128 ||
+                                  kp.rx != 128 || kp.ry != 128);
+      if (rc != 0 && (active || s_kbm_was_active))
+      {
+        memset(&d, 0, sizeof(d));
+        d.lx = d.ly = d.rx = d.ry = 128;
+        rc = 0;
+      }
+      if (kbm)
+      {
+        d.buttons |= kp.buttons;
+        d.l2 = std::max(d.l2, kp.l2);
+        d.r2 = std::max(d.r2, kp.r2);
+        if (kp.lx != 128) d.lx = kp.lx;
+        if (kp.ly != 128) d.ly = kp.ly;
+        if (kp.rx != 128) d.rx = kp.rx;
+        if (kp.ry != 128) d.ry = kp.ry;
+      }
+      s_kbm_was_active = active;
+      if (const int hotkey = OrbisKbdMouseTakeHotkey())
+      {
+        g_orbis_state_request.store(hotkey, std::memory_order_release);
+        printf("[pad] keyboard: %s\n", hotkey == 1 ? "F1, save the state" : hotkey == 2 ? "F3, load the state" : "Esc held, back to the menu");
+        fflush(stdout);
+      }
+    }
     if (rc == 0)
     {
       // eerec-282: L3+R3 held: D-pad Up = save state slot 1, D-pad Down = load it. Releasing L3+R3 after
@@ -1032,6 +1065,11 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
   std::string textures_dir; // vk-285-113: PS5SX2/TexturesDir, where a game's texture packs are besides USB drives
   si.GetStringValue("PS5SX2", "TexturesDir", &textures_dir);
   orbis_set_textures_dir(textures_dir);
+  // vk-285-113: the USB keyboard and mouse as the PS2 controller (orbis-shims/ProsperoKbdMouse.cpp): PS5SX2/KeyboardMouse
+  // 0 Auto, 1 Controller only, 2 USB devices only, 3 Off; MouseAim 0 nothing, 1 right stick, 2 left stick; MouseSpeed 1..4;
+  // MouseButtons 0 R1 and L1, 1 R2 and L2.
+  OrbisKbdMouseConfigure(si.GetIntValue("PS5SX2", "KeyboardMouse", 0), si.GetIntValue("PS5SX2", "MouseAim", 1),
+    si.GetIntValue("PS5SX2", "MouseSpeed", 2), si.GetIntValue("PS5SX2", "MouseButtons", 0));
   if (old_overlay != overlay || old_graph != (graph ? 1 : 0) || old_rumble != (rumble ? 1 : 0))
   {
     printf("[boot] on-screen box %s, FPS graph %s, rumble %s (PS5SX2/Overlay, FpsGraph, Rumble)\n",
@@ -1039,6 +1077,22 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
       rumble ? "on" : "off");
     fflush(stdout);
   }
+}
+
+// vk-285-113: PS5SX2/KeyboardMouse 1 (Controller only) and 3 (Off) take the PS2's USB keyboard and mouse off the ports
+// (0 Auto and 2 USB devices only leave them where boot put them: USB1 hidkbd, USB2 hidmouse, unless the game's own file
+// says otherwise). Applied to the base settings at boot and to every live reload, so the setting plugs them in and out of
+// a running game.
+static void orbis_usb_kbm_for_mode(SettingsInterface& si)
+{
+  const int mode = si.GetIntValue("PS5SX2", "KeyboardMouse", 0);
+  if (mode != 1 && mode != 3)
+    return;
+  std::string type;
+  if (si.GetStringValue("USB1", "Type", &type) && type == "hidkbd")
+    si.SetStringValue("USB1", "Type", "None");
+  if (si.GetStringValue("USB2", "Type", &type) && type == "hidmouse")
+    si.SetStringValue("USB2", "Type", "None");
 }
 
 // eerec-285: gs.ini re-read while running (GSRenderer.cpp OrbisLiveTune sees the change, StubHost's
@@ -1050,6 +1104,7 @@ void orbis_reload_gs_ini_cpu()
 {
   MemorySettingsInterface trial = s_base_pre_gsini;
   orbis_apply_gs_ini(trial);
+  orbis_usb_kbm_for_mode(trial); // vk-285-113
   Pcsx2Config next;
   {
     SettingsLoadWrapper slw(trial);
@@ -1929,6 +1984,7 @@ int main()
   }
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
+  orbis_usb_kbm_for_mode(s_base_si); // vk-285-113
   orbis_vu1_speed_from(s_base_si); // vk-285-75
   orbis_ps5opts_from(s_base_si); // vk-285-113
   {
