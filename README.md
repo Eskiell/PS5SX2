@@ -43,7 +43,7 @@ Expect rough edges. Bug reports with logs are very welcome, and so is patience.
 
 ## What you need
 
-- **A jailbroken PS5.** Development happens on a PS5 Pro on firmware 11.40. Other models and firmware haven't been tested.
+- **A jailbroken PS5.** Development happens on a PS5 Pro on firmware 11.40. Testers have also run it on other PS5 models, including a Slim, on firmware 6.02 to 12.70. [Tested consoles](#tested-consoles) has the list.
 - **The PS5SX2 Helper payload**, from the releases, loaded together with kstuff. It's based on OnionHEN. It jailbreaks PS5SX2 when it starts, which the emulator's recompilers need, and gives the app access to `/data`.
 - **[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)**, loaded at every boot like kstuff. It mounts PS5SX2 from `/data/homebrew/PPSA99203/` and puts it on the home screen.
 - **Your own PS2 BIOS**, dumped from your own console.
@@ -117,28 +117,142 @@ PS Rewired doesn't allow the widescreen patch online. Stretching the picture to 
 
 </details>
 
-## Games played during development
+## Tested consoles
 
-These are the settings PS5SX2 recommends for each. This isn't a full compatibility list. Widescreen patches are on by default for every game that has one.
+PS5SX2 is developed on a PS5 Pro. Testers ran the first test builds on other consoles too:
 
-| Game | Recommended |
+| Console | Firmware |
 |---|---|
-| **Ratchet & Clank** (PAL)<br><sub>SCES-50916</sub> | 6x, holds 50 fps. PS5SX2 has built-in widescreen for this disc. |
-| **Ratchet & Clank 3**<br><sub>SCUS-97353</sub> | 6x |
-| **God of War**<br><sub>SCUS-97399</sub> | 6x |
-| **Gran Turismo 4**<br><sub>SCUS-97328</sub> | 6x. Also set 16:9 in the game's own options. |
-| **Kingdom Hearts Final Mix** (English patch)<br><sub>SLPS-25198</sub> | 6x, Cross/Circle swap patch |
-| **The Lord of the Rings: The Fellowship of the Ring**<br><sub>SLUS-20520</sub> | 6x, 60 FPS patch |
-| **The Lord of the Rings: The Two Towers**<br><sub>SLUS-20578</sub> | 6x, 60 FPS patch |
-| **The Lord of the Rings: The Return of the King**<br><sub>SLUS-20770</sub> | 6x, 60 FPS patch |
-| **Castlevania: Lament of Innocence**<br><sub>SLUS-20733</sub> | 6x, MTVU off and EE clock at 100%. The game freezes with MTVU on. |
-| **Need for Speed: Most Wanted** (Black Edition)<br><sub>SLUS-21351</sub> | 6x |
-| **Oni**<br><sub>SLUS-20064</sub> | 4x, since 6x runs too slowly |
-| **SOCOM II: U.S. Navy SEALs**<br><sub>SCUS-97275</sub> | 6x, online (see above) |
+| PS5 Pro | 10.01, 11.40 |
+| Other PS5 models, including a Slim | 6.02, 8.40, 10.01, 10.60, 11.40, 11.60, 12.00, 12.70 |
+
+Firmware that isn't listed hasn't been tried.
+
+## Tested games
+
+Every game below has been started on PS5SX2, on the PS5 Pro during development or on testers' consoles during the first test builds (September 2026): 108 games in all. It isn't a compatibility guarantee. PS5SX2 keeps changing, so a game can run better or worse now than it did in its test, and a few rows say that a fix hasn't been re-tested yet. Fan mods and homebrew aren't listed. Widescreen patches are on by default for every game that has one.
+
+How to read the table:
+
+- **Tested on** is the console and its firmware. *PS5* means a model that isn't a Pro.
+- **4x** and **6x** are the resolution multipliers. **Full speed** means the game ran at its normal speed at that resolution, and the fps is the game's own frame rate (30 fps for many games). The resolution named is the highest one that held full speed in the tests.
+- **Short test** means less than three minutes of play were recorded. **Starts; no play time recorded** means the game started but there is nothing to judge its speed by.
+- **Recommended** marks a game with a preset on the settings page. The **Recommended** button puts those settings back.
+
+| Game | Tested on | Result |
+|---|---|---|
+| **007: Everything or Nothing** | PS5 10.60 | Starts; no play time recorded. |
+| **007: From Russia with Love**<br><sub>SLUS-21282</sub> | PS5 10.60 | Full speed at 4x, about 60 fps. One crash after 30 minutes of play, cause unknown. |
+| **007: Nightfire** | PS5 10.60 | Full speed at 4x, about 30 fps. |
+| **Alone in the Dark**<br><sub>SLUS-21690</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. |
+| **Alter Echo**<br><sub>SLUS-20465</sub> | PS5 12.00 | Full speed at 4x, about 30 fps. |
+| **Area 51 (PAL)**<br><sub>SLES-52570</sub> | PS5 10.60 | Full speed at 4x, about 25 fps; slowdowns at 5x. |
+| **Area 51**<br><sub>SLUS-20595</sub> | PS5 10.60 | Mostly full speed at 4x, with dips (about 55 fps). |
+| **Bakugan: Battle Brawlers**<br><sub>SLUS-21902</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. |
+| **Black**<br><sub>SLUS-21376</sub> | PS5 10.60 | Full speed at 4x, about 30 fps. |
+| **Bloody Roar 4** | PS5 10.60 | Short test at 4x: full speed, about 60 fps. |
+| **Bully**<br><sub>SLUS-21269</sub> | PS5 10.60, 12.00 | Full speed at 4x, about 60 fps. With the 60 FPS patch it drops to about 40 fps near the school entrance, and a lower resolution doesn't help. An EE clock of 180% brings it to 53–55 fps. |
+| **Burnout 3: Takedown (PAL)**<br><sub>SLES-52584</sub> | PS5 10.60 | Full speed at 4x, about 55 fps. |
+| **Burnout 3: Takedown**<br><sub>SLUS-21050</sub> | PS5 12.00 | Full speed at 4x, about 30 fps. |
+| **Call of Duty: World at War – Final Fronts**<br><sub>SLUS-21746</sub> | PS5 11.40 | Full speed at 4x, about 30 fps. |
+| **Castlevania: Lament of Innocence**<br><sub>SLUS-20733</sub> | PS5 Pro 11.40 | Recommended: 6x, MTVU off and EE clock at 100%. The game freezes with MTVU on. |
+| **Code Lyoko: Quest for Infinity**<br><sub>SLUS-21743</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **Crash Bandicoot: The Wrath of Cortex**<br><sub>SLUS-20238</sub> | PS5 10.01, 12.00 | Full speed at 6x, about 60 fps. |
+| **Crash of the Titans**<br><sub>SLUS-21583</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. Brief stalls while shaders compile. |
+| **Crash Twinsanity (PAL)**<br><sub>SLES-52568</sub> | PS5 8.40 | Full speed at 6x, about 50 fps. |
+| **Crash Twinsanity**<br><sub>SLUS-20909</sub> | PS5 12.00 | Short test at 4x: full speed, about 50 fps. |
+| **Crash: Mind over Mutant**<br><sub>SLUS-21728</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. |
+| **Def Jam: Fight for NY**<br><sub>SLUS-21004</sub> | PS5 12.70 | Short test at 4x: full speed, about 40 fps. |
+| **Dragon Ball Z: Budokai Tenkaichi 3**<br><sub>SLUS-21678</sub> | PS5 11.40 | Full speed at 4x, about 50 fps. |
+| **Driv3r**<br><sub>SLUS-20587</sub> | PS5 10.01 | Full speed at 6x, about 40 fps. The GPU hung three times at 6x; the app closed itself each time. |
+| **FIFA Street 2 (PAL)**<br><sub>SLES-53797</sub> | PS5 10.01 | Full speed at 4x, about 50 fps. |
+| **FIFA Street 2**<br><sub>SLUS-21369</sub> | PS5 11.40 | Full speed at 4x, about 60 fps. |
+| **Freedom Fighters**<br><sub>SLUS-20658</sub> | PS5 12.00 | Full speed at 6x, about 55 fps. With the 60 FPS patch. Some drops when helicopters are on screen. |
+| **Ghost Rider**<br><sub>SLUS-21306</sub> | PS5 11.60 | Full speed at 4x, about 60 fps. |
+| **God of War (PAL)**<br><sub>SCES-53133</sub> | PS5 10.01 | Full speed at 4x, about 50 fps. |
+| **God of War**<br><sub>SCUS-97399</sub> | PS5 Pro 10.01, 11.40<br>PS5 6.02, 10.60, 11.60 | Recommended: 6x. Full speed at 6x, about 60 fps. Micro freezes reported in one test. |
+| **God of War II**<br><sub>SCUS-97481</sub> | PS5 Pro 10.01<br>PS5 6.02, 10.60, 11.40 | Full speed at 4x, about 40 fps. |
+| **The Godfather: The Game**<br><sub>SLUS-21385</sub> | PS5 10.60 | Full speed at 4x, about 30 fps. |
+| **Gran Turismo 4**<br><sub>SCUS-97328</sub> | PS5 Pro 11.40<br>PS5 8.40, 12.00 | Recommended: 6x. Also set 16:9 in the game's own options. Full speed at 6x, about 60 fps. |
+| **Grand Theft Auto: Liberty City Stories**<br><sub>SLUS-21423</sub> | PS5 10.01 | Full speed at 4x, about 35 fps; slowdowns at 6x. |
+| **Grand Theft Auto: San Andreas**<br><sub>SLUS-20946</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. Dips to 53–57 fps now and then. |
+| **Grand Theft Auto: Vice City**<br><sub>SLUS-20552</sub> | PS5 11.60 | Full speed at 4x, about 30 fps. |
+| **Guitar Hero III: Legends of Rock**<br><sub>SLUS-21672</sub> | PS5 6.02, 10.01, 12.00 | Mostly full speed at 6x, with dips (about 50 fps). Slowdowns in songs, worst with the crowd in view. |
+| **Guitar Hero: Smash Hits**<br><sub>SLUS-21866</sub> | PS5 10.01 | Short test at 4x: about 80% speed. Still slow in places. |
+| **I-Ninja**<br><sub>SLUS-20705</sub> | PS5 10.60 | Full speed at 4x, about 50 fps. |
+| **The Incredible Hulk: Ultimate Destruction**<br><sub>SLUS-20941</sub> | PS5 10.60 | Full speed at 4x, about 50 fps. |
+| **Killzone (PAL)**<br><sub>SCES-52004</sub> | PS5 10.60 | Starts; no play time recorded. A fix for its graphics code came after the test and hasn't been re-tested. |
+| **Kingdom Hearts**<br><sub>SLUS-20370</sub> | PS5 11.60 | Full speed at 4x, about 30 fps. |
+| **Kingdom Hearts Final Mix (English patch)**<br><sub>SLPS-25198</sub> | PS5 Pro 11.40 | Recommended: 6x, Cross/Circle swap patch. |
+| **LEGO Batman: The Videogame (PAL)**<br><sub>SLES-55135</sub> | PS5 12.00 | Short test at 4x: full speed, about 45 fps. |
+| **LEGO Batman: The Videogame**<br><sub>SLUS-21785</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. Don't use the Nearest filter: cutscenes look wrong. |
+| **The Lord of the Rings: The Fellowship of the Ring**<br><sub>SLUS-20520</sub> | PS5 Pro 11.40 | Recommended: 6x, 60 FPS patch. |
+| **The Lord of the Rings: The Return of the King**<br><sub>SLUS-20770</sub> | PS5 Pro 11.40 | Recommended: 6x, 60 FPS patch. |
+| **The Lord of the Rings: The Two Towers**<br><sub>SLUS-20578</sub> | PS5 Pro 11.40 | Recommended: 6x, 60 FPS patch. |
+| **The Mark of Kri**<br><sub>SCUS-97140</sub> | PS5 10.60 | Full speed at 4x, about 60 fps. |
+| **The Matrix: Path of Neo (PAL)**<br><sub>SLES-53462</sub> | PS5 10.60 | Full speed at 6x, about 30 fps. |
+| **Medal of Honor: European Assault**<br><sub>SLUS-21199</sub> | PS5 11.40 | Full speed at 4x, about 50 fps. |
+| **Metal Gear Solid 3: Subsistence**<br><sub>SLUS-21359</sub> | PS5 12.00 | Mostly full speed at 6x, with dips (about 60 fps). With the 60 FPS patch the bridge drops to 42–53 fps and some cutscenes to 35 fps. |
+| **Midnight Club 3: DUB Edition Remix**<br><sub>SLUS-21355</sub> | PS5 8.40, 10.01 | Full speed at 6x, about 30 fps. |
+| **Mortal Kombat: Shaolin Monks**<br><sub>SLUS-21087</sub> | PS5 10.01, 10.60, 11.40 | Full speed at 6x, about 60 fps. |
+| **NBA Street Vol. 2**<br><sub>SLUS-20651</sub> | PS5 10.01 | Short test at 4x: full speed, about 45 fps. |
+| **Need for Speed: Carbon (PAL)**<br><sub>SLES-54321</sub> | PS5 10.60 | Starts; no play time recorded. |
+| **Need for Speed: Hot Pursuit 2**<br><sub>SLUS-20362</sub> | PS5 10.01, 10.60 | Full speed at 4x, about 30 fps. |
+| **Need for Speed: Most Wanted**<br><sub>SLUS-21267</sub> | PS5 10.60, 11.60, 12.70 | Full speed at 6x, about 60 fps. |
+| **Need for Speed: Most Wanted (Black Edition)**<br><sub>SLUS-21351</sub> | PS5 Pro 11.40<br>PS5 11.60, 12.00 | Recommended: 6x. Full speed at 6x, about 60 fps. A tester on 12.00 saw drops to 52 fps at the start of races at 6x. |
+| **Need for Speed: Underground 2**<br><sub>SLUS-21065</sub> | PS5 10.01, 10.60, 11.60 | Full speed at 4x, about 55 fps. An early test saw ghosting on car lights and flicker on the ground. |
+| **Oni**<br><sub>SLUS-20064</sub> | PS5 Pro 11.40 | Recommended: 4x, since 6x runs too slowly. |
+| **Ookami**<br><sub>SLUS-21115</sub> | PS5 10.60 | Full speed at 4x, about 30 fps. |
+| **PES 2009: Pro Evolution Soccer (PAL)**<br><sub>SLES-55406</sub> | PS5 10.01 | Full speed at 6x, about 60 fps. |
+| **Prince of Persia: The Sands of Time**<br><sub>SLUS-20743</sub> | PS5 10.60 | Starts; no play time recorded. |
+| **Prince of Persia: The Two Thrones**<br><sub>SLUS-21287</sub> | PS5 10.60 | Mostly full speed at 4x, with dips (about 35 fps). |
+| **Prince of Persia: Warrior Within**<br><sub>SLUS-21022</sub> | PS5 10.60 | Mostly full speed at 4x, with dips (about 30 fps). |
+| **Ratchet & Clank**<br><sub>SCUS-97199</sub> | PS5 12.00 | Mostly full speed at 6x, with dips (about 55 fps). Dips to 42–48 fps in the dense part of the first area. |
+| **Ratchet & Clank (PAL)**<br><sub>SCES-50916</sub> | PS5 Pro 11.40 | Recommended: 6x, holds 50 fps. PS5SX2 has built-in widescreen for this disc. |
+| **Ratchet & Clank 3**<br><sub>SCUS-97353</sub> | PS5 Pro 11.40 | Recommended: 6x. |
+| **Rayman 2: Revolution**<br><sub>SLUS-20138</sub> | PS5 12.00 | Full speed at 4x, about 30 fps. |
+| **Rayman 3: Hoodlum Havoc**<br><sub>SLUS-20601</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **Rayman Arena**<br><sub>SLUS-20272</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **Rayman: Raving Rabbids**<br><sub>SLUS-21576</sub> | PS5 12.00 | Full speed at 4x, about 55 fps. |
+| **Red Dead Revolver**<br><sub>SLUS-20500</sub> | PS5 10.01 | Full speed at 4x, about 30 fps. |
+| **Resident Evil 4**<br><sub>SLUS-21134</sub> | PS5 10.01, 12.00 | Full speed at 6x, about 30 fps. The radio froze for a moment once, probably a shader compiling. |
+| **The Rise of the Kasai**<br><sub>SCUS-97416</sub> | PS5 10.60 | Full speed at 4x, about 55 fps. |
+| **Runabout 3: Neo Age (PAL)**<br><sub>SLES-51223</sub> | PS5 10.01 | Full speed at 6x, about 25 fps. |
+| **Scarface: The World Is Yours (PAL)**<br><sub>SLES-54182</sub> | PS5 10.60 | Short test at 4x: about 60% speed. A fix for its graphics code came after the test and hasn't been re-tested. |
+| **Scarface: The World Is Yours**<br><sub>SLUS-21111</sub> | PS5 10.60 | Short test at 4x: about 55% speed. A fix for its graphics code came after the test and hasn't been re-tested. |
+| **Shadow of the Colossus**<br><sub>SCUS-97472</sub> | PS5 Pro 11.40<br>PS5 10.60, 12.00 | Slow on a regular PS5, even at 1x: about 15–20 fps in one test, and hardly over 50 fps outside the temple in a later one. On the PS5 Pro with tuned settings (EE clock 180%, Instant DMA, fast MIN/MAX, clamp none) it reaches 53–55 fps at 5x and 6x. |
+| **ShellShock: Nam '67**<br><sub>SLUS-20828</sub> | PS5 10.60 | Full speed at 4x, about 30 fps. A fix for its graphics code came after the test and hasn't been re-tested. |
+| **Silent Hill 2**<br><sub>SLUS-20228</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With its 60 FPS patch. The flashlight scene used to drop frames; that was fixed. |
+| **Silent Hill 3**<br><sub>SLUS-20622</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch; the lowest seen was about 57 fps (51 on an earlier build). |
+| **Silent Hill 4: The Room**<br><sub>SLUS-20873</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. |
+| **SOCOM II: U.S. Navy SEALs**<br><sub>SCUS-97275</sub> | PS5 Pro 11.40 | Recommended: 6x, online (see [Online play](#online-play)). |
+| **Sonic Gems Collection (PAL)**<br><sub>SLES-53350</sub> | PS5 12.00 | Slowdowns at 4x (about 90% speed). |
+| **Sonic Mega Collection Plus**<br><sub>SLUS-20917</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **Spider-Man 3**<br><sub>SLUS-21552</sub> | PS5 10.01 | Slowdowns at 6x (about 65% speed). |
+| **Teenage Mutant Ninja Turtles (2007)**<br><sub>SLUS-21595</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. A crash at first start on firmware 12.00 has been fixed. |
+| **Tenchu: Fatal Shadows**<br><sub>SLUS-21129</sub> | PS5 10.60 | Full speed at 6x, about 60 fps. |
+| **Tenchu: Wrath of Heaven**<br><sub>SLUS-20397</sub> | PS5 10.60 | Full speed at 6x, about 60 fps. |
+| **Test Drive Unlimited**<br><sub>SLUS-21490</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. Slowdowns at the start, probably shaders compiling. |
+| **Test Drive: Eve of Destruction**<br><sub>SLUS-20910</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. |
+| **Tom Clancy's Rainbow Six: Lockdown (PAL)**<br><sub>SLES-53104</sub> | PS5 10.60 | Mostly full speed at 4x, with dips (about 30 fps). |
+| **Tom Clancy's Splinter Cell: Chaos Theory (PAL)**<br><sub>SLES-53287</sub> | PS5 10.60 | Full speed at 4x, about 45 fps. |
+| **Tom Clancy's Splinter Cell: Double Agent (PAL)**<br><sub>SLES-53826</sub> | PS5 10.60 | Full speed at 4x, about 40 fps. |
+| **Tom Clancy's Splinter Cell: Pandora Tomorrow**<br><sub>SLUS-20958</sub> | PS5 10.60 | Full speed at 4x, about 35 fps. |
+| **Tony Hawk's Project 8**<br><sub>SLUS-21444</sub> | PS5 10.01 | Full speed at 4x, about 60 fps. With its 60 FPS patch. |
+| **True Crime: Streets of LA**<br><sub>SLUS-20550</sub> | PS5 10.60 | Full speed at 4x, about 30 fps. |
+| **Urban Reign**<br><sub>SLUS-21209</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. |
+| **The X-Files: Resist or Serve**<br><sub>SLUS-20179</sub> | PS5 12.00 | Short test at 4x: full speed, about 30 fps. |
+| **X-Men Legends**<br><sub>SLUS-20656</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. 5–10 second freezes now and then. |
+| **X-Men Legends II: Rise of Apocalypse**<br><sub>SLUS-21138</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **X-Men Origins: Wolverine**<br><sub>SLUS-21880</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **X-Men: Next Dimension**<br><sub>SLUS-20279</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **X-Men: The Official Game**<br><sub>SLUS-21107</sub> | PS5 12.00 | Full speed at 4x, about 30 fps. |
+| **X2: Wolverine's Revenge**<br><sub>SLUS-20337</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
+| **Yu-Gi-Oh! Capsule Monster Coliseum**<br><sub>SLUS-20940</sub> | PS5 12.00 | Full speed at 4x, about 60 fps. |
 
 ## Known limitations
 
-- **Tested on one console,** a PS5 Pro. The 6x presets may be too heavy for a regular PS5.
+- **Some games are too heavy for 6x on a regular PS5.** [Tested games](#tested-games) shows what ran at full speed where.
 - **No RetroAchievements** yet.
 - **Restart needed for a few settings:** the renderer and MTVU only change when the game restarts.
 - **Covers need the PS5SX2 Helper,** which gives the app `/data` before it starts. Without it, nothing downloads.
