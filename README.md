@@ -32,13 +32,18 @@ Expect rough edges. Bug reports with logs are very welcome, and so is patience.
 
 - **Native, not streamed.** The emulator, its recompilers and its renderer all run on the console itself.
 - **Up to 6x native resolution.** PCSX2's hardware renderer runs on Vulkan with 4K output, and FSR is one of the display filters.
-- **A shelf for your games.** A 3D cover flow of your library. Covers download automatically the first time you start it.
+- **A shelf for your games.** A 3D cover flow of your library. Covers download automatically the first time you start it. Games play from `.iso`, `.chd`, `.cso` and `.zso` files, and each is titled from its serial in PCSX2's game database, whatever the file is called.
 - **Settings from your phone.** The shelf shows a QR code: scan it and a settings page opens on your phone.
   - Change the resolution, aspect ratio, filters, patches and more, for all games or one game.
   - Most changes apply while you play.
+  - In a game, hold L2 + D-pad Down for 2 seconds to open the page in the PS5's own web browser. The game keeps running.
 - **Widescreen and 60 FPS patches.** Put PCSX2 patch files (`.pnach`) in `/data/PCSX2/patches/` and switch them on per game from the settings page.
 - **Online play.** PCSX2's emulated network adapter goes out through the PS5's own connection. SOCOM II has played online matches on [PS Rewired](https://psrewired.com)'s revival servers.
 - **Recommended settings** for the games played during development, one tap away on the settings page.
+- **Bigger memory cards.** Make blank 8, 16, 32 or 64 MB cards on the settings page and pick the card in each slot, for all games or for one.
+- **Texture packs.** A game's textures can be replaced with PNG or DDS files kept on the console, on a USB drive or in any folder you name.
+- **Rumble and an FPS graph.** The game's vibration goes to the controller, and a blue frame-rate graph can sit in the corner of the picture. The settings page switches them on and off, and chooses what the info box shows.
+- **USB keyboard and mouse** play as the PS2 controller, with PCSX2's own keys. This doesn't work on firmware 11.x and 12.00 yet: see [Known limitations](#known-limitations).
 - **Logs that survive.** The last sessions' boot, emulator and settings logs stay on the console, so a problem can be tracked down afterwards.
 
 ## What you need
@@ -47,7 +52,7 @@ Expect rough edges. Bug reports with logs are very welcome, and so is patience.
 - **The PS5SX2 Helper payload**, from the releases, loaded together with kstuff. It's based on OnionHEN. It jailbreaks PS5SX2 when it starts, which the emulator's recompilers need, and gives the app access to `/data`.
 - **[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)**, loaded at every boot like kstuff. It mounts PS5SX2 from `/data/homebrew/PPSA99203/` and puts it on the home screen.
 - **Your own PS2 BIOS**, dumped from your own console.
-- **Your own games**, as `.iso` files.
+- **Your own games**, as `.iso`, `.chd`, `.cso` or `.zso` files.
 
 No BIOS, games or keys come with PS5SX2.
 
@@ -78,17 +83,56 @@ The first start downloads the covers for your games, then the shelf opens.
 | Hold L3 + R3, then D-pad Up / Down | Save / load state (slot 1) |
 | Touch the left / right third of the touchpad + Cross | Save / load state (slot 1) |
 | Hold L3 + R3 and let go | Next display filter |
+| Hold L2 + D-pad Down for 2 seconds | Open the settings page in the PS5's web browser; the game keeps running |
+
+### USB keyboard and mouse
+
+With a USB keyboard and mouse plugged into the PS5, the keyboard and mouse play as the PS2 controller, with PCSX2's own keys:
+
+| Keys | PS2 controller |
+|---|---|
+| Arrow keys | D-pad |
+| W A S D | Left stick |
+| T F G H | Right stick |
+| I J K L | Triangle, Square, Cross, Circle |
+| Enter, Backspace | Start, Select |
+| Q, E | L1, R1 |
+| 1, 3 | L2, R2 |
+| 2, 4 | L3, R3 |
+| F1, F3 | Save state, load state (slot 1) |
+| Hold Esc for a second | Back to the shelf |
+
+The mouse moves a stick (the right one by default), and its left and right buttons are R1 and L1 (or R2 and L2). Games made for a USB keyboard and mouse, such as Half-Life, get the PS2's own USB devices: *Auto* switches to them when a game starts reading them, or you can pick *USB devices* on the settings page.
+
+**Firmware:** this does nothing on firmware 11.x and 12.00 yet. The console refuses to load its keyboard and mouse libraries for PS5SX2 there (seen on 11.40 and 12.00), and the `[kbm]` lines in `boot.log` say so. It's expected to work on 10.60 and older, but no console has tried it yet.
 
 ## The settings page
 
 Scan the QR code in the corner of the shelf with a phone on the same network. You can change settings for all games or for one game:
 
 - **Display:** resolution (1x to 6x), aspect ratio, widescreen patches and display filter (FSR, FSR soft, Classic, CRT).
-- **Graphics:** texture filtering, anisotropic filtering, blending accuracy and mipmapping.
-- **Performance:** EE cycle rate and skip, and MTVU.
+- **Graphics:** texture filtering, anisotropic filtering, blending accuracy, mipmapping, texture replacements and the folder they're read from.
+- **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed.
+- **Game:** the language the PS2 tells games.
+- **On screen:** the info box in the top right corner (off, FPS, or FPS and how busy the EE, GS and VU threads are) and the blue FPS graph.
+- **Controller:** rumble.
+- **Keyboard and mouse:** whether the keys and the mouse play as the controller or as the PS2's USB devices, which stick the mouse moves, its speed and its buttons.
 - **Patches:** the game's patch groups, such as 60 FPS.
+- **Memory cards:** make blank 8, 16, 32 or 64 MB cards (they go in `/data/PCSX2/memcards/`) and choose the card in each slot, for all games or for one.
 
 Most changes show up in the running game straight away. The page marks the few that need a restart. **Recommended** puts back the settings tuned for that game.
+
+In a game, hold L2 + D-pad Down for 2 seconds and the PS5's own web browser opens on the page. The game keeps running behind it. If the console won't open its browser, the page's QR code and address show over the game instead, and the same combo hides them.
+
+## Texture packs
+
+PS5SX2 loads PCSX2-style texture replacement packs as PNG or DDS files (DDS in BC1, BC2, BC3, BC7 or uncompressed). Switch on *Texture replacements* on the settings page. A game's pack is a folder named after its serial with a `replacements` folder inside: `<serial>/replacements/`. PS5SX2 looks for it here, in this order:
+
+1. The folder the *Textures folder* setting names, as `<that folder>/<serial>/`.
+2. A USB drive: `PS5SX2/textures/<serial>/`, `PCSX2/textures/<serial>/` or `textures/<serial>/`, and a pack copied to the drive's top folder as it is (`PS5SX2/<serial>/` or `<serial>/`, with its `replacements` folder).
+3. `/data/PCSX2/textures/<serial>/`, PCSX2's own place.
+
+Folder names match in any case.
 
 ## Online play
 
@@ -255,6 +299,7 @@ How to read the table:
 
 - **Some games are too heavy for 6x on a regular PS5.** [Tested games](#tested-games) shows what ran at full speed where.
 - **No RetroAchievements** yet.
+- **USB keyboard and mouse don't work on firmware 11.x and 12.00** yet. [The keyboard and mouse section](#usb-keyboard-and-mouse) has the details.
 - **Restart needed for a few settings:** the renderer and MTVU only change when the game restarts.
 - **Covers need the PS5SX2 Helper,** which gives the app `/data` before it starts. Without it, nothing downloads.
 
