@@ -157,6 +157,14 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
                    font: inherit; font-size: 15px; padding: 10px 12px; }
 .report textarea::placeholder { color: var(--faint); }
 .report textarea:focus { outline: none; border-color: rgba(var(--glow),0.7); box-shadow: 0 0 0 3px rgba(var(--glow),0.18); }
+/* vk-285-113: a memory card slot's picker, the new card's name. */
+.pick, .txt { display: block; width: 100%; margin-top: 10px; border-radius: 12px; border: 1px solid var(--card-line);
+              background: rgba(255,255,255,0.06); color: var(--text); font: inherit; font-size: 15px; padding: 10px 12px;
+              color-scheme: dark; }
+.pick option { background: #1b1838; color: #fff; }
+.txt::placeholder { color: var(--faint); }
+.pick:focus, .txt:focus { outline: none; border-color: rgba(var(--glow),0.7); box-shadow: 0 0 0 3px rgba(var(--glow),0.18); }
+.btn:disabled { opacity: 0.55; cursor: default; }
 .btnrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .btn { border: 0; border-radius: 99px; padding: 9px 16px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
        text-decoration: none; display: inline-flex; align-items: center; }
@@ -291,7 +299,31 @@ const GROUPS = [
                 ["6","Dutch"],["7","Portuguese"]],
       hint: "The language the PS2 tells games. PAL games with several languages start in it; most US games are English only. Auto follows the PS5's language." },
   ]},
+  // vk-285-113: the box in the top right corner and its frame-rate graph (main-boot.cpp orbis_ps5opts_from, GSRenderer.cpp).
+  { title: "On screen", items: [
+    { key: "PS5SX2/Overlay", label: "Info box", type: "seg", def: "2", short: "Info box %", cols: 3,
+      options: [["0","Off"],["1","FPS"],["2","FPS + load"]],
+      hint: "The box in the top right corner. Load is how busy the EE, GS and VU threads are." },
+    { key: "PS5SX2/FpsGraph", label: "FPS graph", type: "toggle", def: "false", short: "FPS graph %",
+      hint: "A blue graph of the last minute's frame rate in the top right corner. It shows with the info box off too." },
+  ]},
+  { title: "Controller", items: [
+    { key: "PS5SX2/Rumble", label: "Rumble", type: "toggle", def: "true", short: "Rumble %",
+      hint: "The game's vibration on the controller. Hold L2 and D-pad down for 2 seconds to show this page's QR code over the game." },
+  ]},
 ];
+
+// ---- vk-285-113: memory cards. The files in memcards/ and a form that makes a blank one of 8, 16, 32 or 64 MB. Which card
+// sits in a slot is an ordinary setting (MemoryCards/Slot1_Filename), this game's or all games'; the core swaps cards in a
+// running game (the game sees one taken out and put in).
+const SLOTS = [
+  { n: 1, file: "MemoryCards/Slot1_Filename", on: "MemoryCards/Slot1_Enable", def: "Mcd001.ps2" },
+  { n: 2, file: "MemoryCards/Slot2_Filename", on: "MemoryCards/Slot2_Enable", def: "Mcd002.ps2" },
+];
+let cards = null;   // /api/memcards
+let mcdSize = 16;   // the size picked in the form
+let mcdName = "";   // and the name typed
+let mcdBusy = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -413,6 +445,7 @@ async function select(id) {
   try {
     data = await api("/api/settings?id=" + encodeURIComponent(id));
     if (current === id) render();
+    loadCards(); // vk-285-113: the list may have changed (a card copied in); it draws again only when it has
   } catch (e) { if (e.message !== "unauthorized") toast("Couldn't load the settings: " + e.message); }
 }
 
@@ -480,6 +513,7 @@ function render() {
     }
     html += "</div></div>";
   }
+  html += memcardsHtml(isGlobal);
   if (!isGlobal) {
     html += '<div class="sec"><h2>Patches</h2><div class="card">';
     if (!data.patches.length) html += '<div class="empty">No patch file for ' + esc(data.serial || "this game") + " in patches/.</div>";
@@ -497,6 +531,13 @@ function render() {
   $("settings").querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => change(b.dataset.key, b.dataset.val)));
   $("settings").querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", () => change(b.dataset.reset, null)));
   $("settings").querySelectorAll("[data-patch]").forEach((b) => b.addEventListener("click", () => patch(b.dataset.patch, b.dataset.on === "1")));
+  $("settings").querySelectorAll("[data-mcd]").forEach((el) => el.addEventListener("change", () => mcdChoose(SLOTS[+el.dataset.mcd - 1], el.value)));
+  $("settings").querySelectorAll("[data-mcdreset]").forEach((b) => b.addEventListener("click", () => mcdChoose(SLOTS[+b.dataset.mcdreset - 1], "")));
+  $("settings").querySelectorAll("[data-mcdsize]").forEach((b) => b.addEventListener("click", () => { mcdSize = +b.dataset.mcdsize; render(); }));
+  const mn = $("mcdname");
+  if (mn) mn.addEventListener("input", () => { mcdName = mn.value; });
+  const mc = $("mcdcreate");
+  if (mc) mc.addEventListener("click", mcdCreate);
   const rb = $("recbtn");
   if (rb) rb.addEventListener("click", () => {
     if (!recArmed) {
@@ -508,6 +549,72 @@ function render() {
     clearTimeout(recArmed); recArmed = 0;
     useRecommended();
   });
+}
+
+// ---- vk-285-113: memory cards
+function cardSize(bytes) {
+  if (bytes === 131072) return "PS1";
+  for (const mb of [8, 16, 32, 64]) if (bytes === mb * 1081344 || bytes === mb * 1048576) return mb + " MB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+}
+async function loadCards() {
+  try {
+    const c = await api("/api/memcards");
+    const changed = JSON.stringify(c) !== JSON.stringify(cards);
+    cards = c;
+    if (changed && data) render();
+  } catch (e) {}
+}
+function memcardsHtml(isGlobal) {
+  if (!cards) return "";
+  let html = '<div class="sec"><h2>Memory cards</h2><div class="card">';
+  for (const s of SLOTS) {
+    const fe = effective({ key: s.file, def: s.def }), oe = effective({ key: s.on, def: "true" });
+    const own = fe.from === "own" || oe.from === "own";
+    const none = !truthy(oe.v);
+    const gFile = isGlobal ? s.def : (data.global[s.file] !== undefined ? data.global[s.file] : s.def);
+    const gOn = isGlobal ? "true" : (data.global[s.on] !== undefined ? data.global[s.on] : "true");
+    const inherited = (isGlobal ? "Default" : "Same as all games") + " (" + (truthy(gOn) ? gFile : "no card") + ")";
+    const cur = own ? (none ? "@none" : fe.v) : "";
+    const listed = cards.cards.some((c) => c.name === cur);
+    let from = own ? (isGlobal ? "set" : "this game") + ' <button data-mcdreset="' + s.n + '">reset</button>'
+                   : (fe.from === "global" || oe.from === "global") ? "all games" : "default";
+    let opts = '<option value=""' + (cur === "" ? " selected" : "") + ">" + esc(inherited) + "</option>" +
+      '<option value="@none"' + (cur === "@none" ? " selected" : "") + ">No card</option>";
+    for (const c of cards.cards)
+      opts += '<option value="' + esc(c.name) + '"' + (c.name === cur ? " selected" : "") + ">" + esc(c.name) + " \u00b7 " + cardSize(c.bytes) + "</option>";
+    if (cur && cur !== "@none" && !listed)
+      opts += '<option value="' + esc(cur) + '" selected>' + esc(cur) + " \u00b7 not in memcards/</option>";
+    html += '<div class="row"><div class="head"><div class="label">Slot ' + s.n + '</div><div class="from">' + from + "</div></div>" +
+      '<select class="pick" data-mcd="' + s.n + '" aria-label="Memory card, slot ' + s.n + '">' + opts + "</select></div>";
+  }
+  html += '<div class="row"><div class="label">New card</div>' +
+    '<div class="hint">A blank card. The game, or the PS2 browser, formats it the first time. Most games are happiest with 8 MB; bigger cards run out much later. ' +
+    'To move saves over, put the old card in slot 2 and copy them in the PS2 browser.</div>' +
+    '<input class="txt" id="mcdname" maxlength="40" autocomplete="off" placeholder="Name, for example Big card" value="' + esc(mcdName) + '">' +
+    '<div class="seg" style="--n:4">' + cards.sizes.map((mb) =>
+      '<button class="' + (mb === mcdSize ? "cur" : "") + '" data-mcdsize="' + mb + '">' + mb + " MB</button>").join("") + "</div>" +
+    '<div class="btnrow"><button class="btn primary" id="mcdcreate"' + (mcdBusy ? " disabled" : "") + ">" + (mcdBusy ? "Making the card\u2026" : "Create card") + "</button></div></div>";
+  return html + "</div></div>";
+}
+// "" back to the default (or all games'), "@none" no card, else a file name: the slot's two settings.
+function mcdChoose(s, v) {
+  if (v === "") { change(s.file, null); change(s.on, null); return; }
+  if (v === "@none") { change(s.file, null); change(s.on, "false"); return; }
+  change(s.file, v);
+  if (!truthy(effective({ key: s.on, def: "true" }).v)) change(s.on, "true");
+}
+async function mcdCreate() {
+  const name = mcdName.trim();
+  if (!name) { toast("Give the card a name first"); const n = $("mcdname"); if (n) n.focus(); return; }
+  mcdBusy = true; render();
+  try {
+    const r = await api("/api/memcards", { method: "POST", body: "create " + mcdSize + " " + name, headers: { "Content-Type": "text/plain" } });
+    cards = r; mcdName = "";
+    toast("Made " + r.created + " (" + mcdSize + " MB) \u00b7 pick it in a slot");
+  } catch (e) { if (e.message !== "unauthorized") toast("Card not made: " + e.message); }
+  mcdBusy = false;
+  if (data) render();
 }
 
 // The whole file becomes the recommended one; the console keeps the old one beside it.

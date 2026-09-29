@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -234,6 +235,85 @@ bool SafeValue(const std::string& v)
 	return true;
 }
 
+// ---- memory cards (vk-285-113) ---------------------------------------------------------------
+// The page lists the cards PCSX2 offers from memcards/ (its own rule: a file ending .ps2, .mcr, .mcd, .bin or .mc2 that is
+// at least a PS1 card's size) and makes new blank PS2 cards of 8, 16, 32 or 64 MB the way the core's FileMcd_CreateNewCard
+// does: a file of 0xFF bytes, a card's raw size with its ECC bytes (1024 * 528 * 2 a MB). Which card sits in a slot is an
+// ordinary setting (MemoryCards/Slot1_Filename), for all games or one.
+constexpr uint64_t kCardMb = 1024ull * 528 * 2;
+constexpr uint64_t kPs1CardBytes = 1024ull * 8 * 16;
+
+struct CardFile
+{
+	std::string name;
+	uint64_t bytes = 0;
+};
+
+bool HasCardExtension(const std::string& name)
+{
+	for (const char* ext : {".ps2", ".mcr", ".mcd", ".bin", ".mc2"})
+	{
+		const size_t n = std::strlen(ext);
+		if (name.size() > n && name.compare(name.size() - n, n, ext) == 0)
+			return true;
+	}
+	return false;
+}
+
+// A name the page makes: letters, digits, space, '_', '-', '.', '(' and ')', starting with a letter or digit, ending in
+// ".ps2" after at least one character that is not a space or a dot, 64 characters at most.
+bool NewCardNameOk(const std::string& name)
+{
+	if (name.size() < 5 || name.size() > 64 || name.compare(name.size() - 4, 4, ".ps2") != 0)
+		return false;
+	for (char c : name)
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-' ||
+				c == '.' || c == '(' || c == ')'))
+			return false;
+	const char first = name[0], last = name[name.size() - 5];
+	return ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) && last != ' ' && last != '.';
+}
+
+std::vector<CardFile> ListCards(const std::string& dir)
+{
+	std::vector<CardFile> out;
+	DIR* d = dir.empty() ? nullptr : opendir(dir.c_str());
+	if (!d)
+		return out;
+	while (dirent* e = readdir(d))
+	{
+		const std::string name = e->d_name;
+		// Names the settings file can hold (no '#', no line breaks) and the page can show.
+		if (name.empty() || name[0] == '.' || !HasCardExtension(name) || !SafeValue(name))
+			continue;
+		struct stat st = {};
+		if (stat((dir + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode) || static_cast<uint64_t>(st.st_size) < kPs1CardBytes)
+			continue;
+		out.push_back({name, static_cast<uint64_t>(st.st_size)});
+	}
+	closedir(d);
+	std::sort(out.begin(), out.end(), [](const CardFile& a, const CardFile& b) {
+		const std::string la = Lower(a.name), lb = Lower(b.name);
+		return la != lb ? la < lb : a.name < b.name;
+	});
+	return out;
+}
+
+std::string CardsJson(const std::string& dir, const std::string& created)
+{
+	std::string out = "{\"cards\":[";
+	bool first = true;
+	for (const CardFile& c : ListCards(dir))
+	{
+		out += std::string(first ? "" : ",") + "{\"name\":" + Json(c.name) + ",\"bytes\":" + std::to_string(c.bytes) + "}";
+		first = false;
+	}
+	out += "],\"sizes\":[8,16,32,64],\"defaults\":[\"Mcd001.ps2\",\"Mcd002.ps2\"]";
+	if (!created.empty())
+		out += ",\"created\":" + Json(created);
+	return out + "}";
+}
+
 // The groups ("[60 FPS]") of the game's patch files, <serial>_<crc>.pnach.
 struct PatchGroup
 {
@@ -344,10 +424,11 @@ std::string ListJson(const std::vector<std::string>& v)
 }
 
 // vk-285-110: PS5SX2/ keys (the game language) are the player's own choices, not tuning: the Recommended
-// button keeps them, and they don't stop a file from counting as the recommended one.
+// button keeps them, and they don't stop a file from counting as the recommended one. (vk-285-113: so are the
+// MemoryCards/ keys, the cards in the slots.)
 bool IsPlayerKey(const std::string& key)
 {
-	return key.compare(0, 7, "PS5SX2/") == 0;
+	return key.compare(0, 7, "PS5SX2/") == 0 || key.compare(0, 12, "MemoryCards/") == 0; // vk-285-113: the cards in the slots too
 }
 
 bool SameState(IniState a, IniState b)
@@ -930,6 +1011,10 @@ void WebServer::Route(const Request& req, Response& res)
 		ApiReport(req, res);
 	else if (req.path == "/api/note" && req.method == "POST")
 		ApiNote(req, res);
+	else if (req.path == "/api/memcards" && req.method == "GET")
+		ApiMemcards(res);
+	else if (req.path == "/api/memcards" && req.method == "POST")
+		ApiMemcardCreate(req, res);
 	else
 	{
 		res.status = req.method == "GET" || req.method == "POST" ? 404 : 405;
@@ -1477,6 +1562,120 @@ void WebServer::ApiNote(const Request& req, Response& res)
 	std::printf("[note] %s\n", text.c_str());
 	std::fflush(stdout);
 	res.body = "{\"ok\":true}";
+}
+
+// vk-285-113: the memory cards the slots can hold: {"cards":[{"name","bytes"}],"sizes":[8,16,32,64],"defaults":[...]}.
+void WebServer::ApiMemcards(Response& res)
+{
+	res.body = CardsJson(m_cfg.memcards_dir, std::string());
+}
+
+// vk-285-113: the body is "create <MB> <name>": a blank PS2 card of 8, 16, 32 or 64 MB, made beside its final name and
+// renamed, so a card that failed half way (a full disk) is never left for PCSX2 to find. ".ps2" is added to a name
+// without it. The card is unformatted: the game or the PS2 browser formats it, as with any new card.
+void WebServer::ApiMemcardCreate(const Request& req, Response& res)
+{
+	if (m_cfg.memcards_dir.empty())
+	{
+		res.status = 404;
+		res.body = Error("no memory cards folder");
+		return;
+	}
+	const std::string body = Trim(req.body);
+	const size_t s1 = body.find(' ');
+	const size_t s2 = s1 == std::string::npos ? s1 : body.find(' ', s1 + 1);
+	if (s2 == std::string::npos || body.compare(0, s1, "create") != 0)
+	{
+		res.status = 400;
+		res.body = Error("expected: create <MB> <name>");
+		return;
+	}
+	const std::string mb_text = body.substr(s1 + 1, s2 - s1 - 1);
+	std::string name = Trim(body.substr(s2 + 1));
+	if (mb_text != "8" && mb_text != "16" && mb_text != "32" && mb_text != "64")
+	{
+		res.status = 400;
+		res.body = Error("a card is 8, 16, 32 or 64 MB");
+		return;
+	}
+	const uint64_t mb = std::strtoull(mb_text.c_str(), nullptr, 10);
+	if (name.size() < 4 || Lower(name.substr(name.size() - 4)) != ".ps2")
+		name += ".ps2";
+	else
+		name = name.substr(0, name.size() - 4) + ".ps2"; // ".PS2" too, as the core lists lower case only
+	if (!NewCardNameOk(name))
+	{
+		res.status = 400;
+		res.body = Error("use letters, digits, spaces and - _ . ( ) in the name");
+		return;
+	}
+	size_t count = 0;
+	bool taken = false;
+	if (DIR* d = opendir(m_cfg.memcards_dir.c_str()))
+	{
+		while (dirent* e = readdir(d))
+		{
+			const std::string other = e->d_name;
+			count++;
+			taken = taken || Lower(other) == Lower(name); // a name that differs in case is confusing too
+		}
+		closedir(d);
+	}
+	else if (mkdir(m_cfg.memcards_dir.c_str(), 0777) != 0 && errno != EEXIST)
+	{
+		res.status = 500;
+		res.body = Error("could not make the memory cards folder");
+		return;
+	}
+	if (taken)
+	{
+		res.status = 409;
+		res.body = Error(("a card called " + name + " is there already").c_str());
+		return;
+	}
+	if (count > 400)
+	{
+		res.status = 400;
+		res.body = Error("too many files in the memory cards folder");
+		return;
+	}
+	const std::string final_path = m_cfg.memcards_dir + "/" + name, tmp_path = m_cfg.memcards_dir + "/." + name + ".tmp";
+	FILE* f = std::fopen(tmp_path.c_str(), "wb");
+	if (!f)
+	{
+		std::printf("[web] memory card %s: could not create the file (errno %d)\n", name.c_str(), errno);
+		std::fflush(stdout);
+		res.status = 500;
+		res.body = Error("could not create the file");
+		return;
+	}
+	const std::vector<unsigned char> block(static_cast<size_t>(kCardMb / 2), 0xFF); // 1024 * 528 bytes: a page run, 2 to the MB
+	uint64_t left = mb * kCardMb;
+	bool ok = true;
+	while (ok && left > 0)
+	{
+		const size_t n = static_cast<size_t>(std::min<uint64_t>(left, block.size()));
+		ok = std::fwrite(block.data(), 1, n, f) == n;
+		left -= n;
+	}
+	ok = std::fflush(f) == 0 && ok;
+	ok = std::fclose(f) == 0 && ok;
+	if (ok && std::rename(tmp_path.c_str(), final_path.c_str()) != 0)
+		ok = false;
+	if (!ok)
+	{
+		const int err = errno;
+		unlink(tmp_path.c_str());
+		std::printf("[web] memory card %s (%llu MB): writing failed (errno %d)\n", name.c_str(), static_cast<unsigned long long>(mb), err);
+		std::fflush(stdout);
+		res.status = 507;
+		res.body = Error("the card could not be written: is the disk full?");
+		return;
+	}
+	std::printf("[web] memory card %s made: %llu MB\n", name.c_str(), static_cast<unsigned long long>(mb));
+	std::fflush(stdout);
+	Log(req, "memory card made: " + name + " (" + mb_text + " MB, blank)");
+	res.body = CardsJson(m_cfg.memcards_dir, name);
 }
 
 void WebServer::Log(const Request& req, const std::string& what)

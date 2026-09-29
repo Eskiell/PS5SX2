@@ -1166,6 +1166,7 @@ static OrbisFrontendPaths orbis_frontend_paths(bool allow_download)
   fe.usb_list = OrbisDir("cache") + "/usb-games.txt";
   fe.serial_cache = OrbisDir("cache") + "/chd-serials.txt"; // vk-285-108
   fe.gamedb_file = OrbisDir("resources") + "/GameIndex.yaml"; // vk-285-113: the games' names, for the shelf and the page
+  fe.memcards_dir = OrbisDir("memcards"); // vk-285-113: the settings page's memory card list and creator
   fe.test_build = g_orbis_test_build;
   fe.build_label = orbis_build_label();
   fe.test_note = orbis_test_note(); // vk-285-105

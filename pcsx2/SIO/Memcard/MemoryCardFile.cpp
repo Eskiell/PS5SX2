@@ -394,7 +394,7 @@ bool FileMemoryCard::LoadCache(uint slot)
 {
 	std::FILE* f = m_file[slot];
 	const s64 size = m_fileSize[slot];
-	if (!f || size <= 0 || size > (64 << 20))
+	if (!f || size <= 0 || size > (72 << 20)) // vk-285-113: a 64 MB card is 66 MiB with its ECC bytes
 	{
 		m_cache_ok[slot] = false;
 		return false;

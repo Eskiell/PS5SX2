@@ -875,6 +875,7 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 	// Test build 1 (vk-285-55): the logs download.
 	cfg.logs_dir = paths.logs_dir;
 	cfg.top_dir = paths.top_dir;
+	cfg.memcards_dir = paths.memcards_dir; // vk-285-113
 	cfg.report_header = paths.report_header;
 	cfg.test_build = paths.test_build;
 	fe::g_utc_to_local = &SettingsLogLocalTime;

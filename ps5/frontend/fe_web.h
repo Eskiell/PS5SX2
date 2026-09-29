@@ -54,6 +54,7 @@ struct WebConfig
 	// Test build 1 (vk-285-55): the logs download (/api/report) and the tester's notes (/api/note).
 	std::string logs_dir;               // logs/: boot.log, emulog.txt, stderr.log and their earlier sessions
 	std::string top_dir;                // /data/PCSX2: gs.ini, live.ini, flags/, settings/, patches/, cheats/
+	std::string memcards_dir;           // vk-285-113: memcards/, the cards PCSX2 uses ("" for none: no cards page)
 	std::string report_header;          // the report's first lines: build, sources, console
 	int test_build = 0;                 // names the report file "PS5SX2-test<N>-..."
 };
@@ -122,6 +123,8 @@ private:
 	void ApiRecommended(const Request& req, const GameInfo* g, const std::string& path, Response& res);
 	void ApiReport(const Request& req, Response& res); // test build 1: one text file with the logs
 	void ApiNote(const Request& req, Response& res);   // test build 1: a tester's note, into settings.log
+	void ApiMemcards(Response& res);                   // vk-285-113: the cards in memcards/
+	void ApiMemcardCreate(const Request& req, Response& res); // vk-285-113: "create <8|16|32|64> <name>"
 	void Log(const Request& req, const std::string& what);
 
 	WebConfig m_cfg;
