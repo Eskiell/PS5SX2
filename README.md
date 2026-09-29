@@ -66,15 +66,16 @@ Thanks again for all the testing, logs, and feedback. It genuinely helps move th
 
 TO GET IT RUNNING:
 
-Put PS5SX2Helper.elf and PS5SX2Installer.elf in your autoload. They’ll make sure you always get the latest build directly from GitHub.
+-Put PS5SX2Helper.elf and PS5SX2Installer.elf in your autoload. They’ll make sure you always get the latest build directly from GitHub.
 
-Place your legally acquired PS2 BIOS in:
+-Place your legally acquired PS2 BIOS in:
 /data/PCSX2/bios
 
-Place your legally made game backups in:
+-Place your legally made game backups in:
 /data/PCSX2/games
 
-Enjoy.
+-Enjoy.
+
 The first start downloads the covers for your games, then the shelf opens.
 
 ## Controls
