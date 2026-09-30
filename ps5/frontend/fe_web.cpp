@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "fe_web.h"
+#include "fe_settings.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -24,28 +25,15 @@
 
 namespace fe
 {
+// The settings files, memory cards, patch groups and recommended settings (vk-285-114: fe_settings.cpp, shared with the
+// shelf's options sheet).
+using namespace settings;
+
 namespace
 {
 double Now()
 {
 	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-std::string Lower(std::string s)
-{
-	for (char& c : s)
-		c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-	return s;
-}
-
-std::string Trim(const std::string& s)
-{
-	size_t b = 0, e = s.size();
-	while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n'))
-		b++;
-	while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n'))
-		e--;
-	return s.substr(b, e - b);
 }
 
 int HexValue(char c)
@@ -121,184 +109,6 @@ std::string Json(const std::string& s)
 	return out + "\"";
 }
 
-bool ReadFile(const std::string& path, std::string& out)
-{
-	FILE* f = std::fopen(path.c_str(), "rb");
-	if (!f)
-		return false;
-	out.clear();
-	char buf[4096]; // small: this runs on the server thread's stack
-	size_t n;
-	while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
-		out.append(buf, n);
-	std::fclose(f);
-	return true;
-}
-
-// Written beside, then renamed over: the GS thread polls these files and must never read half of one.
-bool WriteFileAtomic(const std::string& path, const std::string& data)
-{
-	const std::string tmp = path + ".tmp";
-	FILE* f = std::fopen(tmp.c_str(), "wb");
-	if (!f)
-		return false;
-	const bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
-	if (std::fclose(f) != 0 || !ok)
-	{
-		unlink(tmp.c_str());
-		return false;
-	}
-	if (std::rename(tmp.c_str(), path.c_str()) != 0)
-	{
-		unlink(tmp.c_str());
-		return false;
-	}
-	return true;
-}
-
-bool Exists(const std::string& path)
-{
-	struct stat st = {};
-	return stat(path.c_str(), &st) == 0;
-}
-
-// ---- settings files --------------------------------------------------------------------------
-// The port's ini lines are "key=value": a bare key is in EmuCore/GS, others carry their section
-// ("EmuCore/Speedhacks/EECycleRate"). Patches/Enable lines repeat, one group name each
-// (main-boot.cpp orbis_apply_ini_file).
-
-struct IniLine
-{
-	std::string raw;
-	std::string key; // canonical: EmuCore/GS/ dropped
-	std::string value;
-	bool kv = false;
-};
-
-std::string CanonKey(std::string key)
-{
-	key = Trim(key);
-	if (key.compare(0, 11, "EmuCore/GS/") == 0)
-		key.erase(0, 11);
-	return key;
-}
-
-std::vector<IniLine> ParseIni(const std::string& text)
-{
-	std::vector<IniLine> lines;
-	size_t pos = 0;
-	while (pos < text.size())
-	{
-		size_t nl = text.find('\n', pos);
-		if (nl == std::string::npos)
-			nl = text.size();
-		IniLine l;
-		l.raw = text.substr(pos, nl - pos);
-		if (!l.raw.empty() && l.raw.back() == '\r')
-			l.raw.pop_back();
-		const std::string t = Trim(l.raw);
-		const size_t eq = t.find('=');
-		if (!t.empty() && t[0] != '#' && t[0] != ';' && eq != std::string::npos)
-		{
-			l.kv = true;
-			l.key = CanonKey(t.substr(0, eq));
-			l.value = Trim(t.substr(eq + 1));
-		}
-		lines.push_back(std::move(l));
-		pos = nl + 1;
-	}
-	return lines;
-}
-
-bool IsListKey(const std::string& key)
-{
-	return key == "Patches/Enable" || key == "Patches/Disable" || key == "Cheats/Enable" || key == "Cheats/Disable";
-}
-
-bool SafeKey(const std::string& key)
-{
-	if (key.empty() || key.size() > 80 || IsListKey(key))
-		return false;
-	for (char c : key)
-		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '/'))
-			return false;
-	return true;
-}
-
-bool SafeValue(const std::string& v)
-{
-	if (v.size() > 200)
-		return false;
-	for (char c : v)
-		if (c == '\n' || c == '\r' || c == '#')
-			return false;
-	return true;
-}
-
-// ---- memory cards (vk-285-113) ---------------------------------------------------------------
-// The page lists the cards PCSX2 offers from memcards/ (its own rule: a file ending .ps2, .mcr, .mcd, .bin or .mc2 that is
-// at least a PS1 card's size) and makes new blank PS2 cards of 8, 16, 32 or 64 MB the way the core's FileMcd_CreateNewCard
-// does: a file of 0xFF bytes, a card's raw size with its ECC bytes (1024 * 528 * 2 a MB). Which card sits in a slot is an
-// ordinary setting (MemoryCards/Slot1_Filename), for all games or one.
-constexpr uint64_t kCardMb = 1024ull * 528 * 2;
-constexpr uint64_t kPs1CardBytes = 1024ull * 8 * 16;
-
-struct CardFile
-{
-	std::string name;
-	uint64_t bytes = 0;
-};
-
-bool HasCardExtension(const std::string& name)
-{
-	for (const char* ext : {".ps2", ".mcr", ".mcd", ".bin", ".mc2"})
-	{
-		const size_t n = std::strlen(ext);
-		if (name.size() > n && name.compare(name.size() - n, n, ext) == 0)
-			return true;
-	}
-	return false;
-}
-
-// A name the page makes: letters, digits, space, '_', '-', '.', '(' and ')', starting with a letter or digit, ending in
-// ".ps2" after at least one character that is not a space or a dot, 64 characters at most.
-bool NewCardNameOk(const std::string& name)
-{
-	if (name.size() < 5 || name.size() > 64 || name.compare(name.size() - 4, 4, ".ps2") != 0)
-		return false;
-	for (char c : name)
-		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-' ||
-				c == '.' || c == '(' || c == ')'))
-			return false;
-	const char first = name[0], last = name[name.size() - 5];
-	return ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) && last != ' ' && last != '.';
-}
-
-std::vector<CardFile> ListCards(const std::string& dir)
-{
-	std::vector<CardFile> out;
-	DIR* d = dir.empty() ? nullptr : opendir(dir.c_str());
-	if (!d)
-		return out;
-	while (dirent* e = readdir(d))
-	{
-		const std::string name = e->d_name;
-		// Names the settings file can hold (no '#', no line breaks) and the page can show.
-		if (name.empty() || name[0] == '.' || !HasCardExtension(name) || !SafeValue(name))
-			continue;
-		struct stat st = {};
-		if (stat((dir + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode) || static_cast<uint64_t>(st.st_size) < kPs1CardBytes)
-			continue;
-		out.push_back({name, static_cast<uint64_t>(st.st_size)});
-	}
-	closedir(d);
-	std::sort(out.begin(), out.end(), [](const CardFile& a, const CardFile& b) {
-		const std::string la = Lower(a.name), lb = Lower(b.name);
-		return la != lb ? la < lb : a.name < b.name;
-	});
-	return out;
-}
-
 std::string CardsJson(const std::string& dir, const std::string& created)
 {
 	std::string out = "{\"cards\":[";
@@ -314,97 +124,10 @@ std::string CardsJson(const std::string& dir, const std::string& created)
 	return out + "}";
 }
 
-// The groups ("[60 FPS]") of the game's patch files, <serial>_<crc>.pnach.
-struct PatchGroup
-{
-	std::string name, file, description;
-};
-
-std::vector<PatchGroup> PatchGroups(const std::string& dir, const std::string& serial)
-{
-	std::vector<PatchGroup> out;
-	if (serial.empty())
-		return out;
-	DIR* d = opendir(dir.c_str());
-	if (!d)
-		return out;
-	const std::string prefix = Lower(serial) + "_";
-	std::vector<std::string> files;
-	while (dirent* e = readdir(d))
-	{
-		const std::string name = e->d_name, low = Lower(name);
-		if (low.compare(0, prefix.size(), prefix) == 0 && low.size() > 6 && low.compare(low.size() - 6, 6, ".pnach") == 0)
-			files.push_back(name);
-	}
-	closedir(d);
-	std::sort(files.begin(), files.end());
-	for (const std::string& file : files)
-	{
-		std::string text;
-		if (!ReadFile(dir + "/" + file, text))
-			continue;
-		PatchGroup* current = nullptr;
-		for (const IniLine& l : ParseIni(text))
-		{
-			const std::string t = Trim(l.raw);
-			if (t.size() > 2 && t.front() == '[' && t.back() == ']')
-			{
-				const std::string name = Trim(t.substr(1, t.size() - 2));
-				current = nullptr;
-				if (name.empty())
-					continue;
-				auto it = std::find_if(out.begin(), out.end(), [&](const PatchGroup& g) { return g.name == name; });
-				if (it == out.end())
-				{
-					out.push_back({name, file, {}});
-					current = &out.back();
-				}
-			}
-			else if (current && l.kv && Lower(l.key) == "description" && current->description.empty())
-				current->description = l.value;
-		}
-	}
-	return out;
-}
-
 // The cover the shelf shows first (vk-285-110: CoverFinder, which also looks on the game's USB drive).
 std::string CoverPath(CoverFinder& finder, const GameInfo& g)
 {
 	return finder.Best(g).path;
-}
-
-// ---- recommended settings (vk-285-51) -------------------------------------------------------
-
-// What a settings text sets, as the port's reader applies it: a key set twice counts with its last
-// line; Patches/Enable lines add up.
-struct IniState
-{
-	std::vector<std::pair<std::string, std::string>> kv;
-	std::vector<std::string> enabled;
-};
-
-IniState ReadState(const std::string& text)
-{
-	IniState st;
-	for (const IniLine& l : ParseIni(text))
-	{
-		if (!l.kv)
-			continue;
-		if (l.key == "Patches/Enable")
-		{
-			if (std::find(st.enabled.begin(), st.enabled.end(), l.value) == st.enabled.end())
-				st.enabled.push_back(l.value);
-			continue;
-		}
-		if (IsListKey(l.key))
-			continue;
-		auto it = std::find_if(st.kv.begin(), st.kv.end(), [&](const std::pair<std::string, std::string>& p) { return p.first == l.key; });
-		if (it != st.kv.end())
-			it->second = l.value;
-		else
-			st.kv.emplace_back(l.key, l.value);
-	}
-	return st;
 }
 
 std::string KvJson(const IniState& st)
@@ -421,95 +144,6 @@ std::string ListJson(const std::vector<std::string>& v)
 	for (const std::string& s : v)
 		out += (out.size() > 1 ? "," : "") + Json(s);
 	return out + "]";
-}
-
-// vk-285-110: PS5SX2/ keys (the game language) are the player's own choices, not tuning: the Recommended
-// button keeps them, and they don't stop a file from counting as the recommended one. (vk-285-113: so are the
-// MemoryCards/ keys, the cards in the slots.)
-bool IsPlayerKey(const std::string& key)
-{
-	return key.compare(0, 7, "PS5SX2/") == 0 || key.compare(0, 12, "MemoryCards/") == 0; // vk-285-113: the cards in the slots too
-}
-
-bool SameState(IniState a, IniState b)
-{
-	for (IniState* st : {&a, &b})
-		st->kv.erase(std::remove_if(st->kv.begin(), st->kv.end(),
-						 [](const std::pair<std::string, std::string>& p) { return IsPlayerKey(p.first); }),
-			st->kv.end());
-	std::sort(a.kv.begin(), a.kv.end());
-	std::sort(b.kv.begin(), b.kv.end());
-	std::sort(a.enabled.begin(), a.enabled.end());
-	std::sort(b.enabled.begin(), b.enabled.end());
-	return a.kv == b.kv && a.enabled == b.enabled;
-}
-
-// "key=value (was old)"-style notes for the settings log: what `after` sets differently from
-// `before`, joined with "; ".
-std::string DescribeChanges(const IniState& before, const IniState& after)
-{
-	std::string out;
-	auto add = [&](const std::string& s) { out += (out.empty() ? "" : "; ") + s; };
-	auto find = [](const IniState& st, const std::string& k) -> const std::string* {
-		for (const auto& p : st.kv)
-			if (p.first == k)
-				return &p.second;
-		return nullptr;
-	};
-	for (const auto& p : after.kv)
-	{
-		const std::string* was = find(before, p.first);
-		if (!was)
-			add(p.first + "=" + p.second + " (was unset)");
-		else if (*was != p.second)
-			add(p.first + "=" + p.second + " (was " + *was + ")");
-	}
-	for (const auto& p : before.kv)
-		if (!find(after, p.first))
-			add("unset " + p.first + " (was " + p.second + ")");
-	for (const std::string& e : after.enabled)
-		if (std::find(before.enabled.begin(), before.enabled.end(), e) == before.enabled.end())
-			add("patch on: " + e);
-	for (const std::string& e : before.enabled)
-		if (std::find(after.enabled.begin(), after.enabled.end(), e) == after.enabled.end())
-			add("patch off: " + e);
-	return out;
-}
-
-// One section of presets.ini ("[@global]", "[SLUS-20733]"): its lines as they are, comments
-// included. False when there is none.
-bool PresetSection(const std::string& presets, const std::string& id, std::string& out)
-{
-	out.clear();
-	if (id.empty())
-		return false;
-	bool found = false, in = false;
-	size_t pos = 0;
-	while (pos < presets.size())
-	{
-		size_t nl = presets.find('\n', pos);
-		if (nl == std::string::npos)
-			nl = presets.size();
-		std::string line = presets.substr(pos, nl - pos);
-		pos = nl + 1;
-		if (!line.empty() && line.back() == '\r')
-			line.pop_back();
-		const std::string t = Trim(line);
-		if (t.size() > 2 && t.front() == '[' && t.back() == ']')
-		{
-			in = Lower(Trim(t.substr(1, t.size() - 2))) == Lower(id);
-			found = found || in;
-			continue;
-		}
-		if (in)
-			out += line + "\n";
-	}
-	// The blank lines between sections are not part of either.
-	while (out.size() >= 2 && out[out.size() - 1] == '\n' && out[out.size() - 2] == '\n')
-		out.pop_back();
-	if (out == "\n")
-		out.clear();
-	return found;
 }
 
 std::string Stamp()

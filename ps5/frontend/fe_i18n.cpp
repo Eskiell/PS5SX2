@@ -38,6 +38,13 @@ const char* const kKeys[kCount] = {
 	"notify.not_started",
 	"notify.menu_failed",
 	"notify.stopped",
+	"hint.settings",
+	"hint.move",
+	"hint.change",
+	"hint.reset",
+	"hint.back",
+	"sheet.this_game",
+	"sheet.all_games",
 };
 
 const char* const kEnglish[kCount] = {
@@ -61,6 +68,13 @@ const char* const kEnglish[kCount] = {
 	"PS5SX2: the game didn't start.\n%s",
 	"PS5SX2: couldn't open the menu, back to the game",
 	"PS5SX2: the game stopped",
+	"Settings",
+	"Move",
+	"Change",
+	"Reset",
+	"Back",
+	"This game",
+	"All games",
 };
 
 const char* const kSpanish[kCount] = {
@@ -84,6 +98,13 @@ const char* const kSpanish[kCount] = {
 	"PS5SX2: el juego no se ha iniciado.\n%s",
 	"PS5SX2: no se ha podido abrir el menú; vuelves al juego",
 	"PS5SX2: el juego se ha detenido",
+	"Ajustes",
+	"Mover",
+	"Cambiar",
+	"Restablecer",
+	"Atrás",
+	"Este juego",
+	"Todos los juegos",
 };
 
 const char* const kSpanishLatAm[kCount] = {
@@ -107,6 +128,13 @@ const char* const kSpanishLatAm[kCount] = {
 	"PS5SX2: el juego no se inició.\n%s",
 	"PS5SX2: no se pudo abrir el menú; vuelves al juego",
 	"PS5SX2: el juego se detuvo",
+	"Ajustes",
+	"Mover",
+	"Cambiar",
+	"Restablecer",
+	"Atrás",
+	"Este juego",
+	"Todos los juegos",
 };
 
 const char* const kFrench[kCount] = {
@@ -130,6 +158,13 @@ const char* const kFrench[kCount] = {
 	"PS5SX2 : le jeu n'a pas démarré.\n%s",
 	"PS5SX2 : impossible d'ouvrir le menu, retour au jeu",
 	"PS5SX2 : le jeu s'est arrêté",
+	"Réglages",
+	"Déplacer",
+	"Modifier",
+	"Réinitialiser",
+	"Retour",
+	"Ce jeu",
+	"Tous les jeux",
 };
 
 const char* const kGerman[kCount] = {
@@ -153,6 +188,13 @@ const char* const kGerman[kCount] = {
 	"PS5SX2: Das Spiel ist nicht gestartet.\n%s",
 	"PS5SX2: Das Menü konnte nicht geöffnet werden, zurück zum Spiel",
 	"PS5SX2: Das Spiel wurde beendet",
+	"Einstellungen",
+	"Bewegen",
+	"Ändern",
+	"Zurücksetzen",
+	"Zurück",
+	"Dieses Spiel",
+	"Alle Spiele",
 };
 
 const char* const kItalian[kCount] = {
@@ -176,6 +218,13 @@ const char* const kItalian[kCount] = {
 	"PS5SX2: il gioco non si è avviato.\n%s",
 	"PS5SX2: impossibile aprire il menu, si torna al gioco",
 	"PS5SX2: il gioco si è fermato",
+	"Impostazioni",
+	"Sposta",
+	"Cambia",
+	"Ripristina",
+	"Indietro",
+	"Questo gioco",
+	"Tutti i giochi",
 };
 
 const char* const kDutch[kCount] = {
@@ -199,6 +248,13 @@ const char* const kDutch[kCount] = {
 	"PS5SX2: de game is niet gestart.\n%s",
 	"PS5SX2: het menu kon niet worden geopend, terug naar de game",
 	"PS5SX2: de game is gestopt",
+	"Instellingen",
+	"Verplaatsen",
+	"Wijzigen",
+	"Herstellen",
+	"Terug",
+	"Dit spel",
+	"Alle spellen",
 };
 
 const char* const kPortuguese[kCount] = {
@@ -222,6 +278,13 @@ const char* const kPortuguese[kCount] = {
 	"PS5SX2: o jogo não arrancou.\n%s",
 	"PS5SX2: não foi possível abrir o menu, de volta ao jogo",
 	"PS5SX2: o jogo parou",
+	"Definições",
+	"Mover",
+	"Alterar",
+	"Repor",
+	"Voltar",
+	"Este jogo",
+	"Todos os jogos",
 };
 
 const char* const kPortugueseBrazil[kCount] = {
@@ -245,6 +308,13 @@ const char* const kPortugueseBrazil[kCount] = {
 	"PS5SX2: o jogo não iniciou.\n%s",
 	"PS5SX2: não foi possível abrir o menu, voltando ao jogo",
 	"PS5SX2: o jogo parou",
+	"Configurações",
+	"Mover",
+	"Alterar",
+	"Redefinir",
+	"Voltar",
+	"Este jogo",
+	"Todos os jogos",
 };
 
 // The region names fe_games.cpp takes from a file name's first group (kRegions there), in its order.

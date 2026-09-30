@@ -113,6 +113,7 @@ constexpr const char* Square = "\xE2\x87\xA0";
 constexpr const char* L1 = "\xE2\x86\xB0";
 constexpr const char* R1 = "\xE2\x86\xB1";
 constexpr const char* DpadLeftRight = "\xE2\x86\xA2";
+constexpr const char* DpadUpDown = "\xE2\x86\xA3"; // vk-285-114: the options sheet's hints
 constexpr const char* Options = "\xE2\x88\x88";
 // Font Awesome Free 7 brands (SIL OFL 1.1; the icons CC BY 4.0), present when Init got the font.
 constexpr const char* Discord = "\xEF\x8E\x92";   // U+F392

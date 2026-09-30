@@ -197,6 +197,8 @@ struct PadData
 };
 constexpr uint32_t kPadRight = 0x20, kPadLeft = 0x80, kPadCross = 0x4000, kPadOptions = 0x8, kPadL1 = 0x400,
 				   kPadR1 = 0x800;
+// vk-285-114: the options sheet's buttons.
+constexpr uint32_t kPadUp = 0x10, kPadDown = 0x40, kPadTriangle = 0x1000, kPadCircle = 0x2000, kPadSquare = 0x8000;
 
 double Now()
 {
@@ -1232,6 +1234,20 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 	acfg.test_note = paths.test_note; // vk-285-105
 	acfg.preselect = preselect;
 	acfg.sound = mixer;
+	// vk-285-114: the options sheet (Square) edits the files the settings page does, and logs as it does.
+	acfg.options.settings_dir = paths.settings_dir;
+	acfg.options.gs_ini = paths.gs_ini;
+	acfg.options.patches_dir = paths.patches_dir;
+	acfg.options.memcards_dir = paths.memcards_dir;
+	acfg.options.presets.assign(reinterpret_cast<const char*>(fe_presets), static_cast<size_t>(fe_presets_end - fe_presets));
+	{
+		const std::string log_path = paths.settings_log;
+		acfg.options.log = [log_path](const std::string& line) { AppendSettingsLog(log_path, line); };
+	}
+	acfg.refresh_game = [paths](GameInfo& g) {
+		g.badges.clear();
+		ReadBadges(g, paths.settings_dir, paths.gs_ini, paths.patches_dir);
+	};
 	bool ok = app.Init(&renderer, fonts, games, covers, acfg);
 	std::printf("[frontend] up in %.0f ms (%s)\n", (Now() - t0) * 1000.0, ok ? "ok" : renderer.error().c_str());
 	std::fflush(stdout);
@@ -1270,6 +1286,11 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 			in.options = pd.buttons & kPadOptions;
 			in.l1 = pd.buttons & kPadL1;
 			in.r1 = pd.buttons & kPadR1;
+			in.up = (pd.buttons & kPadUp) || pd.ly < 48; // vk-285-114
+			in.down = (pd.buttons & kPadDown) || pd.ly > 208;
+			in.square = pd.buttons & kPadSquare;
+			in.triangle = pd.buttons & kPadTriangle;
+			in.circle = pd.buttons & kPadCircle;
 		}
 		app.Update(dt, in);
 		app.Build(frame, Clock());
