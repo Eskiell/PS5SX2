@@ -272,6 +272,12 @@ CFLAGS := -O3 -DNDEBUG -march=znver2 -msse4.1 -mavx2 -mno-vzeroupper $(NARROW_FL
   -include string.h -include stdlib.h \
   -I$(PCSX2)/3rdparty/rcheevos/include -I$(PCSX2)/3rdparty/demangler/include
 
+# vk-285-114: header dependencies (obj-vk/*.d). Without them an object whose own source didn't change kept an older
+# header's layout: 1.50's VKShaderCache.o and VKSwapChain.o still saw GSDeviceVK without vk-285-113's
+# m_orbis_submit_draws, so they read its fields 8 bytes off (a clean build of the same commit shows it).
+CXXFLAGS += -MMD -MP
+CFLAGS += -MMD -MP
+
 # vk-285-108: CHD images (.chd). PCSX2's ChdFileReader (CDVD_SRCS) reads them through libchdr, whose codecs
 # need 3rdparty/lzma's LZMA decoder and zlib and zstd; the SDK has neither of those two, so their
 # decompression sources are vendored in ps5/third_party (see its README.md). The frontend reads a CHD's
@@ -314,7 +320,7 @@ SHIM_ASM := ./orbis-shims/ProsperoTLS.S
 FE_DIR := ../frontend
 FE_SRCS := $(FE_DIR)/fe_app.cpp $(FE_DIR)/fe_covers.cpp $(FE_DIR)/fe_games.cpp \
   $(FE_DIR)/fe_renderer.cpp $(FE_DIR)/fe_sound.cpp $(FE_DIR)/fe_text.cpp $(FE_DIR)/fe_vk.cpp $(FE_DIR)/fe_ps5.cpp \
-  $(FE_DIR)/fe_web.cpp $(FE_DIR)/fe_i18n.cpp
+  $(FE_DIR)/fe_web.cpp $(FE_DIR)/fe_i18n.cpp $(FE_DIR)/fe_settings.cpp $(FE_DIR)/fe_options.cpp
 # vk-285-50: Project Nayuki's QR Code generator (MIT, C) for the shelf's QR tile, and the files
 # fe_ps5.cpp embeds from frontend/assets (the settings page, its icons, Font Awesome's brands font).
 FE_CSRCS := $(FE_DIR)/third_party/qrcodegen/qrcodegen.c
@@ -408,8 +414,9 @@ $(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(CHD_CSRCS)): CFLAGS += $(CHD_INCLUDES) -
 $(OBJDIR)/pcsx2/CDVD/ChdFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -I$(PCSX2)/3rdparty/libchdr/include
 $(OBJDIR)/pcsx2/CDVD/CsoFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += $(CSO_INCLUDES)
 # vk-285-113: the settings page's server thread runs fe_web.cpp's handlers and fe_games.cpp's scans; a 64 KB array in
-# one of them ended the app the first time the page opened. Warn about any frame over 12 KB in the two files.
-$(OBJDIR)/frontend/fe_web.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += -Wframe-larger-than=12288
+# one of them ended the app the first time the page opened. Warn about any frame over 12 KB in them (vk-285-114: and in
+# fe_settings.cpp, the page's file code the options sheet shares).
+$(OBJDIR)/frontend/fe_web.o $(OBJDIR)/frontend/fe_games.o $(OBJDIR)/frontend/fe_settings.o: CXXFLAGS += -Wframe-larger-than=12288
 
 all: $(OBJS)
 	@echo "VK COMPILE OK: $(words $(OBJS)) objects"
@@ -470,6 +477,8 @@ $(OBJDIR)/frontend/%.o: $(FE_DIR)/%.c
 $(OBJDIR)/%.o: $(PCSX2)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+-include $(OBJS:.o=.d)
 
 clean:
 	rm -rf $(OBJDIR) objects.txt

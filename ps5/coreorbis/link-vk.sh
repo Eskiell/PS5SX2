@@ -62,7 +62,22 @@ src_rev() {
   fi
   echo "$rev"
 }
-DRIVER_REV=$(src_rev "$VK")
+# vk-285-114: PS5_VULKAN_DIR may also be one of the driver's release folders (PS5HB_Vulkan's
+# ps5vk-<tag>.zip: lib/*.a, lib/mesa-util/*.o and a README naming the commit), to link against
+# the exact driver a release shipped without building it. Such a folder has no git: its commit
+# is the README's, or PS5_DRIVER_REV (the ten-digit form boot.log printed, e.g. 6a20943cc0).
+VK_RELEASE=0
+if [[ -f $VK/lib/libps5vk.ps5.a && ! -d $VK/.git ]]; then
+  VK_RELEASE=1
+  DRIVER_REV=${PS5_DRIVER_REV:-$(sed -n 's/.*built from this repository at `\([0-9a-f]\{7,40\}\)`.*/\1/p' "$VK/README.md" 2>/dev/null | head -n 1)}
+  DRIVER_REV=${DRIVER_REV:-unknown}
+  if [[ -f $VK/SHA256SUMS ]] && ! (cd "$VK" && sha256sum --quiet -c SHA256SUMS); then
+    echo "[link-vk] error: $VK does not match its SHA256SUMS" >&2; exit 1
+  fi
+  echo "[link-vk] driver: release folder $VK (commit $DRIVER_REV)"
+else
+  DRIVER_REV=$(src_rev "$VK")
+fi
 PCSX2_REV=$(src_rev "$PCSX2")
 echo "[link-vk] sources: driver $DRIVER_REV, pcsx2 $PCSX2_REV"
 
@@ -104,18 +119,38 @@ done < "$here/objects.txt"
 echo "[link-vk] $(wc -l < "$here/objects.txt") port objects"
 
 # 3. The driver: the archive copy with the renamed entry point, the other three as built.
-cp "$VK/build/driver/ps5/libps5vk.ps5.a" "$OUT/driver/libps5vk.ps5.a"
+if [[ $VK_RELEASE == 1 ]]; then
+  VK_LIB_PS5VK="$VK/lib/libps5vk.ps5.a"
+  VK_LIB_RUNTIME="$VK/lib/libvk_runtime.ps5.a"
+  VK_LIB_PSBC_DRIVER="$VK/lib/libpsbc_driver.ps5.a"
+  VK_LIB_PSBC_SUPPORT="$VK/lib/libpsbc_support.ps5.a"
+else
+  VK_LIB_PS5VK="$VK/build/driver/ps5/libps5vk.ps5.a"
+  VK_LIB_RUNTIME="$VK/.deps/native/vulkan-runtime/lib/libvk_runtime.ps5.a"
+  VK_LIB_PSBC_DRIVER="$VK/build/driver/ps5/libpsbc_driver.ps5.a"
+  VK_LIB_PSBC_SUPPORT="$VK/.deps/native/psbc/lib/libpsbc_support.ps5.a"
+fi
+cp "$VK_LIB_PS5VK" "$OUT/driver/libps5vk.ps5.a"
 "$OBJCOPY" --redefine-sym vkGetInstanceProcAddr=ps5vk_driver_vkGetInstanceProcAddr "$OUT/driver/libps5vk.ps5.a"
 if "$NM" "$OUT/driver/libps5vk.ps5.a" 2>/dev/null | grep -qE " [A-Za-z] vkGetInstanceProcAddr$"; then
   echo "[link-vk] error: the driver archive still names vkGetInstanceProcAddr" >&2; exit 1
 fi
 VK_ARCHIVES=(
   "$OUT/driver/libps5vk.ps5.a"
-  "$VK/.deps/native/vulkan-runtime/lib/libvk_runtime.ps5.a"
-  "$VK/build/driver/ps5/libpsbc_driver.ps5.a"
-  "$VK/.deps/native/psbc/lib/libpsbc_support.ps5.a"
+  "$VK_LIB_RUNTIME"
+  "$VK_LIB_PSBC_DRIVER"
+  "$VK_LIB_PSBC_SUPPORT"
 )
-mapfile -t MESA_UTIL < <(PS5_VULKAN_DIR="$VK" bash "$port/tools/build-mesa-util.sh" "$OUT/mesa-util" "$SDK")
+if [[ $VK_RELEASE == 1 ]]; then
+  # The release carries the three objects build-mesa-util.sh makes (it needs the driver's sources),
+  # listed in that script's order, so the link lays them out the same way.
+  MESA_UTIL=("$VK/lib/mesa-util/u_thread.o" "$VK/lib/mesa-util/anon_file.o" "$VK/lib/mesa-util/os_file.o")
+  for o in "${MESA_UTIL[@]}"; do
+    [[ -f $o ]] || { echo "[link-vk] error: $o is missing" >&2; exit 1; }
+  done
+else
+  mapfile -t MESA_UTIL < <(PS5_VULKAN_DIR="$VK" bash "$port/tools/build-mesa-util.sh" "$OUT/mesa-util" "$SDK")
+fi
 GLSLANG_LIBS=(
   "$GLSLANG/glslang/libglslang.a"
   "$GLSLANG/glslang/libglslang-default-resource-limits.a"
