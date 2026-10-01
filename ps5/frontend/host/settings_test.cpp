@@ -206,8 +206,9 @@ int RunWeb(const std::string& data, const std::string& presets)
 	call("POST", "/api/settings?id=@global", "set upscale_multiplier=3\nset TVShader=5\n");
 	call("POST", god, "recommended");
 	call("POST", sample, "set PS5SX2/GameLanguage=2\nset filter=1\n");
-	// vk-285-116: the Controls tab's settings (the remapping, the save state buttons).
-	call("POST", sample, "set PS5SX2/ButtonCross=Circle\nset PS5SX2/ButtonCircle=Cross\nset PS5SX2/StateButtons=3\nset PS5SX2/SwapSticks=true\n");
+	// vk-285-116: the Controls tab's settings (the remapping, vk-285-117: the save combo and its hold time).
+	call("POST", sample, "set PS5SX2/ButtonCross=Circle\nset PS5SX2/ButtonCircle=Cross\nset PS5SX2/SaveButton1=Touchpad\nset PS5SX2/StateHold=1.5\n"
+		"set PS5SX2/SwapSticks=true\n");
 	call("POST", sample, "recommended");
 	call("POST", "/api/memcards", "create 16 My Card");
 	call("GET", "/api/memcards", "");
@@ -239,9 +240,9 @@ int RunSheet(const std::string& data, const std::string& presets)
 	ok &= ApplyRecommended(god, presets, "SCUS-97399", "# God of War (SCUS-97399)", what, error);
 	ok &= EditSettingsFile(sample, hs, {{Change::Set, "PS5SX2/GameLanguage", "2"}, {Change::Set, "filter", "1"}}, what, error);
 	ok &= EditSettingsFile(sample, hs,
-		{{Change::Set, "PS5SX2/ButtonCross", "Circle"}, {Change::Set, "PS5SX2/ButtonCircle", "Cross"}, {Change::Set, "PS5SX2/StateButtons", "3"},
-			{Change::Set, "PS5SX2/SwapSticks", "true"}},
-		what, error); // vk-285-116
+		{{Change::Set, "PS5SX2/ButtonCross", "Circle"}, {Change::Set, "PS5SX2/ButtonCircle", "Cross"}, {Change::Set, "PS5SX2/SaveButton1", "Touchpad"},
+			{Change::Set, "PS5SX2/StateHold", "1.5"}, {Change::Set, "PS5SX2/SwapSticks", "true"}},
+		what, error); // vk-285-116, vk-285-117
 	ok &= ApplyRecommended(sample, presets, "SLES-12345", "# Sample Game (SLES-12345)", what, error);
 	ok &= CreateCard(data + "/memcards", 16, "My Card.ps2", made, error);
 	ok &= ApplyRecommended(data + "/gs.ini", presets, "@global", "# All games", what, error);

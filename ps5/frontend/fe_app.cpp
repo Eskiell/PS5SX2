@@ -724,7 +724,7 @@ constexpr float kSymbolScale = 1.35f, kSymbolDrop = 0.12f;
 
 // The sheet's measures, in 2160-line pixels (scaled by k when drawn).
 constexpr float kSheetW = 1260.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f;
-constexpr float kSheetListTop = 352.0f;  // from the sheet's top
+constexpr float kSheetListTop = 290.0f;  // from the sheet's top (vk-285-117: the top is one line shorter)
 constexpr float kSheetHelpH = 352.0f;    // the help box at the bottom
 constexpr float kRowH = 94.0f, kHeaderH = 76.0f;
 } // namespace
@@ -932,61 +932,75 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 	Fonts::AddRoundedRect(ui, x, y, sw, sh, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f)); // the shelf's text must not show through
 
 	const float cx = x + 64 * k, inner = sw - 128 * k;
-	// vk-285-116: the tabs, where the sheet's name was ("GAME SETTINGS"): L2 the settings, R2 the controls. The one shown is
-	// white and underlined in the cover's colour.
+	// vk-285-117 (AI-assisted): a calmer top (Spyros: "a little cluttered"): the title alone on the first line; under it this
+	// game / all games (L1 / R1) on the left and the Settings / Controls tabs (L2 / R2) on the right, the shown tab white and
+	// underlined in the cover's colour. The file's name is gone (the settings page shows it). A long translation shrinks
+	// the line (to three quarters) rather than overlapping.
 	{
-		const float ty = y + 92 * k, tpx = 40 * k;
-		float tx = cx;
-		auto key_pill = [&](const char* name) {
-			const float kpx = 26 * k, kw = m_fonts->Measure(name, kpx) + 22 * k, kh = 40 * k;
-			Fonts::AddRoundedRect(ui, tx, ty - 33 * k, kw, kh, 11 * k, Rgba(1, 1, 1, 0.82f));
-			m_fonts->AddText(ui, name, tx + kw * 0.5f, ty - 4 * k, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
-			tx += kw;
-		};
-		auto tab = [&](const char* label, bool on) {
-			const float w = m_fonts->Measure(label, tpx);
-			m_fonts->AddText(ui, label, tx, ty, tpx, on ? hi : lo, on ? 0.5f : 0.3f);
-			if (on)
-				Fonts::AddRoundedRect(ui, tx, ty + 17 * k, w, 6 * k, 3 * k, accent);
-			tx += w;
-		};
-		key_pill("L2");
-		tx += 26 * k;
-		tab(Tr(Str::HintSettings), m_sheet.tab() == kTabSettings);
-		tx += 48 * k;
-		tab(Tr(Str::SheetControls), m_sheet.tab() == kTabControls);
-		tx += 26 * k;
-		key_pill("R2");
-	}
-	{
-		float px = 56 * k;
+		float px = 52 * k;
 		const std::string& t = m_sheet.title();
 		while (px > 40 * k && m_fonts->Measure(t.c_str(), px) > inner)
 			px -= 2 * k;
-		m_fonts->AddText(ui, Fit(*m_fonts, t, px, inner).c_str(), cx, y + 158 * k, px, hi, 0.55f);
+		m_fonts->AddText(ui, Fit(*m_fonts, t, px, inner).c_str(), cx, y + 118 * k, px, hi, 0.55f);
 	}
-
-	// This game / All games.
 	{
-		const float py = y + 204 * k, ph = 64 * k, ppx = 32 * k;
+		const float py = y + 166 * k, ph = 60 * k;
+		const bool controls = m_sheet.tab() == kTabControls;
+		const char* const this_label = Tr(Str::SheetThisGame);
+		const char* const all_label = Tr(Str::SheetAllGames);
+		const char* const settings_label = Tr(Str::HintSettings);
+		const char* const controls_label = Tr(Str::SheetControls);
+		float f = 1.0f, pills_w = 0, tabs_w = 0;
+		auto widths = [&]() {
+			const float ppx = 30 * k * f, tpx = 34 * k * f, kpx = 24 * k * f;
+			pills_w = m_fonts->Measure(this_label, ppx) + m_fonts->Measure(all_label, ppx) + 2 * 50 * k * f + 14 * k * f;
+			tabs_w = m_fonts->Measure("L2", kpx) + m_fonts->Measure("R2", kpx) + 2 * 20 * k * f + 2 * 22 * k * f + 40 * k * f +
+			         m_fonts->Measure(settings_label, tpx) + m_fonts->Measure(controls_label, tpx);
+		};
+		widths();
+		while (f > 0.76f && pills_w + tabs_w + 40 * k > inner)
+		{
+			f -= 0.05f;
+			widths();
+		}
+		const float ppx = 30 * k * f, pad = 50 * k * f, tpx = 34 * k * f, kpx = 24 * k * f;
 		float px = cx;
 		auto pill = [&](const char* label, bool on, bool enabled) {
-			const float w = m_fonts->Measure(label, ppx) + 56 * k;
+			const float w = m_fonts->Measure(label, ppx) + pad;
 			if (on)
 				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, 0.92f));
 			else
 				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, enabled ? 0.10f : 0.04f));
-			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo), 0.5f,
-				Fonts::Center);
-			px += w + 16 * k;
+			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k * f, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo),
+				0.5f, Fonts::Center);
+			px += w + 14 * k * f;
 		};
-		pill(Tr(Str::SheetThisGame), !m_sheet_global, !m_games.empty());
-		pill(Tr(Str::SheetAllGames), m_sheet_global, true);
-		// Which file, small, after the pills.
-		m_fonts->AddText(ui, Fit(*m_fonts, m_sheet.file_label(), 26 * k, x + sw - 64 * k - px).c_str(), x + sw - 64 * k, py + ph * 0.5f + 9 * k,
-			26 * k, lo, 0.1f, Fonts::Right);
+		pill(this_label, !m_sheet_global, !m_games.empty());
+		pill(all_label, m_sheet_global, true);
+		const float base = py + ph * 0.5f + 12 * k * f;
+		float tx = x + sw - 64 * k - tabs_w;
+		auto key_pill = [&](const char* name) {
+			const float kw = m_fonts->Measure(name, kpx) + 20 * k * f, kh = 38 * k * f;
+			Fonts::AddRoundedRect(ui, tx, py + (ph - kh) * 0.5f, kw, kh, 10 * k * f, Rgba(1, 1, 1, 0.82f));
+			m_fonts->AddText(ui, name, tx + kw * 0.5f, py + ph * 0.5f + 9 * k * f, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
+			tx += kw;
+		};
+		auto tab = [&](const char* label, bool on) {
+			const float w = m_fonts->Measure(label, tpx);
+			m_fonts->AddText(ui, label, tx, base, tpx, on ? hi : lo, on ? 0.5f : 0.3f);
+			if (on)
+				Fonts::AddRoundedRect(ui, tx, base + 12 * k * f, w, 5 * k * f, 2.5f * k * f, accent);
+			tx += w;
+		};
+		key_pill("L2");
+		tx += 22 * k * f;
+		tab(settings_label, !controls);
+		tx += 40 * k * f;
+		tab(controls_label, controls);
+		tx += 22 * k * f;
+		key_pill("R2");
 	}
-	Fonts::AddRoundedRect(ui, cx, y + 310 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
+	Fonts::AddRoundedRect(ui, cx, y + 262 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
 
 	// The rows: a list that scrolls to keep the focused row in view.
 	const auto& rows = m_sheet.rows();

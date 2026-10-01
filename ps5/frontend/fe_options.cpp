@@ -113,6 +113,39 @@ std::vector<OptionChoice> InvertChoices()
 	return {{"0", "Off"}, {"1", "Up-down"}, {"2", "Left-right"}, {"3", "Both"}};
 }
 
+// vk-285-117: what a save or load button can be (orbis-shims/OrbisPadMap.h ComboButtonName), as the page's COMBO_BUTTONS.
+std::vector<OptionChoice> ComboChoices()
+{
+	return {{"L3R3", "L3 + R3"}, {"Cross", Sym(icon::Cross, "Cross")}, {"Circle", Sym(icon::Circle, "Circle")},
+		{"Square", Sym(icon::Square, "Square")}, {"Triangle", Sym(icon::Triangle, "Triangle")}, {"L1", "L1"}, {"R1", "R1"}, {"L2", "L2"},
+		{"R2", "R2"}, {"L3", "L3"}, {"R3", "R3"}, {"Options", "Options"}, {"Touchpad", "Touchpad click"}, {"TouchLeft", "Touchpad left"},
+		{"TouchRight", "Touchpad right"}, {"Up", Sym(icon::DpadUp, "D-pad up")}, {"Down", Sym(icon::DpadDown, "D-pad down")},
+		{"Left", Sym(icon::DpadLeft, "D-pad left")}, {"Right", Sym(icon::DpadRight, "D-pad right")}, {"None", "Nothing"}};
+}
+
+// The Buttons group: the save and load combos and their hold time first, then a row for each button.
+std::vector<OptionDef> ButtonsGroup()
+{
+	constexpr const char* save_hint = "Hold both save buttons together to save the state (slot 1). L3 + R3: both sticks pressed in. Touchpad "
+									  "left or right: a finger on that side. Nothing, or the same button twice, makes it one button. F1 on a "
+									  "keyboard saves too.";
+	constexpr const char* load_hint = "Hold both load buttons together to load the state (slot 1). L3 + R3: both sticks pressed in. Touchpad "
+									  "left or right: a finger on that side. Nothing, or the same button twice, makes it one button. F3 on a "
+									  "keyboard loads too.";
+	std::vector<OptionDef> out = {
+		Seg("PS5SX2/SaveButton1", "Save: button 1", "L3R3", "", ComboChoices(), save_hint),
+		Seg("PS5SX2/SaveButton2", "Save: button 2", "Up", "", ComboChoices(), save_hint),
+		Seg("PS5SX2/LoadButton1", "Load: button 1", "L3R3", "", ComboChoices(), load_hint),
+		Seg("PS5SX2/LoadButton2", "Load: button 2", "Down", "", ComboChoices(), load_hint),
+		Seg("PS5SX2/StateHold", "Hold time", "0", "", {{"0", "Instant"}, {"0.5", "0.5 s"}, {"1", "1 s"}, {"1.5", "1.5 s"}, {"2", "2 s"}, {"3", "3 s"}},
+			"How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't "
+			"reach the game. A second or two stops saving or loading by accident."),
+	};
+	for (OptionDef& d : ButtonRows())
+		out.push_back(std::move(d));
+	return out;
+}
+
 bool Truthy(const std::string& v)
 {
 	return v == "true" || v == "1";
@@ -215,21 +248,9 @@ const std::vector<OptionGroup>& OptionGroups()
 				Toggle("PS5SX2/FpsGraph", "FPS graph", "false", "FPS graph %",
 					"A blue graph of the last minute's frame rate in the top right corner. It shows with the info box off too."),
 			}},
-		// vk-285-116 (AI-assisted): the Controls tab (R2 on the sheet, as the page's Controls tab). PS5SX2/StateButtons and the
-		// remapping: main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h.
-		{"Controller",
-			{
-				Toggle("PS5SX2/Rumble", "Rumble", "true", "Rumble %",
-					"The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open the settings page in the "
-					"PS5's own web browser; the game keeps running behind it."),
-				Seg("PS5SX2/StateButtons", "Save states", "0", "",
-					{{"0", "L3+R3 or touchpad"}, {"1", "L3+R3"}, {"2", "Touchpad + Cross"}, {"3", "L1+R1"}, {"4", "L2+R2"}, {"5", "Off"}},
-					"Which buttons save and load the state (slot 1) in a game. L3+R3, L1+R1 or L2+R2: hold them, then D-pad up saves and "
-					"down loads. Touchpad: a finger on its left side and Cross saves, on its right side loads. A keyboard's F1 and F3 "
-					"always work."),
-			},
-			kTabControls},
-		{"Buttons", ButtonRows(), kTabControls},
+		// vk-285-116 (AI-assisted): the Controls tab (R2 on the sheet, as the page's Controls tab). The remapping, (vk-285-117) the
+		// save and load combos: main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h.
+		{"Buttons", ButtonsGroup(), kTabControls},
 		{"Sticks",
 			{
 				Toggle("PS5SX2/SwapSticks", "Swap sticks", "false", "", "The left stick moves the game's right stick, and the right stick its left one."),
@@ -241,6 +262,13 @@ const std::vector<OptionGroup>& OptionGroups()
 				Seg("PS5SX2/LeftStickDpad", "Left stick as D-pad", "0", "", {{"0", "Off"}, {"1", "Also"}, {"2", "Only"}},
 					"For games that only read the D-pad. Also: the left stick presses the D-pad as it moves. Only: it presses just the D-pad, "
 					"and the game's left stick stays still."),
+			},
+			kTabControls},
+		{"Controller",
+			{
+				Toggle("PS5SX2/Rumble", "Rumble", "true", "Rumble %",
+					"The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open the settings page in the "
+					"PS5's own web browser; the game keeps running behind it."),
 			},
 			kTabControls},
 		{"Keyboard and mouse",
@@ -526,7 +554,7 @@ std::string OptionsSheet::Help(const Row& r) const
 		case Kind::ResetAll:
 			if (m_tab == kTabControls) // vk-285-116
 				return m_global ? "Every control on this tab goes back to its default: each button presses its own, the sticks as they are, "
-				                  "save states on L3+R3 or the touchpad."
+				                  "L3+R3 + D-pad up or down to save or load."
 				                : "This game's controls go back to following the controls for all games.";
 			return m_global ? "Every option on this tab goes back to PCSX2's default. Lines of gs.ini this sheet doesn't show stay."
 			                : "This game's options go back to following the settings for all games. Its patches, memory cards and controls "

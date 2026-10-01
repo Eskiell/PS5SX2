@@ -157,6 +157,9 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .pick.moved { border-color: rgba(var(--glow),0.75); box-shadow: 0 0 10px rgba(var(--glow),0.25); }
 .pick.inh { color: var(--dim); }
 .btnrow.center { justify-content: center; margin-top: 14px; }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 10px; }
+.pair .pick { margin-top: 0; padding: 8px 10px; }
+.pair .plus { color: var(--faint); font-weight: 700; }
 .file button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
 
 /* Test build 1 (vk-285-55): the testing banner and the problem report. */
@@ -282,6 +285,13 @@ const BUTTON_TARGETS = [["Cross","Cross"],["Circle","Circle"],["Square","Square"
   ["Left","D-pad left"],["Right","D-pad right"],["Analog","Analog button"],["Pressure","Light press"],["None","Nothing"]];
 const button = (name, label, def) => ({ key: "PS5SX2/Button" + name, label, type: "pick", def, options: BUTTON_TARGETS });
 const INVERT = [["0","Off"],["1","Up-down"],["2","Left-right"],["3","Both"]];
+// vk-285-117: what a save or load button can be (OrbisPadMap.h ComboButtonName), as the sheet's ComboChoices().
+const COMBO_BUTTONS = [["L3R3","L3 + R3"],["Cross","Cross"],["Circle","Circle"],["Square","Square"],["Triangle","Triangle"],["L1","L1"],
+  ["R1","R1"],["L2","L2"],["R2","R2"],["L3","L3"],["R3","R3"],["Options","Options"],["Touchpad","Touchpad click"],
+  ["TouchLeft","Touchpad left"],["TouchRight","Touchpad right"],["Up","D-pad up"],["Down","D-pad down"],["Left","D-pad left"],
+  ["Right","D-pad right"],["None","Nothing"]];
+// A save or load combo: two lists in one row on this page ("pair": the row's name; the sheet has a row for each button).
+const combo = (key, label, def, pair) => ({ key: "PS5SX2/" + key, label, type: "pick", def, options: COMBO_BUTTONS, pair });
 const GROUPS = [
   { title: "Display", items: [
     { key: "upscale_multiplier", label: "Resolution", type: "seg", def: "1", short: "%",
@@ -350,18 +360,16 @@ const GROUPS = [
     { key: "PS5SX2/FpsGraph", label: "FPS graph", type: "toggle", def: "false", short: "FPS graph %",
       hint: "A blue graph of the last minute's frame rate in the top right corner. It shows with the info box off too." },
   ]},
-  // vk-285-116 (AI-assisted): the Controls tab. Rumble, the save state buttons (PS5SX2/StateButtons) and the remapping
-  // (main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h), the keyboard and mouse.
-  { title: "Controller", tab: "controls", items: [
-    { key: "PS5SX2/Rumble", label: "Rumble", type: "toggle", def: "true", short: "Rumble %",
-      hint: "The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open this page in the PS5's own web browser; the game keeps running behind it." },
-    { key: "PS5SX2/StateButtons", label: "Save states", type: "seg", def: "0", cols: 2,
-      options: [["0","L3+R3 or touchpad"],["1","L3+R3"],["2","Touchpad + Cross"],["3","L1+R1"],["4","L2+R2"],["5","Off"]],
-      hint: "Which buttons save and load the state (slot 1) in a game. L3+R3, L1+R1 or L2+R2: hold them, then D-pad up saves and down loads (with L1+R1 and L2+R2 that D-pad press doesn't reach the game). Touchpad: a finger on its left side and Cross saves, on its right side loads. A keyboard's F1 and F3 always work." },
-  ]},
+  // vk-285-116 (AI-assisted): the Controls tab: the remapping, (vk-285-117) the save and load combos and their hold time
+  // (main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h), the sticks, rumble, the keyboard and mouse.
   { title: "Buttons", tab: "controls",
-    hint: "What each of the controller's buttons presses in games. Several can press the same button; Nothing turns one off. A trigger on a button presses as hard as it's pulled. Light press: while it's held, the other buttons press at half strength, for games that read how hard a button is pressed (Metal Gear Solid 2 and 3). The shelf and PS5SX2's own combos (save states, back to the menu, this page) keep the controller's real buttons.",
+    hint: "Save and load: hold the two buttons together (slot 1). L3 + R3 is both sticks pressed in; Touchpad left or right is a finger on that side. Below: what each button presses in games (Light press: the other buttons press at half strength, for Metal Gear Solid 2 and 3). PS5SX2's own combos always use the real buttons.",
     items: [
+    combo("SaveButton1", "Save: button 1", "L3R3", "Save state"), combo("SaveButton2", "Save: button 2", "Up"),
+    combo("LoadButton1", "Load: button 1", "L3R3", "Load state"), combo("LoadButton2", "Load: button 2", "Down"),
+    { key: "PS5SX2/StateHold", label: "Hold time", type: "seg", def: "0", cols: 6,
+      options: [["0","Instant"],["0.5","0.5 s"],["1","1 s"],["1.5","1.5 s"],["2","2 s"],["3","3 s"]],
+      hint: "How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't reach the game. A second or two stops saving or loading by accident." },
     button("Cross", "Cross", "Cross"), button("Circle", "Circle", "Circle"), button("Square", "Square", "Square"),
     button("Triangle", "Triangle", "Triangle"), button("L1", "L1", "L1"), button("R1", "R1", "R1"), button("L2", "L2", "L2"),
     button("R2", "R2", "R2"), button("L3", "L3", "L3"), button("R3", "R3", "R3"), button("Options", "Options", "Start"),
@@ -378,6 +386,10 @@ const GROUPS = [
     { key: "PS5SX2/LeftStickDpad", label: "Left stick as D-pad", type: "seg", def: "0", cols: 3,
       options: [["0","Off"],["1","Also"],["2","Only"]],
       hint: "For games that only read the D-pad. Also: the left stick presses the D-pad as it moves. Only: it presses just the D-pad, and the game's left stick stays still." },
+  ]},
+  { title: "Controller", tab: "controls", items: [
+    { key: "PS5SX2/Rumble", label: "Rumble", type: "toggle", def: "true", short: "Rumble %",
+      hint: "The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open this page in the PS5's own web browser; the game keeps running behind it." },
   ]},
   // vk-285-113: a USB keyboard and mouse plugged into the PS5 (orbis-shims/ProsperoKbdMouse.cpp, main-boot.cpp).
   { title: "Keyboard and mouse", tab: "controls", items: [
@@ -591,6 +603,25 @@ function render() {
           '<div class="from" style="margin-top:3px">' + from + '</div>' + (it.hint ? '<div class="hint">' + esc(it.hint) + "</div>" : "") +
           '</div><button class="sw' + (truthy(eff.v) ? " on" : "") + (eff.from !== "own" ? " inh" : "") + '" data-key="' + esc(it.key) + '" data-val="' +
           (truthy(eff.v) ? "false" : "true") + '" aria-label="' + esc(it.label) + '"></button></div></div>';
+      } else if (it.type === "pick" && it.pair) {
+        // vk-285-117: a save or load combo: this item and the next one in one row, "button 1 + button 2". The row is set
+        // here when either is; its reset puts both back.
+        const nx = grp.items[grp.items.indexOf(it) + 1], effn = effective(nx);
+        const same = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+        const own = eff.from === "own" || effn.from === "own";
+        const pfrom = own ? (isGlobal ? "set" : "this game") + ' <button data-reset="' + esc(it.key) + '" data-reset2="' + esc(nx.key) + '">reset</button>'
+                          : (eff.from === "global" || effn.from === "global") ? "all games" : "default";
+        const sel = (item, e) => {
+          let opts = "";
+          for (const o of item.options) opts += '<option value="' + esc(o[0]) + '"' + (same(o[0], e.v) ? " selected" : "") + ">" + esc(o[1]) + "</option>";
+          if (!item.options.some((o) => same(o[0], e.v))) opts += '<option value="' + esc(e.v) + '" selected>' + esc(e.v) + "</option>";
+          return '<select class="pick' + (same(e.v, item.def) ? "" : " moved") + (e.from === "own" ? "" : " inh") + '" data-pickkey="' +
+            esc(item.key) + '" aria-label="' + esc(item.label) + '">' + opts + "</select>";
+        };
+        html += '<div class="row"><div class="head"><div class="label">' + esc(it.pair) + '</div><div class="from">' + pfrom + "</div></div>" +
+          '<div class="pair">' + sel(it, eff) + '<span class="plus">+</span>' + sel(nx, effn) + "</div></div>";
+      } else if (it.type === "pick" && grp.items[grp.items.indexOf(it) - 1] && grp.items[grp.items.indexOf(it) - 1].pair) {
+        // the second list of a combo: drawn with the first
       } else if (it.type === "pick") {
         // vk-285-116: a list (the remapping), like a row of buttons: it shows the value in use (dimmer when it is followed,
         // not set here), a choice sets it here, "reset" follows again. A button that presses something other than its own
@@ -641,7 +672,10 @@ function render() {
   $("file").innerHTML = esc(data.file) + (data.exists ? "" : " (made on the first change)") +
     (playingHere ? " · applied live in the running game" : "");
   $("settings").querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", () => change(b.dataset.key, b.dataset.val)));
-  $("settings").querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", () => change(b.dataset.reset, null)));
+  $("settings").querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.reset2) { delete data.values[b.dataset.reset2]; pending.set(b.dataset.reset2, null); } // vk-285-117: a combo's two
+    change(b.dataset.reset, null);
+  }));
   $("settings").querySelectorAll("[data-patch]").forEach((b) => b.addEventListener("click", () => patch(b.dataset.patch, b.dataset.on === "1")));
   $("settings").querySelectorAll("[data-textkey]").forEach((el) => el.addEventListener("change", () => {
     const v = el.value.trim();
