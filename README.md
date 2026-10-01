@@ -18,7 +18,7 @@
 PS5SX2 is a port of [PCSX2](https://github.com/PCSX2/pcsx2) to the PS5. It runs as a native app on a jailbroken console:
 
 - PCSX2's recompilers run straight on the PS5's CPU.
-- Its Vulkan renderer draws through a native Vulkan driver for the PS5's GPU.
+- Its Vulkan renderer draws through a modified version of ps5vk, [Mihawk-99](https://github.com/mihawk-99)'s native Vulkan driver for the PS5's GPU ([PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan)), tweaked specifically for PS5SX2.
 - You pick a game from a cover-flow shelf and play it upscaled on a 4K TV.
 - You change its settings from your phone while you play.
 
@@ -323,7 +323,7 @@ The PS5 layer lives in [`ps5/`](ps5/). [`ps5/README.md`](ps5/README.md) covers t
 ## Credits
 
 - **The PCSX2 Dev Team,** for PCSX2, which does all the emulating.
-- **Mihawk-99,** for PS5_Vulkan.
+- **[Mihawk-99](https://github.com/mihawk-99),** for the Vulkan driver all of PS5SX2 runs on: a modified version of ps5vk, his native Vulkan driver for the PS5's GPU from [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), tweaked specifically for PS5SX2. PCSX2's hardware renderer, the upscaling and the 4K output all go through it. He also brings Mesa's RADV to the PS5 in [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa).
 - **BlackBearReloaded,** for ps5-native-app-boilerplate.
 - **John Törnblom,** for the ps5-payload-dev SDK.
 - **[xlenore/ps2-covers](https://github.com/xlenore/ps2-covers),** for the covers the shelf downloads.

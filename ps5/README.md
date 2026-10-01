@@ -1,6 +1,6 @@
 # PS5SX2: the PS5 layer
 
-PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on the PS5HB_Vulkan driver, linked into the app. It is developed on a PS5 Pro with firmware 11.40. The console runs the PS5SX2 Helper payload, which jailbreaks the app and mounts /data into its sandbox.
+PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on a modified version of ps5vk, the Vulkan driver from [Mihawk-99](https://github.com/mihawk-99)'s [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), tweaked specifically for PS5SX2 and linked into the app. It is developed on a PS5 Pro with firmware 11.40. The console runs the PS5SX2 Helper payload, which jailbreaks the app and mounts /data into its sandbox.
 
 ## Layout
 
@@ -12,7 +12,7 @@ PS5SX2 runs PCSX2 on a jailbroken PS5. Its renderer is PCSX2's Vulkan backend on
 - **`ps5/frontend/`**: the game shelf and the settings web page. `fe_shaders.inc` is generated from `shaders/` by `build_shaders.sh`, which needs glslangValidator.
 - **`ps5/proto/native/`**: the host tool that converts and signs the eboot, plus the app's CRT and linker script. They come from BlackBearReloaded's ps5-native-app-boilerplate (GPL-3.0-or-later).
 - **`ps5/tools/`**:
-  - `build-mesa-util.sh`, from mihawk-99's PS5_vkQuake;
+  - `build-mesa-util.sh`, from Mihawk-99's PS5_vkQuake;
   - `prepare_console_elf.py`.
 - **`ps5/sce_sys/param.json`**: the app's parameters (title ID PPSA99203). The icon, the backgrounds and the music ship with the releases.
 
@@ -64,7 +64,7 @@ The Discord and X logos are their owners' trademarks, used only to link to the a
 
 Thanks to:
 - the PCSX2 Dev Team;
-- Mihawk-99 (PS5_Vulkan);
+- [Mihawk-99](https://github.com/mihawk-99), for the Vulkan driver PS5SX2 runs on, in a version tweaked for it ([PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan)), and the RADV port ([PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa));
 - BlackBearReloaded (ps5-native-app-boilerplate);
 - John Törnblom (the ps5-payload-dev SDK);
 - xlenore/ps2-covers, the covers the app downloads at first run (not included here).
