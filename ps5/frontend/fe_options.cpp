@@ -36,6 +36,16 @@ OptionDef Toggle(const char* key, const char* label, const char* def, const char
 	return d;
 }
 
+// vk-285-115: the crop rows' values (PS2 pixels) and their line, as the page's CROP_PX and CROP_HINT.
+std::vector<OptionChoice> CropChoices()
+{
+	return {{"0", "Off"}, {"2", "2 px"}, {"4", "4 px"}, {"6", "6 px"}, {"8", "8 px"}, {"10", "10 px"}, {"12", "12 px"}, {"16", "16 px"},
+		{"24", "24 px"}, {"32", "32 px"}};
+}
+
+constexpr const char* kCropHint = "Cuts this many PS2 pixels off this side of the picture, for games with garbage at a border "
+								  "(Shadow of the Colossus). The picture keeps its proportions.";
+
 bool Truthy(const std::string& v)
 {
 	return v == "true" || v == "1";
@@ -90,6 +100,14 @@ const std::vector<OptionGroup>& OptionGroups()
 				Toggle("EmuCore/EnableWideScreenPatches", "Widescreen patches", "false", "Widescreen %",
 					"Uses the game's 16:9 patch when there is one."),
 				Seg("TVShader", "Display filter", "0", "%", {{"6", "FSR"}, {"7", "FSR soft"}, {"0", "Classic"}, {"5", "CRT"}}),
+			}},
+		// vk-285-115: PCSX2's crop (EmuCore/GS/CropLeft..CropBottom, PS2 pixels), as on the page.
+		{"Crop",
+			{
+				Seg("CropLeft", "Crop left", "0", "Crop left %", CropChoices(), kCropHint),
+				Seg("CropTop", "Crop top", "0", "Crop top %", CropChoices(), kCropHint),
+				Seg("CropRight", "Crop right", "0", "Crop right %", CropChoices(), kCropHint),
+				Seg("CropBottom", "Crop bottom", "0", "Crop bottom %", CropChoices(), kCropHint),
 			}},
 		{"Graphics",
 			{
