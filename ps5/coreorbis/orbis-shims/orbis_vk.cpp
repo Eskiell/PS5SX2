@@ -32,6 +32,20 @@ void OrbisSampleWindow()
 {
 }
 
+// vk-285-115 (include-orbis/OrbisDriver.h): RADV's own GetInstanceProcAddr is in the eboot only when link-radv.sh linked
+// mihawk-99's RADV archive; in a ps5vk eboot the weak reference is resolved to null at link time.
+extern "C" void* radv_GetInstanceProcAddr(void* instance, const char* name) __attribute__((weak));
+
+bool OrbisDriverIsRADV()
+{
+	return radv_GetInstanceProcAddr != nullptr;
+}
+
+const char* OrbisDriverName()
+{
+	return OrbisDriverIsRADV() ? "RADV" : "ps5vk";
+}
+
 // The kernel's answer about one mapping (the layout homebrew SDKs publish for it).
 struct OrbisVirtualQueryInfo
 {

@@ -479,8 +479,8 @@ struct Display
 		return CreateSurface() && CreateSwapchain();
 	}
 
-	// As PCSX2's VKSwapChain does on the PS5: the first display with a mode, its largest mode, and
-	// a plane that can drive it.
+	// As PCSX2's VKSwapChain does on the PS5: the first display with a mode, its largest mode (of equally
+	// large ones the one nearest 60 Hz, vk-285-115), and a plane that can drive it.
 	bool CreateSurface()
 	{
 		uint32_t display_count = 0;
@@ -502,13 +502,20 @@ struct Display
 				continue;
 			std::vector<VkDisplayModePropertiesKHR> modes(mode_count);
 			vk.vkGetDisplayModePropertiesKHR(pd, d.display, &mode_count, modes.data());
+			auto off_60hz = [](const VkDisplayModePropertiesKHR& x) {
+				const int64_t mhz = static_cast<int64_t>(x.parameters.refreshRate);
+				return mhz > 60000 ? mhz - 60000 : 60000 - mhz;
+			};
 			for (const VkDisplayModePropertiesKHR& m : modes)
-				if (!display || m.parameters.visibleRegion.width * m.parameters.visibleRegion.height >
-									mode.parameters.visibleRegion.width * mode.parameters.visibleRegion.height)
+			{
+				const uint64_t area = static_cast<uint64_t>(m.parameters.visibleRegion.width) * m.parameters.visibleRegion.height;
+				const uint64_t best = static_cast<uint64_t>(mode.parameters.visibleRegion.width) * mode.parameters.visibleRegion.height;
+				if (!display || area > best || (area == best && off_60hz(m) < off_60hz(mode)))
 				{
 					display = d.display;
 					mode = m;
 				}
+			}
 			if (display)
 				break;
 		}
@@ -530,7 +537,8 @@ struct Display
 		if (r != VK_SUCCESS)
 			return Fail("vkCreateDisplayPlaneSurfaceKHR", r);
 		extent = mode.parameters.visibleRegion;
-		std::printf("[frontend] display %ux%u, plane %u\n", extent.width, extent.height, plane);
+		std::printf("[frontend] display %ux%u at %.2f Hz, plane %u\n", extent.width, extent.height, mode.parameters.refreshRate / 1000.0,
+			plane);
 		return true;
 	}
 

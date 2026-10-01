@@ -41,6 +41,7 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "common/SettingsWrapper.h" // eerec-285
 #include "debug_overlay.h"
 #include "OrbisPaths.h" // vk-285-33: the /data/PCSX2 folder layout
+#include "OrbisDriver.h" // vk-285-115: ps5vk or RADV
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "SIO/Memcard/MemoryCardFile.h" // vk-285-48: FileMcd_EmuClose/Open
@@ -1595,6 +1596,20 @@ static void orbis_log_flag_access(const char* when)
 static void orbis_vk_environment()
 {
   const bool hw = !g_sw_renderer;
+  // vk-285-115 (AI-assisted): the RADV eboot (link-radv.sh). RADV reads none of the PS5VK_* variables below. Its own: the shader
+  // cache, which RADV puts in /app0/radv-shader-cache unless told otherwise (next to PCSX2's caches instead, as ps5vk's), and its
+  // threaded recording for the vk_recordthread flag (RADV_THREADED_RECORDING; a RADV build older than the threaded layer ignores it).
+  if (OrbisDriverIsRADV())
+  {
+    setenv("MESA_SHADER_CACHE_DIR", (OrbisDir("cache") + "/radv-shader-cache").c_str(), 0);
+    if (hw && orbis_flag("vk_recordthread")) setenv("RADV_THREADED_RECORDING", "1", 0);
+    const char* const cache = getenv("MESA_SHADER_CACHE_DIR");
+    const char* const threaded = getenv("RADV_THREADED_RECORDING");
+    printf("[boot] RADV environment (hardware renderer %s): MESA_SHADER_CACHE_DIR=%s RADV_THREADED_RECORDING=%s\n", hw ? "yes" : "no",
+      cache ? cache : "-", threaded ? threaded : "-");
+    fflush(stdout);
+    return;
+  }
   // The driver keeps its compiled shaders next to PCSX2's caches, not in /app0.
   setenv("PS5VK_SHADER_CACHE_DIR", (OrbisDir("cache") + "/ps5vk-shader-cache").c_str(), 0); // vk-285-33: cache/
   // The driver's queue profile (a stderr.log line every 10 s) unless novkprof.
@@ -1747,6 +1762,7 @@ int main()
   // vk-285-35: the exact sources (link-vk.sh; a trailing + marks uncommitted changes).
   printf("[boot] sources: driver %s, pcsx2 %s\n", ORBIS_DRIVER_REV, ORBIS_PCSX2_REV);
 #endif
+  printf("[boot] Vulkan driver: %s\n", OrbisDriverName()); // vk-285-115: link-vk.sh links ps5vk, link-radv.sh RADV
   fflush(stdout);
   printf("[boot] main tid=%llu\n", (unsigned long long)pthread_self());
   {
