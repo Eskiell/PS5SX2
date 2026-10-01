@@ -580,6 +580,8 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			const std::string scope = std::string(Tr(Str::SheetThisGame)) + " / " + Tr(Str::SheetAllGames);
 			hint("#L1", "#R1", scope.c_str());
 		}
+		const std::string tabs = std::string(Tr(Str::HintSettings)) + " / " + Tr(Str::SheetControls); // vk-285-116
+		hint("#L2", "#R2", tabs.c_str());
 	}
 	else
 	{
@@ -708,6 +710,18 @@ std::string Fit(const Fonts& fonts, std::string text, float px, float width)
 	return text + "\xE2\x80\xA6";
 }
 
+// vk-285-116: "<symbol>  Cross" (fe_options.cpp Sym: a PromptFont glyph, two spaces, the name) into its two parts.
+bool SplitSymbol(const std::string& s, std::string& glyph, std::string& name)
+{
+	if (s.size() < 6 || static_cast<unsigned char>(s[0]) != 0xE2 || s.compare(3, 2, "  ") != 0)
+		return false;
+	glyph = s.substr(0, 3);
+	name = s.substr(5);
+	return true;
+}
+// The symbol's size against the text's, and how far its baseline drops (of the text's size) to sit centred on the text.
+constexpr float kSymbolScale = 1.35f, kSymbolDrop = 0.12f;
+
 // The sheet's measures, in 2160-line pixels (scaled by k when drawn).
 constexpr float kSheetW = 1260.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f;
 constexpr float kSheetListTop = 352.0f;  // from the sheet's top
@@ -735,6 +749,20 @@ void App::OpenSheet(bool global)
 	m_sheet_status.clear();
 	m_sheet_held_v = m_sheet_held_h = 0;
 	std::printf("[options] sheet for %s (%s)\n", m_sheet.title().c_str(), m_sheet.file_label().c_str());
+	std::fflush(stdout);
+}
+
+// vk-285-116: another tab of the same sheet, from its first row.
+void App::SheetTab(int tab)
+{
+	m_sheet.SetTab(tab);
+	m_sheet_row = 0;
+	const auto& rows = m_sheet.rows();
+	while (m_sheet_row < static_cast<int>(rows.size()) && !m_sheet.Selectable(rows[static_cast<size_t>(m_sheet_row)]))
+		m_sheet_row++;
+	m_sheet_scroll = m_sheet_scroll_target = 0;
+	m_sheet_held_v = m_sheet_held_h = 0;
+	std::printf("[options] %s tab\n", tab == kTabControls ? "controls" : "settings");
 	std::fflush(stdout);
 }
 
@@ -804,6 +832,19 @@ void App::UpdateSheet(double dt, const Input& in)
 				RefreshBadges();
 			OpenSheet(global);
 			Sound(global ? Sfx::JumpRight : Sfx::JumpLeft, global ? 0.3f : -0.1f);
+		}
+		else
+			Sound(Sfx::Edge, 0.3f);
+		return;
+	}
+	// vk-285-116: L2 the settings, R2 the controls.
+	if (pressed(in.l2, m_prev.l2) || pressed(in.r2, m_prev.r2))
+	{
+		const int tab = pressed(in.r2, m_prev.r2) ? kTabControls : kTabSettings;
+		if (tab != m_sheet.tab())
+		{
+			SheetTab(tab);
+			Sound(tab == kTabControls ? Sfx::JumpRight : Sfx::JumpLeft, tab == kTabControls ? 0.3f : -0.1f);
 		}
 		else
 			Sound(Sfx::Edge, 0.3f);
@@ -891,7 +932,32 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 	Fonts::AddRoundedRect(ui, x, y, sw, sh, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f)); // the shelf's text must not show through
 
 	const float cx = x + 64 * k, inner = sw - 128 * k;
-	m_fonts->AddText(ui, m_sheet_global ? "SETTINGS FOR ALL GAMES" : "GAME SETTINGS", cx, y + 84 * k, 28 * k, lo, 0.45f);
+	// vk-285-116: the tabs, where the sheet's name was ("GAME SETTINGS"): L2 the settings, R2 the controls. The one shown is
+	// white and underlined in the cover's colour.
+	{
+		const float ty = y + 92 * k, tpx = 40 * k;
+		float tx = cx;
+		auto key_pill = [&](const char* name) {
+			const float kpx = 26 * k, kw = m_fonts->Measure(name, kpx) + 22 * k, kh = 40 * k;
+			Fonts::AddRoundedRect(ui, tx, ty - 33 * k, kw, kh, 11 * k, Rgba(1, 1, 1, 0.82f));
+			m_fonts->AddText(ui, name, tx + kw * 0.5f, ty - 4 * k, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
+			tx += kw;
+		};
+		auto tab = [&](const char* label, bool on) {
+			const float w = m_fonts->Measure(label, tpx);
+			m_fonts->AddText(ui, label, tx, ty, tpx, on ? hi : lo, on ? 0.5f : 0.3f);
+			if (on)
+				Fonts::AddRoundedRect(ui, tx, ty + 17 * k, w, 6 * k, 3 * k, accent);
+			tx += w;
+		};
+		key_pill("L2");
+		tx += 26 * k;
+		tab(Tr(Str::HintSettings), m_sheet.tab() == kTabSettings);
+		tx += 48 * k;
+		tab(Tr(Str::SheetControls), m_sheet.tab() == kTabControls);
+		tx += 26 * k;
+		key_pill("R2");
+	}
 	{
 		float px = 56 * k;
 		const std::string& t = m_sheet.title();
@@ -987,18 +1053,31 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 			value += "  \xC2\xB7  Create";
 
 		const float value_room = bw * 0.46f;
-		const std::string label = Fit(*m_fonts, r.label, lpx, bw - 80 * k - (value.empty() ? 0.0f : std::min(value_room, m_fonts->Measure(value.c_str(), vpx)) + 90 * k));
-		m_fonts->AddText(ui, label.c_str(), bx + 48 * k, mid_y, lpx, action ? (focused ? hi : mid) : hi, 0.25f);
+		// vk-285-116: a label or a value that starts with a button's symbol ("<glyph>  Cross", the Controls tab): the symbol
+		// a size up, the label's in a slot of its own so the names line up.
+		std::string lglyph, lname, vglyph, vname;
+		const bool lsym = SplitSymbol(r.label, lglyph, lname), vsym = SplitSymbol(value, vglyph, vname);
+		const float slot = lsym ? 66 * k : 0.0f;
+		const std::string label = Fit(*m_fonts, lsym ? lname : r.label, lpx,
+			bw - 80 * k - slot - (value.empty() ? 0.0f : std::min(value_room, m_fonts->Measure(value.c_str(), vpx)) + 90 * k));
+		const uint32_t lc = action ? (focused ? hi : mid) : hi;
+		if (lsym && lglyph != icon::Blank)
+			m_fonts->AddText(ui, lglyph.c_str(), bx + 48 * k + slot * 0.42f, mid_y + kSymbolDrop * lpx, lpx * kSymbolScale, lc, 0.25f,
+				Fonts::Center);
+		m_fonts->AddText(ui, label.c_str(), bx + 48 * k + slot, mid_y, lpx, lc, 0.25f);
 
 		if (!value.empty())
 		{
-			const std::string shown = Fit(*m_fonts, value, vpx, value_room);
+			const std::string shown = Fit(*m_fonts, vsym ? vname : value, vpx, value_room - (vsym ? 64 * k : 0.0f));
 			const OptionsSheet::From from = m_sheet.Source(r);
 			uint32_t vc = from == OptionsSheet::From::Own ? own : mid;
 			if (armed || (action && focused))
 				vc = own;
 			const float vx = bx + bw - 44 * k - (focused && !action ? 30 * k : 0.0f);
-			const float vw = m_fonts->AddText(ui, shown.c_str(), vx, mid_y, vpx, vc, 0.5f, Fonts::Right);
+			float vw = m_fonts->AddText(ui, shown.c_str(), vx, mid_y, vpx, vc, 0.5f, Fonts::Right);
+			if (vsym && vglyph != icon::Blank)
+				vw += 14 * k + m_fonts->AddText(ui, vglyph.c_str(), vx - vw - 14 * k, mid_y + kSymbolDrop * vpx, vpx * kSymbolScale, vc, 0.5f,
+								   Fonts::Right);
 			if (focused && !action)
 			{
 				// The arrows either side of a value that left and right change.

@@ -12,7 +12,7 @@
 //   hold <button> <s>      the button stays down for <s> seconds
 //   shot <name>            <out>/<name>.png of the current frame
 //   game <n>               (before any other step) the shelf starts on game n
-// Buttons: left right up down cross circle square triangle options l1 r1.
+// Buttons: left right up down cross circle square triangle options l1 r1 l2 r2.
 //
 // Copyright (C) 2026 Spyros
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -200,7 +200,8 @@ bool SetButton(Input& in, const std::string& b, bool down)
 {
 	bool* p = b == "left" ? &in.left : b == "right" ? &in.right : b == "up" ? &in.up : b == "down" ? &in.down :
 	          b == "cross" ? &in.cross : b == "circle" ? &in.circle : b == "square" ? &in.square :
-	          b == "triangle" ? &in.triangle : b == "options" ? &in.options : b == "l1" ? &in.l1 : b == "r1" ? &in.r1 : nullptr;
+	          b == "triangle" ? &in.triangle : b == "options" ? &in.options : b == "l1" ? &in.l1 : b == "r1" ? &in.r1 :
+	          b == "l2" ? &in.l2 : b == "r2" ? &in.r2 : nullptr; // vk-285-116
 	if (!p)
 		return false;
 	*p = down;

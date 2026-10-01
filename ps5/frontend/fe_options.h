@@ -35,10 +35,15 @@ struct OptionDef
 	std::vector<OptionChoice> choices;
 };
 
+// vk-285-116: the sheet's tabs (L2 and R2), as the page's: the settings (with the memory cards and the patches) and the
+// controls (the controller's buttons, sticks, rumble, save state buttons, the keyboard and mouse).
+constexpr int kTabSettings = 0, kTabControls = 1, kTabCount = 2;
+
 struct OptionGroup
 {
 	std::string title;
 	std::vector<OptionDef> items;
+	int tab = kTabSettings;
 };
 
 const std::vector<OptionGroup>& OptionGroups();
@@ -84,9 +89,12 @@ public:
 		std::string patch_desc; // Patch: its description
 	};
 
-	// `game` null: the sheet for all games (gs.ini).
+	// `game` null: the sheet for all games (gs.ini). The tab stays as it was.
 	void Open(const OptionsPaths& paths, const GameInfo* game);
 	void Reload();
+	// vk-285-116: the rows of one tab (kTabSettings or kTabControls).
+	void SetTab(int tab);
+	int tab() const { return m_tab; }
 
 	bool is_global() const { return m_global; }
 	const std::string& title() const { return m_title; }
@@ -136,6 +144,7 @@ private:
 	std::string m_preset;
 	std::vector<Row> m_rows;
 	int m_new_card_mb = 8;
+	int m_tab = kTabSettings;
 	int m_armed_row = -1;
 	double m_armed_until = 0;
 	std::string m_status;

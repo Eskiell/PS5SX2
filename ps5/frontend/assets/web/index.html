@@ -144,6 +144,19 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .recbtn.armed { background: #ffcf7a; box-shadow: 0 0 16px rgba(255,207,122,0.5); }
 .recbtn:disabled { background: none; color: #5cf2a0; box-shadow: none; cursor: default; padding: 9px 4px 9px 8px; }
 .file { text-align: center; color: var(--faint); font-size: 12px; margin-top: 12px; }
+/* vk-285-116: the Settings and Controls tabs, a group's line under its title, a list row (the remapping). */
+.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; max-width: 340px; margin: 14px auto 0; padding: 4px;
+        border-radius: 99px; background: rgba(255,255,255,0.06); border: 1px solid var(--card-line); }
+.tabs button { border: 0; border-radius: 99px; padding: 8px 10px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+               background: none; color: var(--dim); transition: background 0.15s, color 0.15s, box-shadow 0.15s; }
+.tabs button.on { background: rgba(255,255,255,0.92); color: var(--ink); box-shadow: 0 0 16px rgba(var(--glow),0.45); }
+.ghint { font-size: 13px; color: var(--faint); margin: -2px 4px 10px; }
+.prow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.prow .pl { min-width: 0; }
+.prow .pick { width: 56%; flex: 0 0 auto; margin-top: 0; padding: 8px 10px; }
+.pick.moved { border-color: rgba(var(--glow),0.75); box-shadow: 0 0 10px rgba(var(--glow),0.25); }
+.pick.inh { color: var(--dim); }
+.btnrow.center { justify-content: center; margin-top: 14px; }
 .file button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
 
 /* Test build 1 (vk-285-55): the testing banner and the problem report. */
@@ -228,6 +241,7 @@ footer a { color: var(--dim); }
     <div class="gametitle" id="gtitle"></div>
     <div class="gameinfo" id="ginfo"></div>
     <button class="all" id="allgames">Settings for all games</button>
+    <div class="tabs" id="tabs"><button data-tab="settings">Settings</button><button data-tab="controls">Controls</button></div>
 
     <div id="settings"></div>
     <div class="file" id="file"></div>
@@ -261,6 +275,13 @@ footer a { color: var(--dim); }
 const CROP_PX = [["0","Off"],["2","2 px"],["4","4 px"],["6","6 px"],["8","8 px"],["10","10 px"],["12","12 px"],["16","16 px"],
                  ["24","24 px"],["32","32 px"]];
 const CROP_HINT = "Cuts this many PS2 pixels off this side of the picture, for games with garbage at a border (Shadow of the Colossus). The picture keeps its proportions.";
+// vk-285-116 (AI-assisted): what a controller button can press in games (ps5/coreorbis/orbis-shims/OrbisPadMap.h's names),
+// as the sheet's ButtonChoices() (frontend/fe_options.cpp). Applied while the game runs.
+const BUTTON_TARGETS = [["Cross","Cross"],["Circle","Circle"],["Square","Square"],["Triangle","Triangle"],["L1","L1"],["R1","R1"],
+  ["L2","L2"],["R2","R2"],["L3","L3"],["R3","R3"],["Start","Start"],["Select","Select"],["Up","D-pad up"],["Down","D-pad down"],
+  ["Left","D-pad left"],["Right","D-pad right"],["Analog","Analog button"],["Pressure","Light press"],["None","Nothing"]];
+const button = (name, label, def) => ({ key: "PS5SX2/Button" + name, label, type: "pick", def, options: BUTTON_TARGETS });
+const INVERT = [["0","Off"],["1","Up-down"],["2","Left-right"],["3","Both"]];
 const GROUPS = [
   { title: "Display", items: [
     { key: "upscale_multiplier", label: "Resolution", type: "seg", def: "1", short: "%",
@@ -329,12 +350,37 @@ const GROUPS = [
     { key: "PS5SX2/FpsGraph", label: "FPS graph", type: "toggle", def: "false", short: "FPS graph %",
       hint: "A blue graph of the last minute's frame rate in the top right corner. It shows with the info box off too." },
   ]},
-  { title: "Controller", items: [
+  // vk-285-116 (AI-assisted): the Controls tab. Rumble, the save state buttons (PS5SX2/StateButtons) and the remapping
+  // (main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h), the keyboard and mouse.
+  { title: "Controller", tab: "controls", items: [
     { key: "PS5SX2/Rumble", label: "Rumble", type: "toggle", def: "true", short: "Rumble %",
       hint: "The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open this page in the PS5's own web browser; the game keeps running behind it." },
+    { key: "PS5SX2/StateButtons", label: "Save states", type: "seg", def: "0", cols: 2,
+      options: [["0","L3+R3 or touchpad"],["1","L3+R3"],["2","Touchpad + Cross"],["3","L1+R1"],["4","L2+R2"],["5","Off"]],
+      hint: "Which buttons save and load the state (slot 1) in a game. L3+R3, L1+R1 or L2+R2: hold them, then D-pad up saves and down loads (with L1+R1 and L2+R2 that D-pad press doesn't reach the game). Touchpad: a finger on its left side and Cross saves, on its right side loads. A keyboard's F1 and F3 always work." },
+  ]},
+  { title: "Buttons", tab: "controls",
+    hint: "What each of the controller's buttons presses in games. Several can press the same button; Nothing turns one off. A trigger on a button presses as hard as it's pulled. Light press: while it's held, the other buttons press at half strength, for games that read how hard a button is pressed (Metal Gear Solid 2 and 3). The shelf and PS5SX2's own combos (save states, back to the menu, this page) keep the controller's real buttons.",
+    items: [
+    button("Cross", "Cross", "Cross"), button("Circle", "Circle", "Circle"), button("Square", "Square", "Square"),
+    button("Triangle", "Triangle", "Triangle"), button("L1", "L1", "L1"), button("R1", "R1", "R1"), button("L2", "L2", "L2"),
+    button("R2", "R2", "R2"), button("L3", "L3", "L3"), button("R3", "R3", "R3"), button("Options", "Options", "Start"),
+    button("Touchpad", "Touchpad click", "Select"), button("Up", "D-pad up", "Up"), button("Down", "D-pad down", "Down"),
+    button("Left", "D-pad left", "Left"), button("Right", "D-pad right", "Right"),
+  ]},
+  { title: "Sticks", tab: "controls", items: [
+    { key: "PS5SX2/SwapSticks", label: "Swap sticks", type: "toggle", def: "false",
+      hint: "The left stick moves the game's right stick, and the right stick its left one." },
+    { key: "PS5SX2/InvertLeft", label: "Invert left stick", type: "seg", def: "0", options: INVERT,
+      hint: "Turns the game's left stick up-down, left-right or both the other way round (the stick the game sees, after Swap sticks)." },
+    { key: "PS5SX2/InvertRight", label: "Invert right stick", type: "seg", def: "0", options: INVERT,
+      hint: "The same for the game's right stick: the camera in most games." },
+    { key: "PS5SX2/LeftStickDpad", label: "Left stick as D-pad", type: "seg", def: "0", cols: 3,
+      options: [["0","Off"],["1","Also"],["2","Only"]],
+      hint: "For games that only read the D-pad. Also: the left stick presses the D-pad as it moves. Only: it presses just the D-pad, and the game's left stick stays still." },
   ]},
   // vk-285-113: a USB keyboard and mouse plugged into the PS5 (orbis-shims/ProsperoKbdMouse.cpp, main-boot.cpp).
-  { title: "Keyboard and mouse", items: [
+  { title: "Keyboard and mouse", tab: "controls", items: [
     { key: "PS5SX2/KeyboardMouse", label: "Keyboard and mouse", type: "seg", def: "0", short: "Keyboard and mouse %", cols: 2,
       options: [["0","Auto"],["1","Controller"],["2","USB devices"],["3","Off"]],
       hint: "Controller: the keys and the mouse press the PS2 controller's buttons, as in PCSX2 on a PC. Arrows are the D-pad, W A S D the left stick, T F G H the right stick, Enter is Start, Backspace Select, I J K L are Triangle Square Cross Circle, Q and E the shoulder buttons, 1 and 3 the triggers, 2 and 4 the stick clicks. F1 saves and F3 loads a state; hold Esc for a second to go back to the menu. USB devices: the PS2 sees a USB keyboard and mouse, for games made for them (Half-Life, Unreal Tournament, chat in online games). Auto: the controller, until a game starts reading the PS2's USB keyboard or mouse." },
@@ -372,6 +418,9 @@ let data = null;         // /api/settings for it
 let pending = new Map(); // key -> value | null (unset), sent after a short pause
 let saveTimer = 0;
 let recArmed = 0;        // the Recommended button's wait for its second tap
+let ctlArmed = 0;        // vk-285-116: the controls' reset button's
+let tab = "settings";    // vk-285-116: the tab shown, "settings" or "controls" (kept in this browser)
+try { if (localStorage.getItem("ps5sx2.tab") === "controls") tab = "controls"; } catch (e) {}
 
 // ---- The key from the QR code: kept in this browser for this address.
 (function () {
@@ -465,6 +514,7 @@ async function select(id) {
   current = id;
   pending.clear();
   clearTimeout(recArmed); recArmed = 0;
+  clearTimeout(ctlArmed); ctlArmed = 0;
   $("allgames").classList.toggle("on", id === "@global");
   document.querySelectorAll(".case").forEach((el) => el.classList.toggle("sel", games[+el.dataset.i] && games[+el.dataset.i].id === id));
   const g = games.find((x) => x.id === id);
@@ -495,7 +545,8 @@ function effective(item) {
 const truthy = (v) => v === "true" || v === "1";
 function optLabel(item, v) {
   if (item.type === "toggle") return truthy(v) ? "on" : "off";
-  const o = item.options.find((o) => o[0] === v || parseFloat(o[0]) === parseFloat(v));
+  const o = item.options.find((o) => o[0] === v || parseFloat(o[0]) === parseFloat(v) ||
+                                     (item.type === "pick" && o[0].toLowerCase() === String(v).trim().toLowerCase()));
   return o ? o[1] : v;
 }
 
@@ -517,14 +568,16 @@ function render() {
   const playingHere = state.playing && state.playing.id === data.id;
   let html = "";
   const r = data.recommended;
-  if (r && (r.found || !isGlobal)) {
+  if (tab === "settings" && r && (r.found || !isGlobal)) {
     const inUse = data.is_recommended;
     html += '<div class="rec' + (inUse ? " ok" : "") + '"><div><div class="rt">Recommended' + (isGlobal ? " for all games" : "") +
       '</div><div class="rs">' + esc(recSummary()) + '</div></div><button id="recbtn" class="recbtn' + (recArmed ? " armed" : "") + '"' +
       (inUse ? " disabled" : "") + ">" + (inUse ? "\u2713 In use" : recArmed ? "Tap again" : "Use") + "</button></div>";
   }
   for (const grp of GROUPS) {
-    html += '<div class="sec"><h2>' + esc(grp.title) + '</h2><div class="card">';
+    if ((grp.tab || "settings") !== tab) continue; // vk-285-116
+    html += '<div class="sec"><h2>' + esc(grp.title) + "</h2>" + (grp.hint ? '<div class="ghint">' + esc(grp.hint) + "</div>" : "") +
+      '<div class="card">';
     for (const it of grp.items) {
       const eff = effective(it);
       let from = "";
@@ -538,6 +591,17 @@ function render() {
           '<div class="from" style="margin-top:3px">' + from + '</div>' + (it.hint ? '<div class="hint">' + esc(it.hint) + "</div>" : "") +
           '</div><button class="sw' + (truthy(eff.v) ? " on" : "") + (eff.from !== "own" ? " inh" : "") + '" data-key="' + esc(it.key) + '" data-val="' +
           (truthy(eff.v) ? "false" : "true") + '" aria-label="' + esc(it.label) + '"></button></div></div>';
+      } else if (it.type === "pick") {
+        // vk-285-116: a list (the remapping), like a row of buttons: it shows the value in use (dimmer when it is followed,
+        // not set here), a choice sets it here, "reset" follows again. A button that presses something other than its own
+        // is outlined in the cover's colour.
+        const same = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+        let opts = "";
+        for (const o of it.options) opts += '<option value="' + esc(o[0]) + '"' + (same(o[0], eff.v) ? " selected" : "") + ">" + esc(o[1]) + "</option>";
+        if (!it.options.some((o) => same(o[0], eff.v))) opts += '<option value="' + esc(eff.v) + '" selected>' + esc(eff.v) + "</option>";
+        html += '<div class="row prow"><div class="pl"><div class="label">' + esc(it.label) + tag + '</div><div class="from" style="margin-top:2px">' +
+          from + '</div></div><select class="pick' + (same(eff.v, it.def) ? "" : " moved") + (eff.from === "own" ? "" : " inh") +
+          '" data-pickkey="' + esc(it.key) + '" aria-label="' + esc(it.label) + '">' + opts + "</select></div>";
       } else if (it.type === "text") {
         html += '<div class="row"><div class="head"><div class="label">' + esc(it.label) + tag + '</div><div class="from">' + from + '</div></div>';
         if (it.hint) html += '<div class="hint">' + esc(it.hint) + "</div>";
@@ -555,8 +619,14 @@ function render() {
     }
     html += "</div></div>";
   }
-  html += memcardsHtml(isGlobal);
-  if (!isGlobal) {
+  if (tab === "controls") {
+    // vk-285-116: every control of this file back to what it follows (two taps).
+    const own = GROUPS.filter((g) => g.tab === "controls").flatMap((g) => g.items).some((it) => data.values[it.key] !== undefined);
+    html += '<div class="btnrow center"><button class="btn ghost" id="ctlreset"' + (own ? "" : " disabled") + ">" +
+      (ctlArmed ? "Tap again" : isGlobal ? "Reset the controls" : "Follow the controls for all games") + "</button></div>";
+  }
+  if (tab === "settings") html += memcardsHtml(isGlobal);
+  if (!isGlobal && tab === "settings") {
     html += '<div class="sec"><h2>Patches</h2><div class="card">';
     if (!data.patches.length) html += '<div class="empty">No patch file for ' + esc(data.serial || "this game") + " in patches/.</div>";
     for (const p of data.patches) {
@@ -578,6 +648,7 @@ function render() {
     if (v.includes("#")) { toast("A # can't be in a path here"); render(); return; }
     change(el.dataset.textkey, v === "" ? null : v);
   }));
+  $("settings").querySelectorAll("[data-pickkey]").forEach((el) => el.addEventListener("change", () => change(el.dataset.pickkey, el.value)));
   $("settings").querySelectorAll("[data-mcd]").forEach((el) => el.addEventListener("change", () => mcdChoose(SLOTS[+el.dataset.mcd - 1], el.value)));
   $("settings").querySelectorAll("[data-mcdreset]").forEach((b) => b.addEventListener("click", () => mcdChoose(SLOTS[+b.dataset.mcdreset - 1], "")));
   $("settings").querySelectorAll("[data-mcdsize]").forEach((b) => b.addEventListener("click", () => { mcdSize = +b.dataset.mcdsize; render(); }));
@@ -585,6 +656,20 @@ function render() {
   if (mn) mn.addEventListener("input", () => { mcdName = mn.value; });
   const mc = $("mcdcreate");
   if (mc) mc.addEventListener("click", mcdCreate);
+  const cr = $("ctlreset");
+  if (cr) cr.addEventListener("click", () => {
+    if (!ctlArmed) {
+      ctlArmed = setTimeout(() => { ctlArmed = 0; if (data) render(); }, 3500);
+      render();
+      toast(isGlobal ? "Tap again to reset the controls" : "Tap again: this game's controls follow all games");
+      return;
+    }
+    clearTimeout(ctlArmed); ctlArmed = 0;
+    for (const it of GROUPS.filter((g) => g.tab === "controls").flatMap((g) => g.items))
+      if (data.values[it.key] !== undefined) { delete data.values[it.key]; pending.set(it.key, null); }
+    render();
+    queueSave();
+  });
   const rb = $("recbtn");
   if (rb) rb.addEventListener("click", () => {
     if (!recArmed) {
@@ -740,6 +825,17 @@ async function refreshState() {
 }
 
 $("allgames").addEventListener("click", () => select(current === "@global" && games.length ? games[0].id : "@global"));
+// vk-285-116: the tabs.
+function showTab() { document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab)); }
+document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => {
+  if (tab === b.dataset.tab) return;
+  tab = b.dataset.tab;
+  try { localStorage.setItem("ps5sx2.tab", tab); } catch (e) {}
+  clearTimeout(ctlArmed); ctlArmed = 0;
+  showTab();
+  if (data) render();
+}));
+showTab();
 
 // ---- Test build 1 (vk-285-55): a note into the logs, and the logs as one file for the Discord.
 async function sendNote() {

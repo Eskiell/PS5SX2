@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PS5 port frontend: checks that the settings page and the shelf's options sheet write the same settings files
-# (settings_test.cpp), and that this tree's page answers as an older one did.
+# (settings_test.cpp), that this tree's page answers as an older one did, and (vk-285-116) that the sheet lists the page's
+# options (options_dump.cpp against options_parity.js, which needs node).
 #
 #   ps5/frontend/host/test-settings.sh [<older commit, default 5e1e47b (1.50)>]
 #
@@ -57,6 +58,20 @@ if diff -u "$work/web-files.txt" "$work/sheet-files.txt" > "$work/files.diff"; t
   echo "PASS: the sheet writes the same files as the page ($(grep -c '^=== ' "$work/sheet-files.txt") files)"
 else
   echo "FAIL: the sheet's files differ from the page's (see $work/files.diff)"; fail=1
+fi
+# vk-285-116: the sheet's options against the page's GROUPS (order, tabs, keys, labels, defaults, values).
+"$CXX" -std=c++20 "${flags[@]}" "$here/options_dump.cpp" "$fe/fe_options.cpp" "$fe/fe_settings.cpp" "${common[@]}" \
+  -o "$work/options_dump" -lz -lpthread
+"$work/options_dump" > "$work/options-sheet.txt"
+if command -v node > /dev/null; then
+  node "$here/options_parity.js" "$fe/assets/web/index.html" > "$work/options-page.txt"
+  if diff -u "$work/options-page.txt" "$work/options-sheet.txt" > "$work/options.diff"; then
+    echo "PASS: the sheet lists the page's options ($(grep -c '^I ' "$work/options-sheet.txt") options in $(grep -c '^G ' "$work/options-sheet.txt") groups)"
+  else
+    echo "FAIL: the sheet's options differ from the page's (see $work/options.diff)"; fail=1
+  fi
+else
+  echo "SKIP: no node, the sheet's options weren't checked against the page's"
 fi
 head -n 1 "$work/sheet.txt"
 exit $fail

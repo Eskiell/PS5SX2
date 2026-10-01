@@ -199,6 +199,7 @@ constexpr uint32_t kPadRight = 0x20, kPadLeft = 0x80, kPadCross = 0x4000, kPadOp
 				   kPadR1 = 0x800;
 // vk-285-114: the options sheet's buttons.
 constexpr uint32_t kPadUp = 0x10, kPadDown = 0x40, kPadTriangle = 0x1000, kPadCircle = 0x2000, kPadSquare = 0x8000;
+constexpr uint32_t kPadL2 = 0x100, kPadR2 = 0x200; // vk-285-116: the sheet's tabs
 
 double Now()
 {
@@ -1299,6 +1300,8 @@ std::string orbis_frontend_run(const OrbisFrontendPaths& paths, const char* buil
 			in.square = pd.buttons & kPadSquare;
 			in.triangle = pd.buttons & kPadTriangle;
 			in.circle = pd.buttons & kPadCircle;
+			in.l2 = (pd.buttons & kPadL2) || pd.l2 > 160; // vk-285-116
+			in.r2 = (pd.buttons & kPadR2) || pd.r2 > 160;
 		}
 		app.Update(dt, in);
 		app.Build(frame, Clock());

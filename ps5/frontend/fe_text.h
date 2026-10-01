@@ -115,6 +115,14 @@ constexpr const char* R1 = "\xE2\x86\xB1";
 constexpr const char* DpadLeftRight = "\xE2\x86\xA2";
 constexpr const char* DpadUpDown = "\xE2\x86\xA3"; // vk-285-114: the options sheet's hints
 constexpr const char* Options = "\xE2\x88\x88";
+// vk-285-116: the Controls tab's D-pad rows and values (the face buttons use the four above; the shoulder, trigger and
+// stick glyphs carry their name inside, so those rows show just the name).
+constexpr const char* DpadLeft = "\xE2\x86\x9E";
+constexpr const char* DpadUp = "\xE2\x86\x9F";
+constexpr const char* DpadRight = "\xE2\x86\xA0";
+constexpr const char* DpadDown = "\xE2\x86\xA1";
+// Not a glyph: an em space (U+2003, not in the atlas) that keeps a symbol's room on the sheet's rows with nothing drawn.
+constexpr const char* Blank = "\xE2\x80\x83";
 // Font Awesome Free 7 brands (SIL OFL 1.1; the icons CC BY 4.0), present when Init got the font.
 constexpr const char* Discord = "\xEF\x8E\x92";   // U+F392
 constexpr const char* XTwitter = "\xEE\x98\x9B";  // U+E61B

@@ -24,6 +24,7 @@ struct Input
 	bool left = false, right = false, cross = false, options = false, l1 = false, r1 = false;
 	// vk-285-114: the options sheet's buttons.
 	bool up = false, down = false, square = false, triangle = false, circle = false;
+	bool l2 = false, r2 = false; // vk-285-116: the sheet's tabs
 };
 
 struct AppConfig
@@ -81,6 +82,7 @@ private:
 
 	// vk-285-114: the options sheet.
 	void OpenSheet(bool global);
+	void SheetTab(int tab); // vk-285-116
 	void CloseSheet();
 	void UpdateSheet(double dt, const Input& in);
 	bool SheetMove(int dir); // false at either end

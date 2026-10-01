@@ -94,7 +94,9 @@ bool Fonts::Init(const uint8_t* text_font, size_t text_size, const uint8_t* icon
 	for (uint32_t cp : extra)
 		AddGlyph(0, cp);
 	const char* icons[] = {icon::Cross, icon::Circle, icon::Triangle, icon::Square, icon::L1, icon::R1,
-		icon::DpadLeftRight, icon::DpadUpDown, icon::Options};
+		icon::DpadLeftRight, icon::DpadUpDown, icon::Options,
+		// vk-285-116: the Controls tab's.
+		icon::DpadLeft, icon::DpadUp, icon::DpadRight, icon::DpadDown};
 	for (const char* s : icons)
 	{
 		const char* p = s;

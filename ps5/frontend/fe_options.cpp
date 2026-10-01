@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "fe_options.h"
+#include "fe_text.h" // vk-285-116: the buttons' symbols (icon::)
 
 #include <algorithm>
 #include <cstdio>
@@ -45,6 +46,72 @@ std::vector<OptionChoice> CropChoices()
 
 constexpr const char* kCropHint = "Cuts this many PS2 pixels off this side of the picture, for games with garbage at a border "
 								  "(Shadow of the Colossus). The picture keeps its proportions.";
+
+// vk-285-116 (AI-assisted): the Controls tab. A button's symbol and its name ("<Cross>  Cross"), as the sheet shows them
+// (icon::Blank keeps the symbol's room with nothing drawn, so the names line up).
+std::string Sym(const char* glyph, const char* name)
+{
+	return std::string(glyph) + "  " + name;
+}
+
+// What a controller button can press (orbis-shims/OrbisPadMap.h's names), as the page's BUTTON_TARGETS: the face buttons
+// and the D-pad with their symbols.
+std::vector<OptionChoice> ButtonChoices()
+{
+	return {{"Cross", Sym(icon::Cross, "Cross")}, {"Circle", Sym(icon::Circle, "Circle")}, {"Square", Sym(icon::Square, "Square")},
+		{"Triangle", Sym(icon::Triangle, "Triangle")}, {"L1", "L1"}, {"R1", "R1"}, {"L2", "L2"}, {"R2", "R2"}, {"L3", "L3"}, {"R3", "R3"},
+		{"Start", "Start"}, {"Select", "Select"}, {"Up", Sym(icon::DpadUp, "D-pad up")}, {"Down", Sym(icon::DpadDown, "D-pad down")},
+		{"Left", Sym(icon::DpadLeft, "D-pad left")}, {"Right", Sym(icon::DpadRight, "D-pad right")}, {"Analog", "Analog button"},
+		{"Pressure", "Light press"}, {"None", "Nothing"}};
+}
+
+// The remapping rows, in the page's order: the setting, the button's symbol and name, what it presses by default.
+std::vector<OptionDef> ButtonRows()
+{
+	static const struct
+	{
+		const char* key;
+		const char* glyph;
+		const char* name;
+		const char* def;
+	} rows[] = {
+		{"PS5SX2/ButtonCross", icon::Cross, "Cross", "Cross"},
+		{"PS5SX2/ButtonCircle", icon::Circle, "Circle", "Circle"},
+		{"PS5SX2/ButtonSquare", icon::Square, "Square", "Square"},
+		{"PS5SX2/ButtonTriangle", icon::Triangle, "Triangle", "Triangle"},
+		{"PS5SX2/ButtonL1", icon::Blank, "L1", "L1"},
+		{"PS5SX2/ButtonR1", icon::Blank, "R1", "R1"},
+		{"PS5SX2/ButtonL2", icon::Blank, "L2", "L2"},
+		{"PS5SX2/ButtonR2", icon::Blank, "R2", "R2"},
+		{"PS5SX2/ButtonL3", icon::Blank, "L3", "L3"},
+		{"PS5SX2/ButtonR3", icon::Blank, "R3", "R3"},
+		{"PS5SX2/ButtonOptions", icon::Blank, "Options", "Start"},
+		{"PS5SX2/ButtonTouchpad", icon::Blank, "Touchpad click", "Select"},
+		{"PS5SX2/ButtonUp", icon::DpadUp, "D-pad up", "Up"},
+		{"PS5SX2/ButtonDown", icon::DpadDown, "D-pad down", "Down"},
+		{"PS5SX2/ButtonLeft", icon::DpadLeft, "D-pad left", "Left"},
+		{"PS5SX2/ButtonRight", icon::DpadRight, "D-pad right", "Right"},
+	};
+	std::vector<OptionDef> out;
+	for (const auto& r : rows)
+	{
+		OptionDef d;
+		d.key = r.key;
+		d.label = Sym(r.glyph, r.name);
+		d.def = r.def;
+		d.choices = ButtonChoices();
+		d.hint = std::string("What the controller's ") + r.name +
+		         " presses in games. Several can press the same one; Nothing turns it off. Light press: while it's held, buttons "
+		         "press at half strength (Metal Gear Solid 2 and 3). PS5SX2's combos use the real buttons.";
+		out.push_back(std::move(d));
+	}
+	return out;
+}
+
+std::vector<OptionChoice> InvertChoices()
+{
+	return {{"0", "Off"}, {"1", "Up-down"}, {"2", "Left-right"}, {"3", "Both"}};
+}
 
 bool Truthy(const std::string& v)
 {
@@ -148,12 +215,34 @@ const std::vector<OptionGroup>& OptionGroups()
 				Toggle("PS5SX2/FpsGraph", "FPS graph", "false", "FPS graph %",
 					"A blue graph of the last minute's frame rate in the top right corner. It shows with the info box off too."),
 			}},
+		// vk-285-116 (AI-assisted): the Controls tab (R2 on the sheet, as the page's Controls tab). PS5SX2/StateButtons and the
+		// remapping: main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h.
 		{"Controller",
 			{
 				Toggle("PS5SX2/Rumble", "Rumble", "true", "Rumble %",
 					"The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open the settings page in the "
 					"PS5's own web browser; the game keeps running behind it."),
-			}},
+				Seg("PS5SX2/StateButtons", "Save states", "0", "",
+					{{"0", "L3+R3 or touchpad"}, {"1", "L3+R3"}, {"2", "Touchpad + Cross"}, {"3", "L1+R1"}, {"4", "L2+R2"}, {"5", "Off"}},
+					"Which buttons save and load the state (slot 1) in a game. L3+R3, L1+R1 or L2+R2: hold them, then D-pad up saves and "
+					"down loads. Touchpad: a finger on its left side and Cross saves, on its right side loads. A keyboard's F1 and F3 "
+					"always work."),
+			},
+			kTabControls},
+		{"Buttons", ButtonRows(), kTabControls},
+		{"Sticks",
+			{
+				Toggle("PS5SX2/SwapSticks", "Swap sticks", "false", "", "The left stick moves the game's right stick, and the right stick its left one."),
+				Seg("PS5SX2/InvertLeft", "Invert left stick", "0", "", InvertChoices(),
+					"Turns the game's left stick up-down, left-right or both the other way round (the stick the game sees, after Swap sticks)."),
+				Seg("PS5SX2/InvertRight", "Invert right stick", "0", "", InvertChoices(),
+					"Turns the game's right stick up-down, left-right or both the other way round: the camera in most games (the stick the "
+					"game sees, after Swap sticks)."),
+				Seg("PS5SX2/LeftStickDpad", "Left stick as D-pad", "0", "", {{"0", "Off"}, {"1", "Also"}, {"2", "Only"}},
+					"For games that only read the D-pad. Also: the left stick presses the D-pad as it moves. Only: it presses just the D-pad, "
+					"and the game's left stick stays still."),
+			},
+			kTabControls},
 		{"Keyboard and mouse",
 			{
 				Seg("PS5SX2/KeyboardMouse", "Keyboard and mouse", "0", "Keyboard and mouse %",
@@ -167,7 +256,8 @@ const std::vector<OptionGroup>& OptionGroups()
 					"How far a mouse movement pushes the stick. Faster reaches a full stick with less movement."),
 				Seg("PS5SX2/MouseButtons", "Mouse buttons", "0", "Mouse buttons %", {{"0", "R1 and L1"}, {"1", "R2 and L2"}},
 					"Left click and right click. Most shooters fire with R1 or R2 and aim with L1 or L2. The wheel click is R3."),
-			}},
+			},
+			kTabControls},
 	};
 	return groups;
 }
@@ -218,6 +308,18 @@ void OptionsSheet::Reload()
 	BuildRows();
 }
 
+void OptionsSheet::SetTab(int tab)
+{
+	tab = tab < 0 ? 0 : tab >= kTabCount ? kTabCount - 1 : tab;
+	if (tab == m_tab)
+		return;
+	m_tab = tab;
+	m_armed_row = -1;
+	BuildRows();
+}
+
+// vk-285-116: the rows of the tab shown. The settings: Recommended, the option groups, the memory cards and the patches;
+// the controls: their groups. Each ends with its own reset row.
 void OptionsSheet::BuildRows()
 {
 	m_rows.clear();
@@ -228,29 +330,35 @@ void OptionsSheet::BuildRows()
 		m_rows.push_back(r);
 		return m_rows.back();
 	};
-	if (m_has_preset || !m_global)
+	const bool settings = m_tab == kTabSettings;
+	if (settings && (m_has_preset || !m_global))
 		add(Kind::Recommended, m_global ? "Recommended for all games" : "Recommended settings");
 	for (const OptionGroup& g : OptionGroups())
 	{
+		if (g.tab != m_tab)
+			continue;
 		add(Kind::Header, g.title);
 		for (const OptionDef& d : g.items)
 			add(Kind::Option, d.label).def = &d;
 	}
-	if (!m_paths.memcards_dir.empty())
+	if (settings && !m_paths.memcards_dir.empty())
 	{
 		add(Kind::Header, "Memory cards");
 		add(Kind::Card, "Slot 1").slot = 1;
 		add(Kind::Card, "Slot 2").slot = 2;
 		add(Kind::NewCard, "New card");
 	}
-	if (!m_patches.empty())
+	if (settings && !m_patches.empty())
 	{
 		add(Kind::Header, "Patches");
 		for (const PatchGroup& p : m_patches)
 			add(Kind::Patch, p.name).patch_desc = p.description.empty() ? p.file : p.description + " (" + p.file + ")";
 	}
 	add(Kind::Header, "");
-	add(Kind::ResetAll, m_global ? "Reset to PCSX2's defaults" : "Follow the settings for all games");
+	if (settings)
+		add(Kind::ResetAll, m_global ? "Reset to PCSX2's defaults" : "Follow the settings for all games");
+	else
+		add(Kind::ResetAll, m_global ? "Reset the controls" : "Follow the controls for all games");
 }
 
 OptionsSheet::Effective OptionsSheet::Get(const std::string& key, const std::string& def) const
@@ -360,6 +468,8 @@ std::string OptionsSheet::Help(const Row& r) const
 				from = m_global ? "Set for all games." : "Set for this game.";
 			else if (e.from == From::Global)
 				from = "Follows the setting for all games.";
+			else if (r.def->key.compare(0, 7, "PS5SX2/") == 0) // vk-285-116: PS5SX2's own options have PS5SX2's defaults
+				from = "The default.";
 			else
 				from = "PCSX2's default.";
 			if (r.def->restart)
@@ -414,8 +524,13 @@ std::string OptionsSheet::Help(const Row& r) const
 			return "What was tuned and tested on a PS5 Pro: " + (summary.empty() ? std::string("follows the settings for all games") : summary) + ".";
 		}
 		case Kind::ResetAll:
-			return m_global ? "Every option on this sheet goes back to PCSX2's default. Lines of gs.ini this sheet doesn't show stay."
-			                : "This game's options go back to following the settings for all games. Its patches and memory cards stay.";
+			if (m_tab == kTabControls) // vk-285-116
+				return m_global ? "Every control on this tab goes back to its default: each button presses its own, the sticks as they are, "
+				                  "save states on L3+R3 or the touchpad."
+				                : "This game's controls go back to following the controls for all games.";
+			return m_global ? "Every option on this tab goes back to PCSX2's default. Lines of gs.ini this sheet doesn't show stay."
+			                : "This game's options go back to following the settings for all games. Its patches, memory cards and controls "
+			                  "stay.";
 		default:
 			return {};
 	}
@@ -593,14 +708,17 @@ bool OptionsSheet::Activate(const Row& r, double now)
 			}
 			std::vector<Change> ch;
 			for (const OptionGroup& g : OptionGroups())
-				for (const OptionDef& d : g.items)
-					if (Find(m_own, d.key))
-						ch.push_back({Change::Unset, d.key, {}});
+				if (g.tab == m_tab) // vk-285-116: the tab shown
+					for (const OptionDef& d : g.items)
+						if (Find(m_own, d.key))
+							ch.push_back({Change::Unset, d.key, {}});
 			if (ch.empty())
 			{
 				m_status = "Nothing to reset";
 				return false;
 			}
+			if (m_tab == kTabControls)
+				return Save(ch, m_global ? "controls reset to their defaults" : "controls follow all games again");
 			return Save(ch, m_global ? "reset to PCSX2's defaults" : "follows all games again");
 		}
 		default:
