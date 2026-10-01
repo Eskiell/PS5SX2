@@ -87,6 +87,7 @@ The first start downloads the covers for your games, then the shelf opens.
 | D-pad or left stick | Browse the games |
 | L1 / R1 | Jump a page |
 | Cross or OPTIONS | Play |
+| Square | The game's settings: L1 / R1 switch between this game and all games, L2 / R2 between *Settings* and *Controls* |
 
 **In a game**
 
@@ -97,6 +98,8 @@ The first start downloads the covers for your games, then the shelf opens.
 | Touch the left / right third of the touchpad + Cross | Save / load state (slot 1) |
 | Hold L3 + R3 and let go | Next display filter |
 | Hold L2 + D-pad Down for 2 seconds | Open the settings page in the PS5's web browser; the game keeps running |
+
+*Save states* on the *Controls* tab picks the buttons that save and load: L3 + R3 or the touchpad (both, as above), only one of them, L1 + R1 or L2 + R2 with D-pad Up / Down, or none. These combos always use the controller's own buttons, whatever the remapping below.
 
 ### USB keyboard and mouse
 
@@ -128,12 +131,19 @@ Scan the QR code in the corner of the shelf with a phone on the same network. Yo
 - **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed.
 - **Game:** the language the PS2 tells games.
 - **On screen:** the info box in the top right corner (off, FPS, or FPS and how busy the EE, GS and VU threads are) and the blue FPS graph.
-- **Controller:** rumble.
-- **Keyboard and mouse:** whether the keys and the mouse play as the controller or as the PS2's USB devices, which stick the mouse moves, its speed and its buttons.
 - **Patches:** the game's patch groups, such as 60 FPS.
 - **Memory cards:** make blank 8, 16, 32 or 64 MB cards (they go in `/data/PCSX2/memcards/`) and choose the card in each slot, for all games or for one.
 
-Most changes show up in the running game straight away. The page marks the few that need a restart. **Recommended** puts back the settings tuned for that game.
+The **Controls** tab has the controller's settings, for all games or for one game:
+
+- **Controller:** rumble, and which buttons save and load the state.
+- **Buttons:** what each of the controller's buttons presses on the PS2 controller. Any button can press any PS2 button, the analog button, a *light press* (while it's held, the other buttons press at half strength, for games such as Metal Gear Solid 2 and 3 that read how hard a button is pressed) or nothing. A trigger on a face button presses as hard as it's pulled.
+- **Sticks:** swap the sticks, invert either one, and make the left stick press the D-pad (as well as moving, or instead).
+- **Keyboard and mouse:** whether the keys and the mouse play as the controller or as the PS2's USB devices, which stick the mouse moves, its speed and its buttons.
+
+Most changes show up in the running game straight away. The page marks the few that need a restart. **Recommended** puts back the settings tuned for that game; it leaves your controls, language and memory cards alone.
+
+The same settings are on the shelf: press Square on a game.
 
 In a game, hold L2 + D-pad Down for 2 seconds and the PS5's own web browser opens on the page. The game keeps running behind it. If the console won't open its browser, the page's QR code and address show over the game instead, and the same combo hides them.
 
