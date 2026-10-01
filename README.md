@@ -95,11 +95,10 @@ The first start downloads the covers for your games, then the shelf opens.
 |---|---|
 | Hold L1 + R1, click the touchpad | Back to the shelf |
 | Hold L3 + R3, then D-pad Up / Down | Save / load state (slot 1) |
-| Touch the left / right third of the touchpad + Cross | Save / load state (slot 1) |
 | Hold L3 + R3 and let go | Next display filter |
 | Hold L2 + D-pad Down for 2 seconds | Open the settings page in the PS5's web browser; the game keeps running |
 
-*Save states* on the *Controls* tab picks the buttons that save and load: L3 + R3 or the touchpad (both, as above), only one of them, L1 + R1 or L2 + R2 with D-pad Up / Down, or none. These combos always use the controller's own buttons, whatever the remapping below.
+You can change the save and load buttons on the *Controls* tab (*Buttons*): pick two buttons for each, and how long to hold them (instant up to 3 seconds). A finger on the touchpad's left or right side counts as a button too: the old touchpad + Cross combo is *Touchpad left* + *Cross* to save and *Touchpad right* + *Cross* to load. These combos always use the controller's own buttons, whatever the remapping below.
 
 ### USB keyboard and mouse
 
@@ -136,9 +135,9 @@ Scan the QR code in the corner of the shelf with a phone on the same network. Yo
 
 The **Controls** tab has the controller's settings, for all games or for one game:
 
-- **Controller:** rumble, and which buttons save and load the state.
-- **Buttons:** what each of the controller's buttons presses on the PS2 controller. Any button can press any PS2 button, the analog button, a *light press* (while it's held, the other buttons press at half strength, for games such as Metal Gear Solid 2 and 3 that read how hard a button is pressed) or nothing. A trigger on a face button presses as hard as it's pulled.
+- **Buttons:** the two buttons that save the state, the two that load it, and how long they're held first. Then what each of the controller's buttons presses on the PS2 controller: any PS2 button, the analog button, a *light press* (while it's held, the other buttons press at half strength, for games such as Metal Gear Solid 2 and 3 that read how hard a button is pressed) or nothing. A trigger on a face button presses as hard as it's pulled.
 - **Sticks:** swap the sticks, invert either one, and make the left stick press the D-pad (as well as moving, or instead).
+- **Controller:** rumble.
 - **Keyboard and mouse:** whether the keys and the mouse play as the controller or as the PS2's USB devices, which stick the mouse moves, its speed and its buttons.
 
 Most changes show up in the running game straight away. The page marks the few that need a restart. **Recommended** puts back the settings tuned for that game; it leaves your controls, language and memory cards alone.
