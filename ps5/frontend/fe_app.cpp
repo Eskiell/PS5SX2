@@ -47,6 +47,19 @@ std::string SizeText(uint64_t bytes)
 	return Size(bytes);
 }
 
+// vk-285-114: multiplies the alpha of UI vertices [begin, end) by `f` (what the options sheet covers fades out).
+void FadeRange(std::vector<UiVertex>& ui, size_t begin, size_t end, float f)
+{
+	if (f >= 1.0f)
+		return;
+	for (size_t i = begin; i < end && i < ui.size(); i++)
+	{
+		const uint32_t c = ui[i].color;
+		const uint32_t a = static_cast<uint32_t>(static_cast<float>(c >> 24) * Clamp(f, 0.0f, 1.0f) + 0.5f);
+		ui[i].color = (c & 0x00FFFFFFu) | (a << 24);
+	}
+}
+
 // Screen position (0..1) of a world point.
 Vec2 Project(const Mat4& view_proj, const Vec3& p)
 {
@@ -187,14 +200,29 @@ void App::Update(double dt, const Input& in)
 	m_time += dt;
 	const float fdt = static_cast<float>(std::min(dt, 0.1));
 
+	// vk-285-114: the options sheet slides in and out; while it is open it has the buttons.
+	{
+		const float target = m_sheet_open ? 1.0f : 0.0f;
+		const float step = fdt / 0.22f;
+		m_sheet_anim = m_sheet_anim < target ? std::min(target, m_sheet_anim + step) : std::max(target, m_sheet_anim - step);
+		const float a = 1.0f - std::exp(-fdt * 14.0f);
+		m_sheet_scroll += (m_sheet_scroll_target - m_sheet_scroll) * a;
+	}
+
 	if (m_launching)
 	{
 		if (m_time - m_launch_time > 0.6)
 			m_done = true;
 	}
+	else if (m_sheet_open)
+	{
+		UpdateSheet(dt, in);
+		m_prev = in;
+	}
 	else
 	{
-		const bool any = in.left || in.right || in.cross || in.options || in.l1 || in.r1;
+		const bool any = in.left || in.right || in.cross || in.options || in.l1 || in.r1 || in.up || in.down || in.square || in.triangle ||
+		                 in.circle;
 		if (!m_released)
 			m_released = !any;
 		else
@@ -233,6 +261,12 @@ void App::Update(double dt, const Input& in)
 				m_launching = true;
 				m_launch_time = m_time;
 				Sound(Sfx::Launch, 0.0f);
+			}
+			// vk-285-114: Square opens the selected game's options sheet (the settings for all games when there is no game).
+			else if (in.square && !m_prev.square && m_sheet_anim < 0.05f)
+			{
+				OpenSheet(m_games.empty());
+				Sound(Sfx::Move, 0.3f);
 			}
 		}
 		m_prev = in;
@@ -294,9 +328,13 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	const float k = H / 2160.0f;
 	const float t = static_cast<float>(m_time);
 	const Mat4 proj = Mat4::Perspective(Radians(kFovY), W / H, 0.1f, 60.0f);
-	const Mat4 view = Mat4::LookAt(kEye, kTarget, Vec3(0, 1, 0));
+	// vk-285-114: with the options sheet open on the right, the shelf slides left (the camera moves right), so the
+	// picked case stays in view beside its settings.
+	const float slide = Smoothstep(0.0f, 1.0f, m_sheet_anim);
+	const Vec3 shift(1.45f * slide, 0.0f, 0.0f);
+	const Mat4 view = Mat4::LookAt(kEye + shift, kTarget + shift, Vec3(0, 1, 0));
 	f.view_proj = proj * view;
-	f.cam_pos = kEye;
+	f.cam_pos = kEye + shift;
 	f.time = t;
 	f.glow[0] = m_glow[0];
 	f.glow[1] = m_glow[1];
@@ -419,6 +457,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	// user's choice: "less"); it still scans from a metre or so, and a phone keeps the page's key
 	// once it has opened it, so the code is mostly needed once.
 	const bool qr_shown = m_qr_size > 0;
+	const size_t qr_begin = ui.size();
 	if (qr_shown)
 	{
 		const float tile = 220.0f * k;
@@ -449,7 +488,10 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	}
 	else if (m_web_known)
 		m_fonts->AddText(ui, Tr(Str::NoNetwork), W - margin, H - 170.0f * k, 32.0f * k, faint, 0.1f, Fonts::Right);
+	const float sheet_e = Smoothstep(0.0f, 1.0f, m_sheet_anim);
+	FadeRange(ui, qr_begin, ui.size(), 1.0f - sheet_e); // vk-285-114: under the options sheet
 
+	const size_t title_begin = ui.size();
 	if (n > 0)
 	{
 		const GameInfo& g = m_games[static_cast<size_t>(m_selected)];
@@ -491,6 +533,14 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	}
 	else
 		m_fonts->AddText(ui, Tr(Str::NoGames), W * 0.5f, H * 0.5f, 64.0f * k, white, 0.4f, Fonts::Center);
+	FadeRange(ui, title_begin, ui.size(), 1.0f - sheet_e); // vk-285-114: the sheet shows the title itself
+
+	// vk-285-114: the options sheet, over a dimmed shelf.
+	if (m_sheet_anim > 0.001f)
+	{
+		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.42f * sheet_e));
+		BuildSheet(ui, W, H, k, accent);
+	}
 
 	// Button hints.
 	const float hy = H - 88.0f * k, ipx = 64.0f * k, tpx = 40.0f * k;
@@ -518,13 +568,30 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		hx += m_fonts->AddText(ui, label, hx, hy, tpx, dim, 0.1f);
 		hx += 56.0f * k;
 	};
-	hint(icon::Cross, nullptr, Tr(Str::HintPlay)); // vk-285-110: hints in the PS5's language
-	// vk-285-69: the shelf opens with one game too (its QR code leads to the settings page and the
-	// logs); browsing needs two.
-	if (n > 1)
+	if (m_sheet_open || m_sheet_anim > 0.5f)
 	{
-		hint(icon::DpadLeftRight, nullptr, Tr(Str::HintBrowse));
-		hint("#L1", "#R1", Tr(Str::HintJump));
+		// vk-285-114: the options sheet's buttons.
+		hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
+		hint(icon::DpadLeftRight, nullptr, Tr(Str::HintChange));
+		hint(icon::Triangle, nullptr, Tr(Str::HintReset));
+		hint(icon::Circle, nullptr, Tr(Str::HintBack));
+		if (n > 0)
+		{
+			const std::string scope = std::string(Tr(Str::SheetThisGame)) + " / " + Tr(Str::SheetAllGames);
+			hint("#L1", "#R1", scope.c_str());
+		}
+	}
+	else
+	{
+		hint(icon::Cross, nullptr, Tr(Str::HintPlay)); // vk-285-110: hints in the PS5's language
+		// vk-285-69: the shelf opens with one game too (its QR code leads to the settings page and the
+		// logs); browsing needs two.
+		if (n > 1)
+		{
+			hint(icon::DpadLeftRight, nullptr, Tr(Str::HintBrowse));
+			hint("#L1", "#R1", Tr(Str::HintJump));
+		}
+		hint(icon::Square, nullptr, Tr(Str::HintSettings)); // vk-285-114
 	}
 
 	std::string status = m_covers ? m_covers->Status() : std::string();
@@ -536,7 +603,8 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		if (!m_cfg.build_tag.empty())
 			status = m_cfg.build_tag + "   \xC2\xB7   " + status;
 	}
-	m_fonts->AddText(ui, status.c_str(), W - margin, hy, 36.0f * k, faint, 0.1f, Fonts::Right);
+	if (sheet_e < 0.5f)
+		m_fonts->AddText(ui, status.c_str(), W - margin, hy, 36.0f * k, faint, 0.1f, Fonts::Right);
 
 	// Test build 1 (vk-285-55): testing builds say so across the middle of the shelf, over the
 	// cases, with the build under it, so every photo and video of one names the build.
@@ -564,5 +632,409 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			m_fonts->AddText(ui, m_cfg.test_note.c_str(), W * 0.5f, note_base, note_px, Rgba(1, 1, 1, 0.75f), 0.5f, Fonts::Center);
 		}
 	}
+}
+
+// ---- vk-285-114: the options sheet ---------------------------------------------------------------------------------
+// Square on the shelf opens it for the picked game; L1/R1 switch between that game and all games; D-pad up/down move,
+// left/right (or Cross) change the value, Triangle puts the row back to what it follows, Circle, Square or Options close
+// it. Every change is saved at once, as the settings page saves (fe_options.cpp).
+
+namespace
+{
+// `text` in lines of at most `width` pixels at `px`, at most `max_lines` (the last one ends in an ellipsis when cut).
+std::vector<std::string> Wrap(const Fonts& fonts, const std::string& text, float px, float width, int max_lines)
+{
+	std::vector<std::string> lines;
+	std::string line, word;
+	auto flush_word = [&]() {
+		if (word.empty())
+			return;
+		const std::string tryline = line.empty() ? word : line + " " + word;
+		if (!line.empty() && fonts.Measure(tryline.c_str(), px) > width)
+		{
+			lines.push_back(line);
+			line = word;
+		}
+		else
+			line = tryline;
+		word.clear();
+	};
+	for (char c : text)
+	{
+		if (c == ' ' || c == '\n')
+		{
+			flush_word();
+			if (c == '\n' && !line.empty())
+			{
+				lines.push_back(line);
+				line.clear();
+			}
+		}
+		else
+			word += c;
+	}
+	flush_word();
+	if (!line.empty())
+		lines.push_back(line);
+	if (static_cast<int>(lines.size()) > max_lines)
+	{
+		lines.resize(static_cast<size_t>(max_lines));
+		std::string& last = lines.back();
+		while (!last.empty() && fonts.Measure((last + "\xE2\x80\xA6").c_str(), px) > width)
+		{
+			// Whole UTF-8 characters only (the summaries have middle dots).
+			while (last.size() > 1 && (static_cast<unsigned char>(last.back()) & 0xC0) == 0x80)
+				last.pop_back();
+			last.pop_back();
+		}
+		last += "\xE2\x80\xA6";
+	}
+	return lines;
+}
+
+// The shortest string with `text`'s start that fits `width` (an ellipsis marks the cut).
+std::string Fit(const Fonts& fonts, std::string text, float px, float width)
+{
+	if (fonts.Measure(text.c_str(), px) <= width)
+		return text;
+	while (!text.empty() && fonts.Measure((text + "\xE2\x80\xA6").c_str(), px) > width)
+	{
+		text.pop_back();
+		while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80) // a whole UTF-8 character
+			text.pop_back();
+		if (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0xC0)
+			text.pop_back();
+	}
+	return text + "\xE2\x80\xA6";
+}
+
+// The sheet's measures, in 2160-line pixels (scaled by k when drawn).
+constexpr float kSheetW = 1260.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f;
+constexpr float kSheetListTop = 352.0f;  // from the sheet's top
+constexpr float kSheetHelpH = 352.0f;    // the help box at the bottom
+constexpr float kRowH = 94.0f, kHeaderH = 76.0f;
+} // namespace
+
+void App::OpenSheet(bool global)
+{
+	const GameInfo* g = (!global && !m_games.empty()) ? &m_games[static_cast<size_t>(m_selected)] : nullptr;
+	m_sheet_global = g == nullptr;
+	m_sheet.Open(m_cfg.options, g);
+	m_sheet_saved_at_open = 0;
+	if (!m_sheet_open)
+	{
+		m_sheet_open = true;
+		m_sheet_scroll = m_sheet_scroll_target = 0;
+	}
+	// The first row that can be picked.
+	m_sheet_row = 0;
+	const auto& rows = m_sheet.rows();
+	while (m_sheet_row < static_cast<int>(rows.size()) && !m_sheet.Selectable(rows[static_cast<size_t>(m_sheet_row)]))
+		m_sheet_row++;
+	m_sheet_scroll_target = 0;
+	m_sheet_status.clear();
+	m_sheet_held_v = m_sheet_held_h = 0;
+	std::printf("[options] sheet for %s (%s)\n", m_sheet.title().c_str(), m_sheet.file_label().c_str());
+	std::fflush(stdout);
+}
+
+void App::RefreshBadges()
+{
+	if (!m_cfg.refresh_game || m_games.empty())
+		return;
+	if (m_sheet_global)
+		for (GameInfo& g : m_games)
+			m_cfg.refresh_game(g);
+	else
+		m_cfg.refresh_game(m_games[static_cast<size_t>(m_selected)]);
+}
+
+void App::CloseSheet()
+{
+	if (!m_sheet_open)
+		return;
+	m_sheet_open = false;
+	if (m_sheet.saved() > 0)
+		RefreshBadges();
+	std::printf("[options] sheet closed (%d change(s) saved)\n", m_sheet.saved());
+	std::fflush(stdout);
+}
+
+bool App::SheetMove(int dir)
+{
+	const auto& rows = m_sheet.rows();
+	int r = m_sheet_row;
+	for (;;)
+	{
+		r += dir;
+		if (r < 0 || r >= static_cast<int>(rows.size()))
+			return false;
+		if (m_sheet.Selectable(rows[static_cast<size_t>(r)]))
+			break;
+	}
+	m_sheet_row = r;
+	return true;
+}
+
+void App::UpdateSheet(double dt, const Input& in)
+{
+	auto pressed = [&](bool now, bool before) { return now && !before; };
+	const double now = m_time;
+	const auto& rows = m_sheet.rows();
+	if (rows.empty())
+	{
+		CloseSheet();
+		return;
+	}
+	m_sheet_row = std::max(0, std::min(m_sheet_row, static_cast<int>(rows.size()) - 1));
+
+	if (pressed(in.circle, m_prev.circle) || pressed(in.square, m_prev.square) || pressed(in.options, m_prev.options))
+	{
+		CloseSheet();
+		Sound(Sfx::Move, 0.3f);
+		return;
+	}
+	if ((pressed(in.l1, m_prev.l1) || pressed(in.r1, m_prev.r1)) && !m_games.empty())
+	{
+		const bool global = pressed(in.r1, m_prev.r1);
+		if (global != m_sheet_global)
+		{
+			const int saved = m_sheet.saved();
+			if (saved > 0)
+				RefreshBadges();
+			OpenSheet(global);
+			Sound(global ? Sfx::JumpRight : Sfx::JumpLeft, global ? 0.3f : -0.1f);
+		}
+		else
+			Sound(Sfx::Edge, 0.3f);
+		return;
+	}
+
+	// Up and down, repeating while held.
+	const int v = in.up ? -1 : in.down ? 1 : 0;
+	const bool v_fresh = (in.up && !m_prev.up) || (in.down && !m_prev.down);
+	if (v != 0 && v_fresh)
+	{
+		Sound(SheetMove(v) ? Sfx::Move : Sfx::Edge, 0.3f);
+		m_sheet_held_v = v;
+		m_sheet_held_for = 0;
+		m_sheet_next_repeat = 0.34;
+	}
+	else if (v != 0 && v == m_sheet_held_v)
+	{
+		m_sheet_held_for += dt;
+		bool moved = false;
+		while (m_sheet_held_for >= m_sheet_next_repeat)
+		{
+			moved |= SheetMove(v);
+			m_sheet_next_repeat += 0.085;
+		}
+		if (moved)
+			Sound(Sfx::MoveRepeat, 0.3f);
+	}
+	else
+		m_sheet_held_v = 0;
+
+	const OptionsSheet::Row& row = rows[static_cast<size_t>(m_sheet_row)];
+	auto after = [&](bool changed) {
+		const std::string& st = m_sheet.status();
+		if (!st.empty())
+		{
+			m_sheet_status = st;
+			m_sheet_status_time = now;
+		}
+		Sound(changed ? Sfx::Move : Sfx::Edge, 0.3f);
+	};
+
+	// Left and right change the value (not on the action rows, which Cross runs).
+	const bool action = row.kind == OptionsSheet::Kind::Recommended || row.kind == OptionsSheet::Kind::ResetAll;
+	const int h = in.left ? -1 : in.right ? 1 : 0;
+	const bool h_fresh = (in.left && !m_prev.left) || (in.right && !m_prev.right);
+	if (h != 0 && h_fresh && !action)
+	{
+		after(m_sheet.Step(row, h));
+		m_sheet_held_h = h;
+		m_sheet_held_for = 0;
+		m_sheet_next_repeat = 0.45;
+		return; // the rows may have been made again
+	}
+	if (h == 0)
+		m_sheet_held_h = 0;
+
+	if (pressed(in.cross, m_prev.cross))
+	{
+		after(action || row.kind == OptionsSheet::Kind::NewCard ? m_sheet.Activate(row, now) : m_sheet.Step(row, 1));
+		return;
+	}
+	if (pressed(in.triangle, m_prev.triangle))
+	{
+		after(m_sheet.Reset(row));
+		return;
+	}
+}
+
+void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
+{
+	const float e = Smoothstep(0.0f, 1.0f, m_sheet_anim);
+	const float sw = kSheetW * k, top = kSheetTop * k, sh = H - top - kSheetBottomGap * k;
+	const float margin = 110.0f * k;
+	const float x = W - margin - sw + (1.0f - e) * (sw + margin + 60.0f * k);
+	const float y = top;
+	const size_t begin = ui.size();
+
+	const uint32_t hi = Rgba(1, 1, 1), mid = Rgba(0.74f, 0.72f, 0.84f), lo = Rgba(0.52f, 0.50f, 0.64f);
+	const uint32_t own = Rgba(Mix(m_glow[0], 1.0f, 0.45f), Mix(m_glow[1], 1.0f, 0.45f), Mix(m_glow[2], 1.0f, 0.45f));
+
+	// The panel: a soft shadow, a hairline edge, the body.
+	Fonts::AddRoundedRect(ui, x - 6 * k, y + 10 * k, sw + 12 * k, sh + 12 * k, 48 * k, Rgba(0, 0, 0, 0.35f));
+	Fonts::AddRoundedRect(ui, x - 2 * k, y - 2 * k, sw + 4 * k, sh + 4 * k, 44 * k, Rgba(1, 1, 1, 0.16f));
+	Fonts::AddRoundedRect(ui, x, y, sw, sh, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f)); // the shelf's text must not show through
+
+	const float cx = x + 64 * k, inner = sw - 128 * k;
+	m_fonts->AddText(ui, m_sheet_global ? "SETTINGS FOR ALL GAMES" : "GAME SETTINGS", cx, y + 84 * k, 28 * k, lo, 0.45f);
+	{
+		float px = 56 * k;
+		const std::string& t = m_sheet.title();
+		while (px > 40 * k && m_fonts->Measure(t.c_str(), px) > inner)
+			px -= 2 * k;
+		m_fonts->AddText(ui, Fit(*m_fonts, t, px, inner).c_str(), cx, y + 158 * k, px, hi, 0.55f);
+	}
+
+	// This game / All games.
+	{
+		const float py = y + 204 * k, ph = 64 * k, ppx = 32 * k;
+		float px = cx;
+		auto pill = [&](const char* label, bool on, bool enabled) {
+			const float w = m_fonts->Measure(label, ppx) + 56 * k;
+			if (on)
+				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, 0.92f));
+			else
+				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, enabled ? 0.10f : 0.04f));
+			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo), 0.5f,
+				Fonts::Center);
+			px += w + 16 * k;
+		};
+		pill(Tr(Str::SheetThisGame), !m_sheet_global, !m_games.empty());
+		pill(Tr(Str::SheetAllGames), m_sheet_global, true);
+		// Which file, small, after the pills.
+		m_fonts->AddText(ui, Fit(*m_fonts, m_sheet.file_label(), 26 * k, x + sw - 64 * k - px).c_str(), x + sw - 64 * k, py + ph * 0.5f + 9 * k,
+			26 * k, lo, 0.1f, Fonts::Right);
+	}
+	Fonts::AddRoundedRect(ui, cx, y + 310 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
+
+	// The rows: a list that scrolls to keep the focused row in view.
+	const auto& rows = m_sheet.rows();
+	const float list_top = y + kSheetListTop * k, list_bottom = y + sh - kSheetHelpH * k;
+	const float view_h = (list_bottom - list_top) / k;
+	std::vector<float> offs(rows.size());
+	float acc = 0, focus_top = 0, focus_bottom = 0;
+	for (size_t i = 0; i < rows.size(); i++)
+	{
+		offs[i] = acc;
+		const float hgt = rows[i].kind == OptionsSheet::Kind::Header ? (rows[i].label.empty() ? 30.0f : kHeaderH) : kRowH;
+		if (static_cast<int>(i) == m_sheet_row)
+		{
+			// The header just above the focused row comes into view with it.
+			focus_top = (i > 0 && rows[i - 1].kind == OptionsSheet::Kind::Header) ? offs[i - 1] : acc;
+			focus_bottom = acc + hgt;
+		}
+		acc += hgt;
+	}
+	const float total = acc;
+	if (focus_top < m_sheet_scroll_target + 20.0f)
+		m_sheet_scroll_target = std::max(0.0f, focus_top - 20.0f);
+	if (focus_bottom > m_sheet_scroll_target + view_h - 20.0f)
+		m_sheet_scroll_target = focus_bottom - view_h + 20.0f;
+	m_sheet_scroll_target = std::max(0.0f, std::min(m_sheet_scroll_target, std::max(0.0f, total - view_h)));
+
+	for (size_t i = 0; i < rows.size(); i++)
+	{
+		const OptionsSheet::Row& r = rows[i];
+		const float ry = list_top + (offs[i] - m_sheet_scroll) * k;
+		const bool header = r.kind == OptionsSheet::Kind::Header;
+		const float rh = (header ? (r.label.empty() ? 30.0f : kHeaderH) : kRowH) * k;
+		if (ry < list_top - 2 * k || ry + rh > list_bottom + 2 * k)
+			continue; // outside the list's window
+		if (header)
+		{
+			if (!r.label.empty())
+			{
+				std::string upper = r.label;
+				for (char& c : upper)
+					c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+				m_fonts->AddText(ui, upper.c_str(), cx, ry + 54 * k, 26 * k, lo, 0.45f);
+			}
+			continue;
+		}
+		const bool focused = static_cast<int>(i) == m_sheet_row;
+		const float bx = x + 32 * k, bw = sw - 64 * k, bh = rh - 10 * k;
+		if (focused)
+		{
+			Fonts::AddRoundedRect(ui, bx, ry, bw, bh, 26 * k, Rgba(1, 1, 1, 0.11f));
+			Fonts::AddRoundedRect(ui, bx + 14 * k, ry + 24 * k, 6 * k, bh - 48 * k, 3 * k, accent);
+		}
+		const float mid_y = ry + bh * 0.5f + 13 * k; // the text's baseline, centred in the row
+		const float lpx = 38 * k, vpx = 36 * k;
+		const bool action = r.kind == OptionsSheet::Kind::Recommended || r.kind == OptionsSheet::Kind::ResetAll;
+
+		std::string value = m_sheet.Value(r);
+		const bool armed = m_sheet.Armed(r, m_time);
+		if (armed)
+			value = "Press again";
+		else if (action && r.kind == OptionsSheet::Kind::ResetAll)
+			value.clear();
+		if (r.kind == OptionsSheet::Kind::NewCard && focused)
+			value += "  \xC2\xB7  Create";
+
+		const float value_room = bw * 0.46f;
+		const std::string label = Fit(*m_fonts, r.label, lpx, bw - 80 * k - (value.empty() ? 0.0f : std::min(value_room, m_fonts->Measure(value.c_str(), vpx)) + 90 * k));
+		m_fonts->AddText(ui, label.c_str(), bx + 48 * k, mid_y, lpx, action ? (focused ? hi : mid) : hi, 0.25f);
+
+		if (!value.empty())
+		{
+			const std::string shown = Fit(*m_fonts, value, vpx, value_room);
+			const OptionsSheet::From from = m_sheet.Source(r);
+			uint32_t vc = from == OptionsSheet::From::Own ? own : mid;
+			if (armed || (action && focused))
+				vc = own;
+			const float vx = bx + bw - 44 * k - (focused && !action ? 30 * k : 0.0f);
+			const float vw = m_fonts->AddText(ui, shown.c_str(), vx, mid_y, vpx, vc, 0.5f, Fonts::Right);
+			if (focused && !action)
+			{
+				// The arrows either side of a value that left and right change.
+				m_fonts->AddText(ui, "\xE2\x80\xB9", vx - vw - 26 * k, mid_y + 1 * k, 44 * k, hi, 0.4f, Fonts::Center);
+				m_fonts->AddText(ui, "\xE2\x80\xBA", vx + 26 * k, mid_y + 1 * k, 44 * k, hi, 0.4f, Fonts::Center);
+			}
+			// A dot beside a value this file sets itself (not what it follows).
+			if (from == OptionsSheet::From::Own && !action && !focused)
+				Fonts::AddRoundedRect(ui, vx - vw - 30 * k, mid_y - 18 * k, 12 * k, 12 * k, 6 * k, own);
+		}
+	}
+	// A hint that there is more above or below.
+	if (m_sheet_scroll > 4.0f)
+		m_fonts->AddText(ui, "\xE2\x80\xA2 \xE2\x80\xA2 \xE2\x80\xA2", x + sw * 0.5f, list_top - 10 * k, 22 * k, lo, 0.3f, Fonts::Center);
+	if (m_sheet_scroll + view_h < total - 4.0f)
+		m_fonts->AddText(ui, "\xE2\x80\xA2 \xE2\x80\xA2 \xE2\x80\xA2", x + sw * 0.5f, list_bottom + 22 * k, 22 * k, lo, 0.3f, Fonts::Center);
+
+	// What the focused row does, and what the last change did.
+	Fonts::AddRoundedRect(ui, cx, list_bottom + 44 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
+	if (m_sheet_row >= 0 && m_sheet_row < static_cast<int>(rows.size()))
+	{
+		const std::string help = m_sheet.Help(rows[static_cast<size_t>(m_sheet_row)]);
+		float hy = list_bottom + 110 * k;
+		for (const std::string& line : Wrap(*m_fonts, help, 31 * k, inner, 4))
+		{
+			m_fonts->AddText(ui, line.c_str(), cx, hy, 31 * k, mid, 0.1f);
+			hy += 44 * k;
+		}
+	}
+	if (!m_sheet_status.empty() && m_time - m_sheet_status_time < 3.0)
+	{
+		const float a = 1.0f - Smoothstep(2.2f, 3.0f, static_cast<float>(m_time - m_sheet_status_time));
+		const uint32_t c = (own & 0x00FFFFFFu) | (static_cast<uint32_t>(a * 255.0f) << 24);
+		m_fonts->AddText(ui, Fit(*m_fonts, m_sheet_status, 30 * k, inner).c_str(), cx, y + sh - 40 * k, 30 * k, c, 0.4f);
+	}
+
+	FadeRange(ui, begin, ui.size(), Clamp(e * 1.4f, 0.0f, 1.0f));
 }
 } // namespace fe

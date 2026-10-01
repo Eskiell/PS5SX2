@@ -18,6 +18,10 @@
 
 #include "imgui.h"
 
+#ifdef ORBIS_VULKAN
+#include "OrbisGSShaders.h" // vk-285-115: the built-in shader sources
+#endif
+
 #include <algorithm>
 #include <ostream>
 #include <fstream>
@@ -370,7 +374,16 @@ GSVector4i GSDevice::ProcessCopyArea(const GSVector4i& rtsize, const GSVector4i&
 
 std::optional<std::string> GSDevice::ReadShaderSource(const char* filename)
 {
+#ifdef ORBIS_VULKAN
+	// PS5 port (vk-285-115, AI-assisted): the eboot's built-in copy when the resources folder lacks the file (a console
+	// set up by hand: "Failed to read shaders/vulkan/tfx.glsl." ended every game there). OrbisGSShaders.h.
+	std::string source;
+	if (OrbisReadShaderSource(EmuFolders::Resources, filename, &source))
+		return source;
+	return std::nullopt;
+#else
 	return FileSystem::ReadFileToString(Path::Combine(EmuFolders::Resources, filename).c_str());
+#endif
 }
 
 int GSDevice::GetMipmapLevelsForSize(int width, int height)

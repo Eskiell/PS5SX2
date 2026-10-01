@@ -1051,6 +1051,60 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 	s_fh = NULL;
 }
 
+#elif defined(ORBIS_VULKAN)
+
+#include <sys/mman.h>
+
+// PS5 port (vk-285-115, AI-assisted): one block for the GS local memory for the whole run.
+// The port's mmap hands out flexible memory (ps5/coreorbis/orbis-shims/mmapshim.cpp) and ignores the file, so the
+// shm_open/MAP_FIXED mirrors below never existed on the console (each run logged "Fail to mmap contiguous segment"
+// three times; the 16 MiB were plain memory), and its munmap does not give flexible memory back to the pool. Every
+// renderer switch took 16 MiB more: the SoftwareRendererFMVHack games (194 GameDB entries: Final Fantasy X, Ape
+// Escape 2 and 3, 007 From Russia with Love, Ace Combat, Naruto...) switch at every video, and after about nine
+// switches the next GSLocalMemory found no memory and aborted (the testers' signal 6 crashes, 2026-09-29/30, "flex
+// free" falling 155 -> 26 MiB in 16 MiB steps). The closing renderer's block is now kept and handed to the next one,
+// which clears it as it clears a new one; a second renderer alive at the same time (none is today) gets its own.
+static void* s_gs_wrapped_mem = nullptr;
+static size_t s_gs_wrapped_bytes = 0;
+static bool s_gs_wrapped_in_use = false;
+
+void* GSAllocateWrappedMemory(size_t size, size_t repeat)
+{
+	const size_t bytes = size * repeat;
+	if (s_gs_wrapped_mem && !s_gs_wrapped_in_use && s_gs_wrapped_bytes == bytes)
+	{
+		s_gs_wrapped_in_use = true;
+		// As a new block would be: GSLocalMemory clears the first `size` bytes itself, the rest is cleared here.
+		std::memset(static_cast<u8*>(s_gs_wrapped_mem) + size, 0, bytes - size);
+		Console.WriteLn("[dbg] gsm: reusing the GS memory block %p (%zu bytes)", s_gs_wrapped_mem, bytes);
+		return s_gs_wrapped_mem;
+	}
+	void* mem = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (mem == MAP_FAILED)
+	{
+		Console.Error("GS: no memory for the GS local memory (%zu bytes)", bytes);
+		return nullptr;
+	}
+	Console.WriteLn("[dbg] gsm: GS memory block %p (%zu bytes)", mem, bytes);
+	if (!s_gs_wrapped_mem)
+	{
+		s_gs_wrapped_mem = mem;
+		s_gs_wrapped_bytes = bytes;
+		s_gs_wrapped_in_use = true;
+	}
+	return mem;
+}
+
+void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
+{
+	if (ptr == s_gs_wrapped_mem)
+	{
+		s_gs_wrapped_in_use = false; // kept for the next renderer
+		return;
+	}
+	munmap(ptr, size * repeat);
+}
+
 #else
 
 #include <sys/mman.h>

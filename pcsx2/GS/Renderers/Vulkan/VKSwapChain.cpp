@@ -73,9 +73,14 @@ static VkSurfaceKHR CreateOrbisDisplaySurface(VkInstance instance, VkPhysicalDev
 	if (vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physical_device, &plane_count, planes.data()) != VK_SUCCESS)
 		return VK_NULL_HANDLE;
 
-	// The first display with a mode; the largest mode it offers (the console has one).
+	// The first display with a mode; the largest mode it offers (ps5vk has one), and of equally large ones the one nearest
+	// 60 Hz (vk-285-115: RADV can list 119.88 Hz first, when the title asks VideoOut for high frame rates).
 	VkDisplayKHR chosen_display = VK_NULL_HANDLE;
 	VkDisplayModePropertiesKHR chosen_mode = {};
+	const auto off_60hz = [](const VkDisplayModePropertiesKHR& m) {
+		const s64 mhz = static_cast<s64>(m.parameters.refreshRate);
+		return mhz > 60000 ? mhz - 60000 : 60000 - mhz;
+	};
 	for (const VkDisplayPropertiesKHR& display : displays)
 	{
 		u32 mode_count = 0;
@@ -88,9 +93,11 @@ static VkSurfaceKHR CreateOrbisDisplaySurface(VkInstance instance, VkPhysicalDev
 		for (const VkDisplayModePropertiesKHR& mode : modes)
 		{
 			const VkExtent2D& region = mode.parameters.visibleRegion;
-			if (chosen_display == VK_NULL_HANDLE ||
-				region.width * region.height >
-					chosen_mode.parameters.visibleRegion.width * chosen_mode.parameters.visibleRegion.height)
+			const u64 area = static_cast<u64>(region.width) * region.height;
+			const u64 chosen_area =
+				static_cast<u64>(chosen_mode.parameters.visibleRegion.width) * chosen_mode.parameters.visibleRegion.height;
+			if (chosen_display == VK_NULL_HANDLE || area > chosen_area ||
+				(area == chosen_area && off_60hz(mode) < off_60hz(chosen_mode)))
 			{
 				chosen_display = display.display;
 				chosen_mode = mode;
@@ -132,8 +139,8 @@ static VkSurfaceKHR CreateOrbisDisplaySurface(VkInstance instance, VkPhysicalDev
 		LOG_VULKAN_ERROR(res, "vkCreateDisplayPlaneSurfaceKHR failed: ");
 		return VK_NULL_HANDLE;
 	}
-	Console.WriteLn("VK: display surface %ux%u on plane %u", chosen_mode.parameters.visibleRegion.width,
-		chosen_mode.parameters.visibleRegion.height, chosen_plane);
+	Console.WriteLn("VK: display surface %ux%u on plane %u (%.2f Hz)", chosen_mode.parameters.visibleRegion.width,
+		chosen_mode.parameters.visibleRegion.height, chosen_plane, chosen_mode.parameters.refreshRate / 1000.0);
 	return surface;
 }
 #endif

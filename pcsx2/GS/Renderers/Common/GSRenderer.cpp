@@ -13,6 +13,9 @@ extern "C" int sceKernelAvailableFlexibleMemorySize(unsigned long long* size); /
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
 #include "GS/Renderers/Vulkan/VKOrbisTiming.h" // vk-285-113: the readback counters (OrbisPerfMinute)
+#ifdef ORBIS_VULKAN
+#include "OrbisGSShaders.h" // vk-285-115: shadeboost.glsl from the folder or the eboot
+#endif
 #include "GSDumpReplayer.h"
 #include "Host.h"
 #include "PerformanceMetrics.h"
@@ -653,14 +656,10 @@ static bool OrbisVkPresharpShader()
 	if (s_ok < 0)
 	{
 		s_ok = 0;
-		if (FILE* f = fopen((EmuFolders::Resources + "/shaders/vulkan/shadeboost.glsl").c_str(), "rb"))
-		{
-			char buf[4096];
-			const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-			fclose(f);
-			buf[n] = 0;
-			s_ok = strstr(buf, "ORBIS_PRESHARP") ? 1 : 0;
-		}
+		// vk-285-115 (AI-assisted): the file, else the eboot's built-in copy (OrbisGSShaders.h), as the device reads it.
+		std::string text;
+		if (OrbisReadShaderSource(EmuFolders::Resources, "shaders/vulkan/shadeboost.glsl", &text))
+			s_ok = text.find("ORBIS_PRESHARP") != std::string::npos ? 1 : 0;
 		printf("[present] Vulkan shadeboost.glsl: %s\n", s_ok ? "native pre-sharpen (ORBIS_PRESHARP)" : "stock, pre-sharpen off");
 	}
 	return s_ok == 1;

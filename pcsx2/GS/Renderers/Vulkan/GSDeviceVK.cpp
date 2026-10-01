@@ -32,6 +32,8 @@
 #ifdef ORBIS_VULKAN
 #include <unistd.h> // vk-285-14: fsync, _exit (GPU-hang forensics)
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
+#include "OrbisDriver.h" // vk-285-115: ps5vk or RADV (the same objects link with either)
+#include "OrbisExit.h" // vk-285-115: the app ends through the system (_exit() is a SIGSYS on the console)
 #endif
 
 // vk-285-36, vk-285-38: the GS thread's time in Vulkan calls, by kind (VKOrbisTiming.h), printed
@@ -781,6 +783,14 @@ bool GSDeviceVK::CreateDevice(VkSurfaceKHR surface, bool enable_validation_layer
 	                       m_device_properties.limits.timestampPeriod > 0;
 	m_spin_queue_is_graphics_queue =
 		m_spin_queue_family_index == m_graphics_queue_family_index && spin_queue_index == 0;
+#ifdef ORBIS_VULKAN
+	// vk-285-115 (AI-assisted): no GPU spinning on RADV. It exposes a compute family with timestamps and calibrated timestamps, which
+	// turns the spin machinery on, and then every present asks for a new calibration (nothing clears the flag) and every waited submit
+	// (each readback) makes one; on the PS5 each vkGetCalibratedTimestampsEXT is a GPU submission behind the queued work. The port
+	// never spins (HWSpinGPUForReadbacks isn't offered), and ps5vk never had it. Needs testing on the console.
+	if (OrbisDriverIsRADV())
+		m_spinning_supported = false;
+#endif
 
 	m_gpu_timing_supported = (m_device_properties.limits.timestampComputeAndGraphics != 0 &&
 							  queue_family_properties[m_graphics_queue_family_index].timestampValidBits > 0 &&
@@ -1598,7 +1608,7 @@ namespace
 				s_orbis_sub_peak.draws, static_cast<unsigned long long>(s_orbis_overflow_total.load()));
 			orbis_event_log(line);
 		}
-		_exit(3);
+		OrbisExitApp(3); // vk-285-115: was _exit(3), which ends in SIGSYS on the console
 	}
 } // namespace
 
@@ -3923,6 +3933,13 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 	// We need this to be at least 32 byte aligned for AVX2 stores.
 	m_device_properties.limits.minUniformBufferOffsetAlignment =
 		std::max(m_device_properties.limits.minUniformBufferOffsetAlignment, static_cast<VkDeviceSize>(32));
+#ifdef ORBIS_VULKAN
+	// vk-285-115 (AI-assisted): OrbisUploadUniform (flags/ntstore) writes whole 64-byte lines, which ps5vk's 256-byte alignment always
+	// leaves room for; RADV reports 4, so its uniform blocks are put 64 bytes apart too.
+	if (OrbisDriverIsRADV())
+		m_device_properties.limits.minUniformBufferOffsetAlignment =
+			std::max(m_device_properties.limits.minUniformBufferOffsetAlignment, static_cast<VkDeviceSize>(64));
+#endif
 	m_device_properties.limits.minTexelBufferOffsetAlignment =
 		std::max(m_device_properties.limits.minTexelBufferOffsetAlignment, static_cast<VkDeviceSize>(32));
 	m_device_properties.limits.optimalBufferCopyOffsetAlignment =
@@ -4025,7 +4042,9 @@ bool GSDeviceVK::CheckFeatures()
 	// D32_SFLOAT image's depth (and samples it), while its D32_SFLOAT_S8_UINT entry has no
 	// transfer yet, and PCSX2 creates every texture with TRANSFER_SRC|DST. Without a
 	// stencil buffer, DATE uses the texture-barrier path.
-	m_features.stencil_buffer = false;
+	// vk-285-115: RADV has the D32S8 format complete, so PCSX2's own choice stands there (the stencil DATE paths).
+	if (!OrbisDriverIsRADV())
+		m_features.stencil_buffer = false;
 #endif
 
 	// whether we can do point/line expand depends on the range of the device
@@ -7694,7 +7713,9 @@ void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 		if (config.require_full_barrier && config.drawlist && !config.drawlist->empty())
 			groups = static_cast<u32>(config.drawlist->size());
 		const u32 draws = groups + (config.alpha_second_pass.enable ? groups : 0) + (config.blend_multi_pass.enable ? 1 : 0);
-		if (m_orbis_submit_draws != 0 && m_orbis_submit_draws + draws > ORBIS_SUBMIT_DRAW_BUDGET)
+		// vk-285-115: ps5vk only. RADV has no such limit (it splits a long stream itself), so an early submit would only cost it a
+		// render pass restart.
+		if (m_orbis_submit_draws != 0 && m_orbis_submit_draws + draws > ORBIS_SUBMIT_DRAW_BUDGET && !OrbisDriverIsRADV())
 		{
 			static u32 s_budget_flushes = 0;
 			if (++s_budget_flushes <= 3 || (s_budget_flushes % 500) == 0)
@@ -8363,8 +8384,8 @@ void GSDeviceVK::SendHWDraw(const GSHWDrawConfig& config, GSTextureVK* draw_rt, 
 		for (u32 n = 0, p = 0; n < draw_list_size; n++)
 		{
 #ifdef ORBIS_VULKAN
-			if (n != 0 && m_orbis_submit_draws >= ORBIS_SUBMIT_DRAW_BUDGET && !SubmitBetweenGroups())
-				break;
+			if (n != 0 && m_orbis_submit_draws >= ORBIS_SUBMIT_DRAW_BUDGET && !OrbisDriverIsRADV() && !SubmitBetweenGroups())
+				break; // ps5vk only (vk-285-115), as in RenderHW
 #endif
 			IssueBarriers();
 

@@ -38,6 +38,17 @@ enum class Str : int
 	NotifyNotStarted,   // "PS5SX2: the game didn't start.\n%s" (%s: PCSX2's reason, in English)
 	NotifyMenuFailed,   // "PS5SX2: couldn't open the menu, back to the game"
 	NotifyStopped,      // "PS5SX2: the game stopped"
+	// vk-285-114: the options sheet (Square on the shelf).
+	HintSettings,       // "Settings"
+	HintMove,           // "Move"
+	HintChange,         // "Change"
+	HintReset,          // "Reset"
+	HintBack,           // "Back"
+	SheetThisGame,      // "This game"
+	SheetAllGames,      // "All games"
+	// vk-285-115: the two commonest failed starts, said briefly (PCSX2's own BIOS text is four paragraphs).
+	NotifyNoBios,       // "PS5SX2: no PS2 BIOS found. Copy your BIOS file ... to %s ..." (%s: the BIOS folder)
+	NotifyGsFailed,     // "PS5SX2: the game's graphics didn't start. ..."
 	Count
 };
 

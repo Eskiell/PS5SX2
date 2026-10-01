@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 
 #include "Config.h"
+#include "GameDatabase.h" // vk-285-115: the GameDB's MTVU for the live apply
 #include "VMManager.h"
 #include "R5900.h"
 #include "R3000A.h"
@@ -41,6 +42,7 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include "common/SettingsWrapper.h" // eerec-285
 #include "debug_overlay.h"
 #include "OrbisPaths.h" // vk-285-33: the /data/PCSX2 folder layout
+#include "OrbisDriver.h" // vk-285-115: ps5vk or RADV
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "SIO/Memcard/MemoryCardFile.h" // vk-285-48: FileMcd_EmuClose/Open
@@ -1188,6 +1190,27 @@ static void orbis_usb_kbm_for_mode(SettingsInterface& si)
 static MemorySettingsInterface s_base_pre_gsini; // the base layer as it was before boot applied gs.ini
 extern std::atomic<int> g_orbis_live_reapply;
 void OrbisOSDLabel(const char* text);
+
+// vk-285-115 (AI-assisted): MTVU as the running game will have it: the game database's mtvu speed hack wins over the
+// settings while game fixes are on (VMManager::ApplyGameFixes). Comparing the settings' value alone made every live
+// change in such a game (PCSX2's 67 "mtvu: 0" entries, and now PS5SX2's own for Contra, GT3 PAL and Castlevania) read
+// as an MTVU switch: "nothing applied ... a relaunch applies them".
+static bool orbis_mtvu_after_gamedb(bool from_settings)
+{
+  if (!EmuConfig.EnableGameFixes)
+    return from_settings;
+  const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(VMManager::GetDiscSerial());
+  if (game)
+  {
+    for (const auto& hack : game->speedHacks)
+    {
+      if (hack.first == SpeedHack::MTVU)
+        return hack.second != 0;
+    }
+  }
+  return from_settings;
+}
+
 void orbis_reload_gs_ini_cpu()
 {
   MemorySettingsInterface trial = s_base_pre_gsini;
@@ -1200,7 +1223,7 @@ void orbis_reload_gs_ini_cpu()
   }
   bool kept = false;
   if (next.GS.Renderer != EmuConfig.GS.Renderer || !next.GS.RestartOptionsAreEqual(EmuConfig.GS) ||
-      next.Speedhacks.vuThread != EmuConfig.Speedhacks.vuThread)
+      orbis_mtvu_after_gamedb(next.Speedhacks.vuThread) != EmuConfig.Speedhacks.vuThread)
   {
     // vk-285-50: the settings page can change a relaunch-only option (MTVU, the renderer, a GS
     // device option) together with live ones. Those keep their running values and the rest
@@ -1226,7 +1249,7 @@ void orbis_reload_gs_ini_cpu()
       next.LoadSave(slw);
     }
     if (next.GS.Renderer != EmuConfig.GS.Renderer || !next.GS.RestartOptionsAreEqual(EmuConfig.GS) ||
-        next.Speedhacks.vuThread != EmuConfig.Speedhacks.vuThread)
+        orbis_mtvu_after_gamedb(next.Speedhacks.vuThread) != EmuConfig.Speedhacks.vuThread)
     {
       printf("[gsini] not applied: the renderer, a GS device option or MTVU changed - those need a relaunch\n");
       fflush(stdout);
@@ -1457,12 +1480,34 @@ void OrbisBackToMenuCpu()
 
 // vk-285-109: the end of the process without the static destructors and exit handlers, which abort when
 // PCSX2 is only half started (a failed start, or no game): the logs out first.
-[[noreturn]] static void orbis_exit_quietly(int status)
+// vk-285-115 (AI-assisted): through the system, not _exit(). On the console a title's _exit() (and a return from
+// main, exit()) ends in SIGSYS inside libkernel: 1.50 (vk-285-113), the first build with a SIGSYS handler, reported
+// a crash for every start that found no game (1,537 of the 1,554 crash reports of 2026-09-28..10-01: "signal 12 at
+// eboot+0x7ffc003ac", right after "[boot] no game to start: closing"); 112 died of the same signal without a line.
+// sceSystemServiceLoadExec("exit") ends the app properly (RPCS3-PS5 does it: its klog shows sceApplicationExitSpawn3,
+// "Kill for LoadExec", "Terminating pid"). It works asynchronously: wait for it, and _exit() only if it never comes.
+[[noreturn]] void OrbisExitApp(int status)
 {
   orbis_log_drain();
   fflush(stdout);
   fflush(stderr);
+  const int rc = sceSystemServiceLoadExec("exit", nullptr);
+  printf("[boot] exit %d: sceSystemServiceLoadExec(\"exit\") returned 0x%08x; waiting for the system to close the app\n", status,
+    (unsigned)rc);
+  orbis_log_drain();
+  fflush(stdout);
+  if (rc == 0)
+    for (int i = 0; i < 100; i++)
+      usleep(100000);
+  printf("[boot] exit %d: the system didn't close the app in 10 s; _exit()\n", status);
+  orbis_log_drain();
+  fflush(stdout);
   _exit(status);
+}
+
+[[noreturn]] static void orbis_exit_quietly(int status)
+{
+  OrbisExitApp(status);
 }
 
 // vk-285-109: our own eboot again, into the shelf, after a start that failed (the VM never ran, so no memory
@@ -1582,6 +1627,115 @@ static void orbis_log_flag_access(const char* when)
   fflush(stdout);
 }
 
+// vk-285-115 (AI-assisted): the release's switch files when the flags folder is missing or empty. The installer writes
+// them on a first install only, so a console set up by hand (the eboot and the folders copied over) ran with none: the
+// recompilers' code in JIT shared memory (105 MiB of the ~190 MiB flexible budget), the 8192 texture limit, two
+// swapchain images, no wide memory and the driver's conservative live flags. 1.50's logs: "Failed to initialize GS."
+// in 285 sessions on 23 such consoles (the GS device ran out of memory at its last pipelines), and Need for Speed:
+// Most Wanted's recompiler crash. Not when flags/ holds any file (a tester's own set, even a single file: that is
+// also how to keep a folder of no switches) or when a release switch sits in the top folder (the layout before
+// vk-285-33, which OrbisFlag still reads). games/ is created too, for the disc images; bios/ is not, since OrbisDir
+// falls back to the top folder only while there is no bios/ (older setups keep their BIOS there).
+static const char* const kOrbisReleaseFlags[] = {"fastmem", "jitdirect", "sw_renderer", "vk_16k", "vk_async",
+                                                 "vk_deferflush", "vk_depthwait", "vk_fastpoll", "vk_gpuwait",
+                                                 "vk_latewait", "vk_nocrumbs", "vk_noevict", "vk_renderer",
+                                                 "vk_triple", "vk_widemem"};
+
+static void orbis_ensure_data_layout()
+{
+  static const char kRoot[] = "/data/PCSX2";
+  struct stat st{};
+  if (stat(kRoot, &st) != 0 || !S_ISDIR(st.st_mode))
+  {
+    printf("[boot] data layout: no %s folder (errno %d)\n", kRoot, errno);
+    fflush(stdout);
+    return;
+  }
+  const std::string games = std::string(kRoot) + "/games";
+  if (stat(games.c_str(), &st) != 0)
+  {
+    const int rc = mkdir(games.c_str(), 0777);
+    printf("[boot] data layout: created %s (rc=%d errno=%d)\n", games.c_str(), rc, rc ? errno : 0);
+    if (rc == 0)
+      orbis_eventf("created /data/PCSX2/games/ for the disc images");
+  }
+  const std::string flags = std::string(kRoot) + "/flags";
+  const bool have_dir = stat(flags.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+  int entries = 0;
+  if (have_dir)
+  {
+    DIR* d = opendir(flags.c_str());
+    if (!d)
+    {
+      printf("[boot] data layout: can't list %s (errno %d); switch files left as they are\n", flags.c_str(), errno);
+      fflush(stdout);
+      return;
+    }
+    while (const dirent* e = readdir(d))
+      entries += e->d_name[0] != '.' ? 1 : 0;
+    closedir(d);
+  }
+  if (entries > 0)
+  {
+    fflush(stdout);
+    return;
+  }
+  for (const char* name : kOrbisReleaseFlags)
+  {
+    if (stat((std::string(kRoot) + "/" + name).c_str(), &st) == 0)
+    {
+      printf("[boot] data layout: flags/ is %s but %s/%s is there (the older layout): switch files left as they are\n",
+             have_dir ? "empty" : "missing", kRoot, name);
+      fflush(stdout);
+      return;
+    }
+  }
+  if (!have_dir && mkdir(flags.c_str(), 0777) != 0)
+  {
+    printf("[boot] data layout: can't create %s (errno %d)\n", flags.c_str(), errno);
+    fflush(stdout);
+    return;
+  }
+  int made = 0;
+  for (const char* name : kOrbisReleaseFlags)
+  {
+    const int fd = open((flags + "/" + name).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd >= 0)
+    {
+      close(fd);
+      made++;
+    }
+  }
+  const int total = static_cast<int>(sizeof(kOrbisReleaseFlags) / sizeof(kOrbisReleaseFlags[0]));
+  printf("[boot] data layout: flags/ was %s: wrote the release's switch files (%d of %d)\n", have_dir ? "empty" : "missing",
+         made, total);
+  fflush(stdout);
+  orbis_eventf("flags/ was %s: PS5SX2 wrote the release's %d switch files (as the installer does)",
+               have_dir ? "empty" : "missing", made);
+}
+
+// vk-285-115 (AI-assisted): PCSX2's Vulkan shader and pipeline caches renamed to *.bad after a GS device that didn't
+// start, so the next start makes new ones (VKShaderCache keeps the first index entry of a shader, so one bad blob came
+// back at every start). Renamed, not deleted: the last set stays for a report.
+static void orbis_set_aside_shader_caches()
+{
+  static const char* const kNames[] = {"vulkan_shaders.idx", "vulkan_shaders.bin", "vulkan_pipelines.bin"};
+  int moved = 0;
+  for (const char* name : kNames)
+  {
+    const std::string path = EmuFolders::Cache + "/" + name;
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0)
+      continue;
+    const int rc = rename(path.c_str(), (path + ".bad").c_str());
+    printf("[boot] GS didn't start: %s set aside as %s.bad (rc=%d errno=%d)\n", path.c_str(), name, rc, rc ? errno : 0);
+    moved += rc == 0 ? 1 : 0;
+  }
+  fflush(stdout);
+  if (moved > 0)
+    orbis_eventf("the GS didn't start: PCSX2's shader caches set aside (*.bad); the next start makes new ones");
+}
+
 // The Vulkan driver's environment: only setenv()s of flags, after the jailbreak, where they can
 // be read (vk-285-43 made this a function).
 //
@@ -1595,6 +1749,20 @@ static void orbis_log_flag_access(const char* when)
 static void orbis_vk_environment()
 {
   const bool hw = !g_sw_renderer;
+  // vk-285-115 (AI-assisted): the RADV eboot (link-radv.sh). RADV reads none of the PS5VK_* variables below. Its own: the shader
+  // cache, which RADV puts in /app0/radv-shader-cache unless told otherwise (next to PCSX2's caches instead, as ps5vk's), and its
+  // threaded recording for the vk_recordthread flag (RADV_THREADED_RECORDING; a RADV build older than the threaded layer ignores it).
+  if (OrbisDriverIsRADV())
+  {
+    setenv("MESA_SHADER_CACHE_DIR", (OrbisDir("cache") + "/radv-shader-cache").c_str(), 0);
+    if (hw && orbis_flag("vk_recordthread")) setenv("RADV_THREADED_RECORDING", "1", 0);
+    const char* const cache = getenv("MESA_SHADER_CACHE_DIR");
+    const char* const threaded = getenv("RADV_THREADED_RECORDING");
+    printf("[boot] RADV environment (hardware renderer %s): MESA_SHADER_CACHE_DIR=%s RADV_THREADED_RECORDING=%s\n", hw ? "yes" : "no",
+      cache ? cache : "-", threaded ? threaded : "-");
+    fflush(stdout);
+    return;
+  }
   // The driver keeps its compiled shaders next to PCSX2's caches, not in /app0.
   setenv("PS5VK_SHADER_CACHE_DIR", (OrbisDir("cache") + "/ps5vk-shader-cache").c_str(), 0); // vk-285-33: cache/
   // The driver's queue profile (a stderr.log line every 10 s) unless novkprof.
@@ -1747,6 +1915,7 @@ int main()
   // vk-285-35: the exact sources (link-vk.sh; a trailing + marks uncommitted changes).
   printf("[boot] sources: driver %s, pcsx2 %s\n", ORBIS_DRIVER_REV, ORBIS_PCSX2_REV);
 #endif
+  printf("[boot] Vulkan driver: %s\n", OrbisDriverName()); // vk-285-115: link-vk.sh links ps5vk, link-radv.sh RADV
   fflush(stdout);
   printf("[boot] main tid=%llu\n", (unsigned long long)pthread_self());
   {
@@ -1813,13 +1982,17 @@ int main()
   orbis_log_flag_access("after the jailbreak");
 #endif
   orbis_boot_log_release("after the jailbreak"); // vk-285-113: boot.log's first lines, when /data wasn't there yet
+#ifdef ORBIS_VULKAN
+  orbis_ensure_data_layout(); // vk-285-115: the release's switch files on a console set up by hand
+#endif
   orbis_frontend_set_language(OrbisDir("lang")); // vk-285-110: lang/<code>.txt may only be readable now
   // Test build 1 (vk-285-55): what the console is, in boot.log and the settings log.
   s_console_info = orbis_console_survey();
   orbis_eventf("console: %s", s_console_info.c_str());
   // geteuid() may keep reporting 1 even with working creds; the JIT page
   // probe is the ground truth for privilege on this firmware.
-  if (orbis_probe_jit())
+  const bool jit_probe_ok = orbis_probe_jit();
+  if (jit_probe_ok)
     g_jailbreak_ok = 1;
   // vk-285-62: the memory probe (orbis-shims/orbis_memprobe.cpp): what direct memory can hold
   // (executable code, aliased guest pages, fixed mappings), with the flag file memprobe.
@@ -1830,9 +2003,19 @@ int main()
   }
   // vk-285-64: the recompilers' code in direct memory (pcsx2/Memory.cpp, g_orbis_code_direct) with
   // the flag file jitdirect; without it, JIT shared memory out of the flexible budget, as before.
+  //
+  // vk-285-115 (AI-assisted): direct memory without the flag too. 1.50's sessions ran it on 5,892 of 6,325 (the
+  // release's flags have jitdirect); the 433 in JIT shared memory had 105 MiB less of the ~190 MiB flexible budget
+  // and were most of the "Failed to initialize GS." starts. JIT shared memory now only with the flag file jitshared,
+  // and only when the JIT probe worked (where it fails, that memory can't hold code at all).
   {
-    g_orbis_code_direct = orbis_flag("jitdirect") ? 1 : 0;
-    printf("[boot] recompiler code in %s\n", g_orbis_code_direct ? "direct memory (jitdirect)" : "JIT shared memory");
+    const bool want_shared = orbis_flag("jitshared");
+    g_orbis_code_direct = (want_shared && jit_probe_ok) ? 0 : 1;
+    const char* why = !g_orbis_code_direct ? "JIT shared memory (jitshared)"
+                    : want_shared          ? "direct memory (jitshared asked, but the JIT probe failed)"
+                    : orbis_flag("jitdirect") ? "direct memory (jitdirect)"
+                                              : "direct memory (the default)";
+    printf("[boot] recompiler code in %s\n", why);
     fflush(stdout);
   }
   // Orbis dev-loop auto-restart: watch our own eboot; when a new build is
@@ -2279,10 +2462,27 @@ int main()
   else
   {
     // vk-285-109: the reason too (a missing or unreadable image, an unknown disc type).
+    const std::string why = err.GetDescription();
     char msg[512];
-    snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNotStarted), err.GetDescription().c_str()); // vk-285-110
+    // vk-285-115 (AI-assisted): the two commonest failures of 1.50's starts said briefly, in the PS5's language: no
+    // BIOS (689 failed starts on 146 consoles) and the GS device (439 on 28). After a GS failure the shader caches are
+    // set aside, so the next start builds them again (one console's cache held a blob the driver refused, 30 failed
+    // starts in a row).
+    if (why.find("requires a PlayStation 2 BIOS") != std::string::npos)
+    {
+      snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNoBios), (EmuFolders::Bios + "/").c_str());
+    }
+    else if (why.find("Failed to initialize GS") != std::string::npos)
+    {
+      orbis_set_aside_shader_caches();
+      snprintf(msg, sizeof(msg), "%s", fe::Tr(fe::Str::NotifyGsFailed));
+    }
+    else
+    {
+      snprintf(msg, sizeof(msg), fe::Tr(fe::Str::NotifyNotStarted), why.c_str()); // vk-285-110
+    }
     sys_notify(msg);
-    orbis_eventf("the game didn't start: VM init failed (%s)", err.GetDescription().c_str()); // vk-285-51
+    orbis_eventf("the game didn't start: VM init failed (%s)", why.c_str()); // vk-285-51
   }
   ps5::debug::set_line(1, "Initialize=%d", (int)res);
   ps5::debug::set_line(2, "%s", res == VMBootResult::StartupSuccess ? "VM INIT OK" : "VM INIT FAILED");

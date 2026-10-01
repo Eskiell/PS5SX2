@@ -258,6 +258,9 @@ footer a { color: var(--dim); }
 "use strict";
 // ---- What the page offers. The keys are the port's ini keys (a bare key lives in EmuCore/GS);
 // "def" is PCSX2's own default, shown when neither the game nor gs.ini sets it.
+const CROP_PX = [["0","Off"],["2","2 px"],["4","4 px"],["6","6 px"],["8","8 px"],["10","10 px"],["12","12 px"],["16","16 px"],
+                 ["24","24 px"],["32","32 px"]];
+const CROP_HINT = "Cuts this many PS2 pixels off this side of the picture, for games with garbage at a border (Shadow of the Colossus). The picture keeps its proportions.";
 const GROUPS = [
   { title: "Display", items: [
     { key: "upscale_multiplier", label: "Resolution", type: "seg", def: "1", short: "%",
@@ -269,6 +272,16 @@ const GROUPS = [
       hint: "Uses the game's 16:9 patch when there is one." },
     { key: "TVShader", label: "Display filter", type: "seg", def: "0", short: "%",
       options: [["6","FSR"],["7","FSR soft"],["0","Classic"],["5","CRT"]] },
+  ]},
+  // vk-285-115: PCSX2's crop (EmuCore/GS/CropLeft, CropTop, CropRight, CropBottom: PS2 pixels cut from each side before the
+  // picture is scaled to the screen, GSRenderer.cpp CalculateDrawSrcRect). Asked for to hide Shadow of the Colossus's
+  // garbage at the borders. Applied while the game runs. The line is on the first row only (the sheet shows it on each).
+  { title: "Crop", items: [
+    { key: "CropLeft", label: "Crop left", type: "seg", def: "0", short: "Crop left %", cols: 5, options: CROP_PX,
+      hint: CROP_HINT },
+    { key: "CropTop", label: "Crop top", type: "seg", def: "0", short: "Crop top %", cols: 5, options: CROP_PX },
+    { key: "CropRight", label: "Crop right", type: "seg", def: "0", short: "Crop right %", cols: 5, options: CROP_PX },
+    { key: "CropBottom", label: "Crop bottom", type: "seg", def: "0", short: "Crop bottom %", cols: 5, options: CROP_PX },
   ]},
   { title: "Graphics", items: [
     { key: "filter", label: "Texture filtering", type: "seg", def: "2", short: "% filtering",
