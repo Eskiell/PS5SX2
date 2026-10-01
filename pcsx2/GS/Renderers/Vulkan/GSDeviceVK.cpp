@@ -33,6 +33,7 @@
 #include <unistd.h> // vk-285-14: fsync, _exit (GPU-hang forensics)
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
 #include "OrbisDriver.h" // vk-285-115: ps5vk or RADV (the same objects link with either)
+#include "OrbisExit.h" // vk-285-115: the app ends through the system (_exit() is a SIGSYS on the console)
 #endif
 
 // vk-285-36, vk-285-38: the GS thread's time in Vulkan calls, by kind (VKOrbisTiming.h), printed
@@ -1607,7 +1608,7 @@ namespace
 				s_orbis_sub_peak.draws, static_cast<unsigned long long>(s_orbis_overflow_total.load()));
 			orbis_event_log(line);
 		}
-		_exit(3);
+		OrbisExitApp(3); // vk-285-115: was _exit(3), which ends in SIGSYS on the console
 	}
 } // namespace
 

@@ -1069,12 +1069,88 @@ void GameDatabase::initDatabase()
 	}
 }
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-115, AI-assisted): PS5SX2's own GameDB additions, by serial, on top of GameIndex.yaml (and without it,
+// on a console with no resources folder). PS5SX2's gs.ini runs every game with MTVU on and the EE at 130%; PCSX2's
+// defaults, which its database is tested with, are off and 100%. These games stall that way in 1.50 -- the picture
+// stops, the music plays on, the VU thread at 100% and the GS idle -- so they get PCSX2's defaults back, whatever the
+// file is called (1.50's fix for Castlevania was a settings file, found only under its release file name). A GameDB
+// speed hack wins over the settings files while game fixes are on (PCSX2's rule).
+namespace
+{
+struct OrbisSpeedHackFix
+{
+	const char* serial;
+	const char* name; // for a serial GameIndex.yaml doesn't have
+	int mtvu;
+	int ee_cycle_rate;
+};
+
+constexpr OrbisSpeedHackFix kOrbisSpeedHackFixes[] = {
+	// Contra: Shattered Soldier: froze after the first cutscene (tester's note; EU, VU 100%, GS 0%, 19 fps).
+	{"SLES-51284", "Contra - Shattered Soldier", 0, 0},
+	{"SLUS-20306", "Contra - Shattered Soldier", 0, 0},
+	{"SLPM-62247", "Shin Contra", 0, 0},
+	{"SLPM-62264", "Shin Contra [Asia Version]", 0, 0},
+	{"SLPM-62361", "Shin Contra [KONAMI The BEST]", 0, 0},
+	// Gran Turismo 3 A-Spec, PAL: stuck at "Sony Computer Entertainment Europe presents" (tester's note; VU 97%, EE 7%,
+	// with the EE back at 100% too). The US release runs with MTVU.
+	{"SCES-50294", "Gran Turismo 3 - A-Spec", 0, 0},
+	// Castlevania: Lament of Innocence: freezes at the start of a scene with MTVU (found 2026-09-25, 1.50's settings
+	// file); testers' copies under other names froze the same way (US and JP: EE 74%, VU 100%, GS 0%, speed 39-48%).
+	{"SLUS-20733", "Castlevania - Lament of Innocence", 0, 0},
+	{"SLES-52118", "Castlevania", 0, 0},
+	{"SLPM-65444", "Castlevania", 0, 0},
+	{"SLPM-65406", "Castlevania [Limited Edition]", 0, 0},
+	{"SLPM-66325", "Castlevania [Konami Dendou Selection]", 0, 0},
+	{"SLPM-61062", "Castlevania [Trial]", 0, 0},
+};
+
+void OrbisSetSpeedHack(GameDatabaseSchema::GameEntry& entry, SpeedHack id, int value)
+{
+	for (auto& it : entry.speedHacks)
+	{
+		if (it.first == id)
+		{
+			it.second = value;
+			return;
+		}
+	}
+	entry.speedHacks.emplace_back(id, value);
+}
+
+void OrbisApplyGameDbAdditions()
+{
+	int added = 0;
+	for (const OrbisSpeedHackFix& fix : kOrbisSpeedHackFixes)
+	{
+		const std::string serial = StringUtil::toLower(fix.serial);
+		auto iter = s_game_db.find(serial);
+		if (iter == s_game_db.end())
+		{
+			GameDatabaseSchema::GameEntry entry;
+			entry.name = fix.name;
+			iter = s_game_db.emplace(serial, std::move(entry)).first;
+			added++;
+		}
+		OrbisSetSpeedHack(iter->second, SpeedHack::MTVU, fix.mtvu);
+		OrbisSetSpeedHack(iter->second, SpeedHack::EECycleRate, fix.ee_cycle_rate);
+	}
+	Console.WriteLn("GameDB: PS5SX2's additions: MTVU off and the EE at 100%% for %zu serials (%d not in GameIndex.yaml)",
+		std::size(kOrbisSpeedHackFixes), added);
+}
+} // namespace
+#endif
+
 void GameDatabase::ensureLoaded()
 {
 	std::call_once(s_load_once_flag, []() {
 		Common::Timer timer;
 		Console.WriteLn(fmt::format("GameDB: Has not been initialized yet, initializing..."));
 		initDatabase();
+#ifdef ORBIS_VULKAN
+		OrbisApplyGameDbAdditions(); // vk-285-115
+#endif
 		Console.WriteLn("GameDB: %zu games on record (loaded in %.2fms)", s_game_db.size(), timer.GetTimeMilliseconds());
 	});
 }

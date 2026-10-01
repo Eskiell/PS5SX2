@@ -255,13 +255,158 @@ static void LoadIrx(const std::string& filename, u8* dest, size_t maxSize)
 	return;
 }
 
+#ifdef __PROSPERO__
+// PS5 port (vk-285-115, AI-assisted): where else a BIOS may be, and what was there when none is found. 1.50's logs:
+// 689 starts on 146 consoles failed with "PCSX2 requires a PlayStation 2 BIOS" (26 consoles never got past it); in
+// 494 of the 591 reports the BIOS folder had no file at all, and the log didn't say what it held. The BIOS folder is
+// searched as before; then one folder down in it (a BIOS pack unzipped into its own folder), the top folder
+// /data/PCSX2, a folder named bios in another case ("BIOS": /data tells cases apart), and USB drives (their root,
+// bios/, PS5SX2/ and PS5SX2/bios/). Each file of a BIOS's size is checked the way the BIOS folder's are.
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <algorithm>
+#include <vector>
+#include "fmt/format.h"
+
+namespace
+{
+std::vector<std::string> OrbisNames(const std::string& dir)
+{
+	std::vector<std::string> names;
+	if (DIR* d = opendir(dir.c_str()))
+	{
+		while (const dirent* e = readdir(d))
+		{
+			if (e->d_name[0] != '.' && e->d_name[0] != '$')
+				names.emplace_back(e->d_name);
+		}
+		closedir(d);
+	}
+	std::sort(names.begin(), names.end());
+	return names;
+}
+
+bool OrbisIsDir(const std::string& path)
+{
+	struct stat st = {};
+	return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// A BIOS among the files directly in `dir`. `seen` collects what was looked at, for the log.
+std::string OrbisBiosIn(const std::string& dir, std::string* seen)
+{
+	u32 version, region;
+	std::string description, zone;
+	for (const std::string& name : OrbisNames(dir))
+	{
+		const std::string path = dir + "/" + name;
+		struct stat st = {};
+		if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		if (st.st_size < MIN_BIOS_SIZE || st.st_size > MAX_BIOS_SIZE)
+			continue;
+		if (IsBIOS(path.c_str(), version, description, region, zone))
+		{
+			Console.WriteLn("Using BIOS '%s' (%s %s), found outside the BIOS folder", path.c_str(), description.c_str(), zone.c_str());
+			return path;
+		}
+		if (seen->size() < 600)
+			*seen += fmt::format("{}{} ({} bytes, not a PS2 BIOS)", seen->empty() ? "" : "; ", path, static_cast<long long>(st.st_size));
+	}
+	return std::string();
+}
+
+std::string OrbisFindBiosElsewhere(std::string* seen)
+{
+	std::vector<std::string> dirs;
+	const std::string& bios = EmuFolders::Bios;
+	int subs = 0;
+	for (const std::string& name : OrbisNames(bios))
+	{
+		if (subs < 16 && OrbisIsDir(bios + "/" + name))
+		{
+			dirs.push_back(bios + "/" + name);
+			subs++;
+		}
+	}
+	const std::string top = "/data/PCSX2";
+	if (bios != top)
+		dirs.push_back(top);
+	for (const std::string& name : OrbisNames(top))
+	{
+		if (strcasecmp(name.c_str(), "bios") == 0 && top + "/" + name != bios && OrbisIsDir(top + "/" + name))
+			dirs.push_back(top + "/" + name);
+	}
+	for (int i = 0; i < 8; i++)
+	{
+		const std::string root = fmt::format("/mnt/usb{}", i);
+		const std::vector<std::string> names = OrbisNames(root);
+		if (names.empty())
+			continue;
+		dirs.push_back(root);
+		for (const std::string& name : names)
+		{
+			const bool is_bios = strcasecmp(name.c_str(), "bios") == 0;
+			const bool is_ps5sx2 = strcasecmp(name.c_str(), "ps5sx2") == 0;
+			if (!(is_bios || is_ps5sx2) || !OrbisIsDir(root + "/" + name))
+				continue;
+			dirs.push_back(root + "/" + name);
+			if (is_ps5sx2)
+			{
+				for (const std::string& sub : OrbisNames(root + "/" + name))
+				{
+					if (strcasecmp(sub.c_str(), "bios") == 0 && OrbisIsDir(root + "/" + name + "/" + sub))
+						dirs.push_back(root + "/" + name + "/" + sub);
+				}
+			}
+		}
+	}
+	for (const std::string& dir : dirs)
+	{
+		std::string path = OrbisBiosIn(dir, seen);
+		if (!path.empty())
+			return path;
+	}
+	return std::string();
+}
+
+// What the BIOS folder holds (names and sizes), for the log.
+std::string OrbisDescribeFolder(const std::string& dir)
+{
+	if (!OrbisIsDir(dir))
+		return "the folder isn't there";
+	std::string out;
+	int n = 0;
+	for (const std::string& name : OrbisNames(dir))
+	{
+		if (++n > 20)
+		{
+			out += "; ...";
+			break;
+		}
+		struct stat st = {};
+		const std::string path = dir + "/" + name;
+		const bool ok = stat(path.c_str(), &st) == 0;
+		out += fmt::format("{}{}{}", out.empty() ? "" : "; ", name,
+			!ok ? " (unreadable)" : S_ISDIR(st.st_mode) ? "/ (a folder)" : fmt::format(" ({} bytes)", static_cast<long long>(st.st_size)));
+	}
+	return out.empty() ? "empty" : out;
+}
+} // namespace
+#endif
+
 static std::string FindBiosImage()
 {
 	Console.WriteLn("Searching for a BIOS image in '%s'...", EmuFolders::Bios.c_str());
 
 	FileSystem::FindResultsArray results;
 	if (!FileSystem::FindFiles(EmuFolders::Bios.c_str(), "*", FILESYSTEM_FIND_FILES, &results))
+#ifdef __PROSPERO__
+		results.clear(); // vk-285-115: nothing there; look elsewhere below
+#else
 		return std::string();
+#endif
 
 	u32 version, region;
 	std::string description, zone;
@@ -277,6 +422,20 @@ static std::string FindBiosImage()
 		}
 	}
 
+#ifdef __PROSPERO__
+	// vk-285-115: the other places, then what the BIOS folder holds (see OrbisFindBiosElsewhere).
+	{
+		std::string seen;
+		std::string path = OrbisFindBiosElsewhere(&seen);
+		if (!path.empty())
+			return path;
+		Console.Error("Unable to auto locate a BIOS image. In '%s': %s", EmuFolders::Bios.c_str(),
+			OrbisDescribeFolder(EmuFolders::Bios).c_str());
+		if (!seen.empty())
+			Console.Error("Files of a BIOS's size that aren't a PS2 BIOS: %s", seen.c_str());
+		return std::string();
+	}
+#endif
 	Console.Error("Unable to auto locate a BIOS image");
 	return std::string();
 }

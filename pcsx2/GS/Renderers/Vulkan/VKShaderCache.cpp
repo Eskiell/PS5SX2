@@ -476,8 +476,15 @@ bool VKShaderCache::ReadExistingShaderCache(const std::string& index_filename, c
 	for (;;)
 	{
 		CacheIndexEntry entry;
+#ifdef ORBIS_VULKAN
+		// vk-285-115 (AI-assisted): blob_size counts SPIR-V words, file_offset bytes; compare bytes (in 64 bits), so an
+		// entry past the end of a shortened blob file marks the cache as corrupt.
+		if (std::fread(&entry, sizeof(entry), 1, m_index_file) != 1 ||
+			(static_cast<u64>(entry.file_offset) + static_cast<u64>(entry.blob_size) * sizeof(SPIRVCodeType)) > blob_file_size)
+#else
 		if (std::fread(&entry, sizeof(entry), 1, m_index_file) != 1 ||
 			(entry.file_offset + entry.blob_size) > blob_file_size)
+#endif
 		{
 			if (std::feof(m_index_file))
 				break;
@@ -661,6 +668,39 @@ VKShaderCache::CacheIndexKey VKShaderCache::GetCacheKey(u32 type, const std::str
 	return CacheIndexKey{h.hash_low, h.hash_high, static_cast<u32>(shader_code.length()), type};
 }
 
+#ifdef ORBIS_VULKAN
+// PS5 port (vk-285-115, AI-assisted): whether a blob from the shader cache is SPIR-V with an entry point of the stage
+// asked for. One console's cache gave its utility pipelines a blob the driver refused ("vertex stage: not well-formed
+// SPIR-V with an entry point "main"", 30 starts in a row, "Failed to compile utility pipelines"): the index's first
+// entry for a key wins on every load, so a bad blob came back each time.
+static bool OrbisSpirvMatchesStage(const std::vector<u32>& spv, u32 type)
+{
+	constexpr u32 kMagic = 0x07230203u, kOpEntryPoint = 15, kOpFunction = 54;
+	if (spv.size() < 6 || spv[0] != kMagic)
+		return false;
+	u32 model;
+	switch (type)
+	{
+		case shaderc_glsl_vertex_shader: model = 0; break;   // ExecutionModel Vertex
+		case shaderc_glsl_fragment_shader: model = 4; break; // Fragment
+		case shaderc_glsl_compute_shader: model = 5; break;  // GLCompute
+		default: return true;
+	}
+	for (size_t i = 5; i < spv.size();)
+	{
+		const u32 count = spv[i] >> 16, op = spv[i] & 0xffffu;
+		if (count == 0 || i + count > spv.size())
+			return false;
+		if (op == kOpEntryPoint && count >= 3 && spv[i + 1] == model)
+			return true;
+		if (op == kOpFunction)
+			return false; // the code starts: no entry point of this stage
+		i += count;
+	}
+	return false;
+}
+#endif
+
 std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::GetShaderSPV(u32 type, std::string_view shader_code)
 {
 	const auto key = GetCacheKey(type, shader_code);
@@ -676,6 +716,20 @@ std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::GetShaderSPV(u32 ty
 		Console.Error("Read blob from file failed, recompiling");
 		spv = CompileShaderToSPV(type, shader_code, GSConfig.UseDebugDevice);
 	}
+#ifdef ORBIS_VULKAN
+	else if (!OrbisSpirvMatchesStage(*spv, type))
+	{
+		// vk-285-115: a new cache rather than one recompile, so the next start doesn't read the bad entry again.
+		Console.Error("VK: the shader cache's blob for this shader (%u words at %u) isn't its SPIR-V: starting a new "
+					  "shader cache", iter->second.blob_size, iter->second.file_offset);
+		m_index.clear();
+		CloseShaderCache();
+		const std::string base_filename = GetShaderCacheBaseFileName(GSConfig.UseDebugDevice);
+		if (!CreateNewShaderCache(base_filename + ".idx", base_filename + ".bin"))
+			Console.Error("VK: no new shader cache; shaders are compiled each time");
+		return CompileAndAddShaderSPV(key, shader_code);
+	}
+#endif
 
 	return spv;
 }

@@ -311,7 +311,8 @@ SHIM_SRCS := ./orbis-shims/ProsperoInput.cpp ./orbis-shims/ProsperoCDVD.cpp \
   ./orbis-shims/ProsperoHenJailbreak.cpp \
   ./orbis-shims/ps5_shaderc.cpp ./orbis-shims/orbis_vk.cpp ./orbis-shims/orbis_eeprof.cpp \
   ./orbis-shims/game_select.cpp ./orbis-shims/orbis_paths.cpp ./orbis-shims/orbis_memprobe.cpp \
-  ./orbis-shims/ProsperoKbdMouse.cpp ./orbis-shims/ProsperoNotify.cpp
+  ./orbis-shims/ProsperoKbdMouse.cpp ./orbis-shims/ProsperoNotify.cpp \
+  ./orbis-shims/orbis_gs_shaders.cpp
 
 SHIM_ASM := ./orbis-shims/ProsperoTLS.S
 
@@ -450,6 +451,13 @@ $(OBJDIR)/pcsx2/Host/AudioStream.o: $(PCSX2)/pcsx2/Host/AudioStream.cpp
 $(OBJDIR)/ryml/%.o: $(RYML)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# vk-285-115: the GS shader sources, embedded from PCSX2's bin/resources/shaders (.incbin), for a console with no
+# resources folder. The files are listed so an edited shader rebuilds the object.
+ORBIS_GS_SHADERS := $(wildcard $(PCSX2)/bin/resources/shaders/vulkan/*.glsl) $(wildcard $(PCSX2)/bin/resources/shaders/common/*)
+$(OBJDIR)/shim/orbis-shims/orbis_gs_shaders.o: ./orbis-shims/orbis_gs_shaders.cpp ./include-orbis/OrbisGSShaders.h $(ORBIS_GS_SHADERS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DORBIS_GS_SHADER_DIR=\"$(abspath $(PCSX2)/bin/resources/shaders)\" -c $< -o $@
 
 # The shaderc shim includes glslang's C interface.
 $(OBJDIR)/shim/orbis-shims/ps5_shaderc.o: ./orbis-shims/ps5_shaderc.cpp

@@ -46,6 +46,9 @@ enum class Str : int
 	HintBack,           // "Back"
 	SheetThisGame,      // "This game"
 	SheetAllGames,      // "All games"
+	// vk-285-115: the two commonest failed starts, said briefly (PCSX2's own BIOS text is four paragraphs).
+	NotifyNoBios,       // "PS5SX2: no PS2 BIOS found. Copy your BIOS file ... to %s ..." (%s: the BIOS folder)
+	NotifyGsFailed,     // "PS5SX2: the game's graphics didn't start. ..."
 	Count
 };
 

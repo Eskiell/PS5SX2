@@ -794,33 +794,77 @@ void SortGames(std::vector<GameInfo>& games)
 	});
 }
 
+namespace
+{
+// vk-285-115 (AI-assisted): the disc images one folder down too ("games/Ratchet & Clank (USA)/Ratchet & Clank.iso", a
+// USB drive's PS2/ or ISO/ folder). 1.50's logs: 29 consoles never found a game ("0 disc image(s), 0 on USB" on
+// every start), most with a USB drive that had files but no image at its root. PCSX2's own folders are skipped, and at
+// most 64 subfolders of a folder are opened (a backup drive's whole tree isn't walked).
+bool SkipSubfolder(const char* name)
+{
+	if (name[0] == '.' || name[0] == '$')
+		return true;
+	static const char* const kSkip[] = {"bios", "cache", "cheats", "cheats_ws", "covers", "flags", "inputprofiles", "lang",
+		"logs", "memcards", "patches", "resources", "settings", "snaps", "sstates", "savestates", "textures", "videos",
+		"System Volume Information", "LOST.DIR"};
+	for (const char* skip : kSkip)
+	{
+		if (Lower(name) == Lower(skip))
+			return true;
+	}
+	return false;
+}
+
+void ScanDir(const std::string& dir, std::vector<GameInfo>& games, std::vector<std::string>* subdirs)
+{
+	DIR* d = opendir(dir.c_str());
+	if (!d)
+		return;
+	while (const dirent* e = readdir(d))
+	{
+		if (!IsDiscImageName(e->d_name))
+		{
+			if (subdirs && subdirs->size() < 64 && !SkipSubfolder(e->d_name))
+			{
+				bool is_dir = e->d_type == DT_DIR;
+				if (e->d_type == DT_UNKNOWN)
+				{
+					struct stat st = {};
+					is_dir = stat((dir + "/" + e->d_name).c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+				}
+				if (is_dir)
+					subdirs->emplace_back(e->d_name);
+			}
+			continue;
+		}
+		const std::string file = e->d_name;
+		if (std::any_of(games.begin(), games.end(), [&](const GameInfo& g) { return g.file == file; }))
+			continue;
+		GameInfo g;
+		g.path = dir + "/" + file;
+		struct stat st = {};
+		if (stat(g.path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		g.file = file;
+		g.stem = file.substr(0, file.size() - 4); // ".iso", ".chd", ".cso", ".zso"
+		g.bytes = static_cast<uint64_t>(st.st_size);
+		MakeTitle(g.stem, g.title, g.region, g.extra);
+		games.push_back(g);
+	}
+	closedir(d);
+}
+} // namespace
+
 std::vector<GameInfo> ScanGames(const std::vector<std::string>& dirs)
 {
 	std::vector<GameInfo> games;
 	for (const std::string& dir : dirs)
 	{
-		DIR* d = opendir(dir.c_str());
-		if (!d)
-			continue;
-		while (const dirent* e = readdir(d))
-		{
-			if (!IsDiscImageName(e->d_name))
-				continue;
-			const std::string file = e->d_name;
-			if (std::any_of(games.begin(), games.end(), [&](const GameInfo& g) { return g.file == file; }))
-				continue;
-			GameInfo g;
-			g.path = dir + "/" + file;
-			struct stat st = {};
-			if (stat(g.path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-				continue;
-			g.file = file;
-			g.stem = file.substr(0, file.size() - 4); // ".iso", ".chd", ".cso", ".zso"
-			g.bytes = static_cast<uint64_t>(st.st_size);
-			MakeTitle(g.stem, g.title, g.region, g.extra);
-			games.push_back(g);
-		}
-		closedir(d);
+		std::vector<std::string> subdirs;
+		ScanDir(dir, games, &subdirs);
+		std::sort(subdirs.begin(), subdirs.end());
+		for (const std::string& sub : subdirs)
+			ScanDir(dir + "/" + sub, games, nullptr);
 	}
 	SortGames(games);
 	return games;
