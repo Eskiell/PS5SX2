@@ -222,6 +222,125 @@ int main()
 			{T_LEFT, T_RIGHT}));
 	}
 
+	// vk-285-117: the save and load combos.
+	{
+		// The default: L3+R3 + D-pad up saves, + down loads, at once; the D-pad press that completed it is kept from the game.
+		const Config c = From({});
+		CHECK(c.save[0] == CB_L3R3 && c.save[1] == CB_UP && c.load[0] == CB_L3R3 && c.load[1] == CB_DOWN && c.hold_ms == 0);
+		ComboWatch save, load;
+		ComboState s;
+		uint32_t block = 0;
+		s.buttons = 0x6; // L3+R3
+		CHECK(!save.Update(c.save, c.hold_ms, s, 0, block) && !load.Update(c.load, c.hold_ms, s, 0, block) && block == 0);
+		s.buttons = 0x6 | 0x10; // + up
+		block = 0;
+		CHECK(save.Update(c.save, c.hold_ms, s, 4, block) && !load.Update(c.load, c.hold_ms, s, 4, block));
+		CHECK(block == 0x10); // the up press, not L3+R3 (held before)
+		block = 0;
+		CHECK(!save.Update(c.save, c.hold_ms, s, 8, block) && block == 0x10); // held: once, still kept back
+		s.buttons = 0x6; // up let go
+		block = 0;
+		CHECK(!save.Update(c.save, c.hold_ms, s, 12, block) && block == 0);
+		s.buttons = 0x6 | 0x40; // down: load
+		block = 0;
+		CHECK(!save.Update(c.save, c.hold_ms, s, 16, block) && load.Update(c.load, c.hold_ms, s, 16, block) && block == 0x40);
+		// Up alone, or L3 alone with up, does nothing.
+		ComboWatch w;
+		s.buttons = 0x10;
+		block = 0;
+		CHECK(!w.Update(c.save, c.hold_ms, s, 0, block));
+		s.buttons = 0x2 | 0x10;
+		CHECK(!w.Update(c.save, c.hold_ms, s, 4, block) && block == 0);
+		CHECK(DescribeCombo(c.save, 0) == "L3+R3 + D-pad up");
+		CHECK(Describe(c) == "as on the controller");
+	}
+	{
+		// Two buttons held 1.5 s: not before, once, the game sees them all along, and again after a release.
+		const Config c = From({{"SaveButton1", "Touchpad"}, {"SaveButton2", "R1"}, {"LoadButton1", "touchpad"}, {"LoadButton2", "L1"},
+			{"StateHold", "1.5"}});
+		CHECK(c.save[0] == CB_TOUCHPAD && c.save[1] == CB_R1 && c.load[1] == CB_L1 && c.hold_ms == 1500);
+		ComboWatch save;
+		ComboState s;
+		uint32_t block = 0;
+		s.buttons = 0x00100000 | 0x800;
+		CHECK(!save.Update(c.save, c.hold_ms, s, 1000, block));
+		CHECK(!save.Update(c.save, c.hold_ms, s, 2499, block));
+		CHECK(save.Update(c.save, c.hold_ms, s, 2500, block));
+		CHECK(!save.Update(c.save, c.hold_ms, s, 9000, block));
+		CHECK(block == 0);
+		s.buttons = 0x800; // the click let go: armed again, and the time starts over
+		CHECK(!save.Update(c.save, c.hold_ms, s, 9004, block));
+		s.buttons = 0x00100000 | 0x800;
+		CHECK(!save.Update(c.save, c.hold_ms, s, 9008, block) && !save.Update(c.save, c.hold_ms, s, 10500, block));
+		CHECK(save.Update(c.save, c.hold_ms, s, 10508, block));
+		// The keyboard's Backspace counts as the touchpad's click.
+		ComboWatch k;
+		s.buttons = 0x1 | 0x800;
+		CHECK(!k.Update(c.save, c.hold_ms, s, 0, block) && k.Update(c.save, c.hold_ms, s, 1500, block));
+		CHECK(DescribeCombo(c.save, c.hold_ms) == "the touchpad's click + R1 held 1.5 s");
+		CHECK(Describe(c) == "save state on the touchpad's click + R1 held 1.5 s, load on the touchpad's click + L1 held 1.5 s");
+	}
+	{
+		// One button (the same twice, or Nothing for one): Options held 2 s. Nothing twice: off.
+		ComboState s;
+		uint32_t block = 0;
+		for (const char* second : {"Options", "None"})
+		{
+			const Config c = From({{"SaveButton1", "Options"}, {"SaveButton2", second}, {"StateHold", "2"}});
+			ComboWatch w;
+			s.buttons = 0x8;
+			CHECK(!w.Update(c.save, c.hold_ms, s, 0, block) && w.Update(c.save, c.hold_ms, s, 2000, block));
+			CHECK(DescribeCombo(c.save, c.hold_ms) == "Options held 2 s");
+		}
+		const Config off = From({{"LoadButton1", "None"}, {"LoadButton2", "None"}});
+		ComboWatch w;
+		s.buttons = 0xFFFFFFFFu;
+		CHECK(!w.Update(off.load, off.hold_ms, s, 0, block) && !w.Update(off.load, off.hold_ms, s, 99999, block));
+		CHECK(DescribeCombo(off.load, 0) == "nothing");
+	}
+	{
+		// The touchpad's sides (1.51's touch + Cross), and triggers by their pull; a trigger kept back stays so until let go.
+		const Config c = From({{"SaveButton1", "TouchLeft"}, {"SaveButton2", "Cross"}, {"LoadButton1", "L2"}, {"LoadButton2", "R2"}});
+		ComboWatch save, load;
+		ComboState s;
+		uint32_t block = 0;
+		s.touch = 2;
+		s.buttons = 0x4000;
+		CHECK(!save.Update(c.save, 0, s, 0, block));
+		s.buttons = 0;
+		save.Update(c.save, 0, s, 4, block);
+		s.touch = 1;
+		CHECK(!save.Update(c.save, 0, s, 8, block));
+		s.buttons = 0x4000;
+		block = 0;
+		CHECK(save.Update(c.save, 0, s, 12, block) && block == 0x4000); // the Cross press is kept from the game
+		ComboState t;
+		t.l2 = 255;
+		block = 0;
+		CHECK(!load.Update(c.load, 0, t, 0, block));
+		t.r2 = 210;
+		CHECK(load.Update(c.load, 0, t, 4, block) && (block & 0x200u));
+		t.r2 = 100; // half let go: still kept back
+		block = 0;
+		load.Update(c.load, 0, t, 8, block);
+		CHECK(block & 0x200u);
+		t.r2 = 0;
+		block = 0;
+		load.Update(c.load, 0, t, 12, block);
+		CHECK(!(block & 0x200u));
+	}
+	{
+		// Bad values leave the defaults.
+		const Config c = From({{"SaveButton1", "Jump"}, {"LoadButton2", ""}, {"StateHold", "-1"}});
+		CHECK(c.save[0] == CB_L3R3 && c.load[1] == CB_DOWN && c.hold_ms == 0);
+		CHECK(From({{"StateHold", "11"}}).hold_ms == 0 && From({{"StateHold", "x"}}).hold_ms == 0 && From({{"StateHold", "0.5"}}).hold_ms == 500);
+		for (int b = 0; b < CB_COUNT; b++)
+		{
+			ComboButton back = CB_NONE;
+			CHECK(ParseComboButton(ComboButtonName(b), back) && back == b);
+		}
+	}
+
 	// Every target's name reads back as itself, and only those names do.
 	for (int t = 0; t <= T_NONE; t++)
 	{

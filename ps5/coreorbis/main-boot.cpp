@@ -345,13 +345,10 @@ static std::string orbis_ini_summary(const std::string& path)
 // with scePadSetVibration. PS5SX2/Rumble=false (the settings page's Controller group) turns it off.
 static std::atomic<u32> g_orbis_rumble_state[2]; // (big << 8) | small, each 0..255
 static std::atomic<int> g_orbis_rumble_on{1};
-// vk-285-116 (AI-assisted): which controller buttons save and load the state (slot 1), PS5SX2/StateButtons (the settings
-// page's and the shelf sheet's Controller group): 0 L3+R3 + D-pad or the touchpad + Cross, as before; 1 L3+R3 + D-pad
-// only; 2 the touchpad + Cross only; 3 L1+R1 + D-pad; 4 L2+R2 + D-pad; 5 none (the keyboard's F1 and F3 always work).
-static std::atomic<int> g_orbis_state_buttons{0};
 // vk-285-116 (AI-assisted): the controller remapping (orbis-shims/OrbisPadMap.h: PS5SX2/Button*, SwapSticks, InvertLeft,
-// InvertRight, LeftStickDpad; the Controls tab). orbis_ps5opts_from sets it at boot and at every live apply; the pad
-// thread copies it when the version moves.
+// InvertRight, LeftStickDpad; vk-285-117: the save and load state combos, SaveButton1/2, LoadButton1/2, StateHold; the
+// Controls tab). orbis_ps5opts_from sets it at boot and at every live apply; the pad thread copies it when the version
+// moves.
 static std::mutex g_orbis_padmap_mutex;
 static orbis_padmap::Config g_orbis_padmap;
 static std::atomic<unsigned> g_orbis_padmap_version{0};
@@ -465,6 +462,7 @@ int scePadOpen(int32_t userId, int32_t type, int32_t index, const void *param);
 int scePadGetHandle(int32_t userId, int32_t type, int32_t index);
 int scePadReadState(int32_t handle, void *data);
 int scePadSetVibration(int32_t handle, const void *param); // vk-285-113: { uint8_t big, small }
+int scePadSetVibrationMode(int32_t handle, int32_t mode);   // vk-285-117: see orbis_pad_rumble_mode
 int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int32_t *userId);
 // vk-285-109: the users logged in on the PS5, four ids, -1 for none (how the PS5 SDL port's joystick code
@@ -581,6 +579,21 @@ static bool orbis_pad_connected(const OrbisPadData &d)
 // what vk-285-109..115 did: each button on its own, the touchpad's click and the keyboard's Backspace on Select, the
 // triggers analog, the sticks as they are. Each PS2 input is set when its value changes (the pressure modifier and the
 // analog button act on a change only).
+// The pad thread's copy of the controls (it is the only reader: the combos and both ports).
+static const orbis_padmap::Config &orbis_padmap_current()
+{
+  static orbis_padmap::Config s_cfg;
+  static unsigned s_version = 0;
+  const unsigned version = g_orbis_padmap_version.load(std::memory_order_acquire);
+  if (version != s_version)
+  {
+    std::lock_guard<std::mutex> lock(g_orbis_padmap_mutex);
+    s_cfg = g_orbis_padmap;
+    s_version = version;
+  }
+  return s_cfg;
+}
+
 static void orbis_pad_apply(OrbisPadPort &p, const OrbisPadData &d)
 {
   using namespace orbis_padmap;
@@ -592,16 +605,7 @@ static void orbis_pad_apply(OrbisPadPort &p, const OrbisPadData &d)
     PadDualshock2::Inputs::PAD_UP, PadDualshock2::Inputs::PAD_DOWN, PadDualshock2::Inputs::PAD_LEFT,
     PadDualshock2::Inputs::PAD_RIGHT, PadDualshock2::Inputs::PAD_ANALOG, PadDualshock2::Inputs::PAD_PRESSURE,
   };
-  // The pad thread's copy of the settings (it is the only caller, for both ports).
-  static Config s_cfg;
-  static unsigned s_version = 0;
-  const unsigned version = g_orbis_padmap_version.load(std::memory_order_acquire);
-  if (version != s_version)
-  {
-    std::lock_guard<std::mutex> lock(g_orbis_padmap_mutex);
-    s_cfg = g_orbis_padmap;
-    s_version = version;
-  }
+  const Config &cfg = orbis_padmap_current();
   State st;
   st.buttons = d.buttons;
   st.l2 = d.l2;
@@ -610,7 +614,7 @@ static void orbis_pad_apply(OrbisPadPort &p, const OrbisPadData &d)
   st.ly = d.ly;
   st.rx = d.rx;
   st.ry = d.ry;
-  const Out o = Apply(s_cfg, st);
+  const Out o = Apply(cfg, st);
   for (int t = 0; t < T_COUNT; t++)
   {
     if (o.value[t] != p.last_value[t])
@@ -657,6 +661,34 @@ static void orbis_rumble_send(int index, int32_t handle, OrbisRumbleOut &out)
   out.sent = want;
 }
 
+// vk-285-117 (AI-assisted): the DualSense didn't rumble. Every scePadSetVibration answered 0 (4,355 "[pad] rumble" lines in
+// the testers' reports) and nothing was felt: a PS5 title's controllers start in haptics mode, where the actuators play
+// the vibration audio port and the two-motor values go nowhere, until scePadSetVibrationMode puts the pad in rumble mode
+// (libScePad's modes as the PC libScePad has them: 1 haptics, 2 rumble). Needs checking on a console with a DualSense and
+// a DualShock 4: flags rumble_mode0 to rumble_mode3 try another value, rumble_mode_off leaves the pad as it is.
+static void orbis_pad_rumble_mode(int32_t handle, const char *who)
+{
+  if (handle < 0)
+    return;
+  if (OrbisFlag("rumble_mode_off"))
+  {
+    printf("[pad] %s: vibration mode left as it is (flag rumble_mode_off)\n", who);
+    fflush(stdout);
+    return;
+  }
+  int mode = 2;
+  for (int m = 0; m <= 3; m++)
+  {
+    char name[32];
+    snprintf(name, sizeof(name), "rumble_mode%d", m);
+    if (OrbisFlag(name))
+      mode = m;
+  }
+  const int rc = scePadSetVibrationMode(handle, mode);
+  printf("[pad] %s: vibration mode %d%s -> rc=%x\n", who, mode, mode == 2 ? " (rumble)" : "", static_cast<unsigned>(rc));
+  fflush(stdout);
+}
+
 static void *orbis_pad_thread(void *)
 {
   auto p_read = [](int32_t h, OrbisPadData *d) { return scePadReadState(h, d); };
@@ -672,6 +704,7 @@ static void *orbis_pad_thread(void *)
   fflush(stdout);
   if (handle < 0)
     return nullptr;
+  orbis_pad_rumble_mode(handle, "player 1"); // vk-285-117
   OrbisPadPort port1;
   port1.port = 0;
   port1.handle = handle;
@@ -686,6 +719,7 @@ static void *orbis_pad_thread(void *)
       port2.handle = scePadGetHandle(g_orbis_second_user, 0, 0);
     printf("[pad] player 2: user=%d handle=%d\n", g_orbis_second_user, port2.handle);
     fflush(stdout);
+    orbis_pad_rumble_mode(port2.handle, "player 2"); // vk-285-117
   }
   unsigned reads = 0;
   for (;;)
@@ -728,14 +762,44 @@ static void *orbis_pad_thread(void *)
     }
     if (rc == 0)
     {
-      // vk-285-116: the save state buttons the settings chose (PS5SX2/StateButtons, see g_orbis_state_buttons).
-      const int state_buttons = g_orbis_state_buttons.load(std::memory_order_relaxed);
-      const bool l3r3_states = state_buttons == 0 || state_buttons == 1;
-      const bool touch_states = state_buttons == 0 || state_buttons == 2;
-      // eerec-282: L3+R3 held: D-pad Up = save state slot 1, D-pad Down = load it. Releasing L3+R3 after
-      // ~0.4 s without using the D-pad cycles the present filter (eerec-278 fired while held).
-      // (vk-285-73's notification test on D-pad Right/Left is gone in vk-285-74.)
-      // vk-285-116: the save and the load only with StateButtons 0 or 1; the filter cycle as before.
+      // vk-285-117 (AI-assisted): save and load the state (slot 1) with the combos the Controls tab chose (two buttons each,
+      // held together for PS5SX2/StateHold; orbis-shims/OrbisPadMap.h ComboWatch). By default L3+R3 + D-pad up saves and
+      // + D-pad down loads, at once, as since eerec-282 (now the D-pad press that does it is kept from the game). The
+      // touchpad's sides are eerec-284's zones (1.51's touch + Cross is TouchLeft/TouchRight + Cross here). They read the
+      // controller's real buttons (and the keyboard's), before the remapping.
+      bool state_fired = false;
+      {
+        const orbis_padmap::Config &cfg = orbis_padmap_current();
+        static orbis_padmap::ComboWatch s_save, s_load;
+        orbis_padmap::ComboState cs;
+        cs.buttons = d.buttons;
+        cs.l2 = d.l2;
+        cs.r2 = d.r2;
+        const unsigned touches = d.rest[40];
+        uint16_t tx = 0xffffu;
+        memcpy(&tx, &d.rest[48], sizeof(tx));
+        cs.touch = (touches == 0 || tx >= 4096u) ? 0 : (tx < 640u) ? 1 : (tx >= 1280u) ? 2 : 0;
+        const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+        uint32_t block = 0;
+        const bool save = s_save.Update(cfg.save, cfg.hold_ms, cs, now_ms, block);
+        const bool load = s_load.Update(cfg.load, cfg.hold_ms, cs, now_ms, block) && !save;
+        if (save || load)
+        {
+          g_orbis_state_request.store(save ? 1 : 2, std::memory_order_release);
+          state_fired = true;
+          printf("[pad] %s the state (slot 1): %s\n", save ? "save" : "load",
+            orbis_padmap::DescribeCombo(save ? cfg.save : cfg.load, cfg.hold_ms).c_str());
+          fflush(stdout);
+        }
+        d.buttons &= ~block;
+        if (block & 0x100u)
+          d.l2 = 0;
+        if (block & 0x200u)
+          d.r2 = 0;
+      }
+      // eerec-282: L3+R3 held ~0.4 s and let go without the D-pad (or a save or load) cycles the present filter
+      // (eerec-278 fired while held). (vk-285-73's notification test on D-pad Right/Left is gone in vk-285-74.)
       {
         static unsigned combo = 0;
         static bool used = false;
@@ -744,11 +808,8 @@ static void *orbis_pad_thread(void *)
         if ((d.buttons & 0x6u) == 0x6u)
         {
           combo++;
-          const uint32_t pressed = dpad & ~prev_dpad;
-          if (pressed & 0x50u)
+          if (((dpad & ~prev_dpad) & 0x50u) || state_fired)
             used = true;
-          if (l3r3_states && (pressed & 0x10u)) g_orbis_state_request.store(1, std::memory_order_release);
-          if (l3r3_states && (pressed & 0x40u)) g_orbis_state_request.store(2, std::memory_order_release);
         }
         else
         {
@@ -776,62 +837,6 @@ static void *orbis_pad_thread(void *)
         s_prev_click = click;
         if (s_click_consumed)
           d.buttons &= ~0x00100000u;
-      }
-      // vk-285-116 (AI-assisted): StateButtons 3 and 4: L1+R1 or L2+R2 held, then D-pad Up = save state slot 1, Down = load
-      // it. The D-pad press that saves or loads is held back from the game until it is released. (L2 counts held from
-      // its button bit or the trigger past 200 of 255, as the settings-page combo below reads it.)
-      {
-        static uint32_t s_prev_dpad = 0, s_dpad_held_back = 0;
-        const uint32_t dpad = d.buttons & 0x50u; // Up 0x10, Down 0x40
-        bool hold = false;
-        if (state_buttons == 3)
-          hold = (d.buttons & 0x00000C00u) == 0x00000C00u; // L1 0x400, R1 0x800
-        else if (state_buttons == 4)
-          hold = ((d.buttons & 0x00000100u) != 0 || d.l2 >= 200u) && ((d.buttons & 0x00000200u) != 0 || d.r2 >= 200u);
-        const uint32_t pressed = dpad & ~s_prev_dpad;
-        if (hold && pressed)
-        {
-          const bool save = (pressed & 0x10u) != 0;
-          g_orbis_state_request.store(save ? 1 : 2, std::memory_order_release);
-          s_dpad_held_back |= pressed;
-          printf("[pad] %s + D-pad %s: %s the state (slot 1)\n", state_buttons == 3 ? "L1+R1" : "L2+R2", save ? "Up" : "Down",
-            save ? "save" : "load");
-          fflush(stdout);
-        }
-        s_dpad_held_back &= dpad; // a released direction reaches the game again
-        s_prev_dpad = dpad;
-        d.buttons &= ~s_dpad_held_back;
-      }
-      // eerec-284: finger on the touchpad's left third + X = save state slot 1, right third + X = load it.
-      // The X press that triggers it is held back from the game until X is released.
-      // vk-285-116: only with StateButtons 0 or 2.
-      {
-        static bool s_prev_x = false, s_x_consumed = false;
-        const bool x = (d.buttons & 0x00004000u) != 0; // CROSS
-        if (x && !s_prev_x && touch_states)
-        {
-          const unsigned touches = d.rest[40];
-          uint16_t tx = 0xffffu, ty = 0xffffu;
-          memcpy(&tx, &d.rest[48], sizeof(tx));
-          memcpy(&ty, &d.rest[50], sizeof(ty));
-          const int zone = (touches == 0 || tx >= 4096u) ? 0 : (tx < 640u) ? 1 : (tx >= 1280u) ? 2 : 0;
-          if (zone != 0)
-          {
-            g_orbis_state_request.store(zone, std::memory_order_release);
-            s_x_consumed = true;
-          }
-          if (touches != 0)
-          {
-            printf("[pad] X with touch: touches=%u x=%u y=%u -> %s\n", touches, (unsigned)tx, (unsigned)ty,
-              zone == 1 ? "save" : zone == 2 ? "load" : "none (middle)");
-            fflush(stdout);
-          }
-        }
-        if (!x)
-          s_x_consumed = false;
-        s_prev_x = x;
-        if (s_x_consumed)
-          d.buttons &= ~0x00004000u;
       }
       // vk-285-113: L2 + D-pad down held for 2 s: the settings page in the PS5's own browser (or, with the QR code up,
       // takes the QR code down). The game keeps running (and sees the buttons: a 2 s hold is nobody's move).
@@ -1217,20 +1222,8 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
   // MouseButtons 0 R1 and L1, 1 R2 and L2.
   OrbisKbdMouseConfigure(si.GetIntValue("PS5SX2", "KeyboardMouse", 0), si.GetIntValue("PS5SX2", "MouseAim", 1),
     si.GetIntValue("PS5SX2", "MouseSpeed", 2), si.GetIntValue("PS5SX2", "MouseButtons", 0));
-  // vk-285-116 (AI-assisted): the save state buttons (PS5SX2/StateButtons) and the remapping (the Controls tab).
+  // vk-285-116 (AI-assisted): the remapping and (vk-285-117) the save and load combos (the Controls tab).
   {
-    int state_buttons = si.GetIntValue("PS5SX2", "StateButtons", 0);
-    if (state_buttons < 0 || state_buttons > 5)
-      state_buttons = 0;
-    if (g_orbis_state_buttons.exchange(state_buttons, std::memory_order_relaxed) != state_buttons)
-    {
-      static const char* const names[6] = {"L3+R3 + D-pad up/down, or the touchpad + Cross (left side saves, right side loads)",
-        "L3+R3 + D-pad up/down", "the touchpad + Cross (left side saves, right side loads)", "L1+R1 + D-pad up/down",
-        "L2+R2 + D-pad up/down", "none on the controller"};
-      printf("[boot] save states (slot 1) on %s; F1 and F3 on a keyboard (PS5SX2/StateButtons=%d)\n", names[state_buttons],
-        state_buttons);
-      fflush(stdout);
-    }
     const orbis_padmap::Config map = orbis_padmap::FromSettings([&](const char* key, std::string& value) {
       return si.GetStringValue("PS5SX2", key, &value);
     });
@@ -1246,7 +1239,7 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
     if (changed)
     {
       g_orbis_padmap_version.fetch_add(1, std::memory_order_release);
-      printf("[boot] controls: %s (PS5SX2/Button*, SwapSticks, InvertLeft, InvertRight, LeftStickDpad)\n",
+      printf("[boot] controls: %s (PS5SX2/Button*, SwapSticks, InvertLeft, InvertRight, LeftStickDpad, SaveButton*, LoadButton*, StateHold)\n",
         orbis_padmap::Describe(map).c_str());
       fflush(stdout);
     }
