@@ -1134,6 +1134,11 @@ constexpr OrbisGameFixAddition kOrbisGameFixAdditions[] = {
 	// Minutes of driving showed nothing wrong. The US release only; the EU (SLES-54135/54136) and JP (SLPM-66851,
 	// SLPM-55038) ones are untested.
 	{"SLUS-21423", "Grand Theft Auto - Liberty City Stories", Fix_InstantDMA},
+	// vk-285-128: San Andreas and Vice City (US) with their 60 FPS patches (Spyros's Pro, 2026-10-04), Instant DMA in
+	// their settings files: San Andreas's event tests 877 k -> 277 k a second; both held 60 with the EE overclocked
+	// (San Andreas EE Cycle Rate 2, Vice City 3 with vk-285-126) and showed nothing wrong in their sessions. EU/JP untested.
+	{"SLUS-20946", "Grand Theft Auto - San Andreas", Fix_InstantDMA},
+	{"SLUS-20552", "Grand Theft Auto - Vice City", Fix_InstantDMA},
 };
 
 // vk-285-127 (AI-assisted): fan mods that keep a game's engine but carry a serial of their own get that game's GameDB
@@ -1191,7 +1196,8 @@ void OrbisApplyGameDbAdditions()
 		if (std::find(fixes.begin(), fixes.end(), add.fix) == fixes.end())
 			fixes.push_back(add.fix);
 	}
-	Console.WriteLn("GameDB: PS5SX2's additions: %zu game fixes (Instant DMA for GTA Liberty City Stories)",
+	Console.WriteLn("GameDB: PS5SX2's additions: %zu game fixes (Instant DMA for GTA Liberty City Stories, San Andreas, "
+					"Vice City)",
 		std::size(kOrbisGameFixAdditions));
 	for (const OrbisSpeedHackFix& fix : kOrbisSpeedHackFixes)
 	{
