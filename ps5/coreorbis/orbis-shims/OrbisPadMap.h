@@ -81,8 +81,10 @@ struct SourceInfo
 	Target def;       // what it presses when the setting is unset
 };
 
-// ScePad's bits, as orbis_pad_apply always read them. The touchpad's click is 0x00100000; 0x1 is the keyboard's Select
-// (Backspace, orbis-shims/ProsperoKbdMap.h PAD_SELECT).
+// ScePad's bits, as orbis_pad_apply always read them. The touchpad's click is 0x00100000; 0x40000000 is the keyboard's
+// Select (Backspace, orbis-shims/ProsperoKbdMap.h PAD_SELECT). vk-285-122 (AI-assisted): ScePad's 0x1, the DualSense's
+// Create button (the old Share, left of the touchpad), presses nothing -- it pressed Select with the touchpad's click
+// until now (Spyros: "unbind select from the share button").
 inline const SourceInfo& SourceAt(int s)
 {
 	static const SourceInfo k[S_COUNT] = {
@@ -97,7 +99,7 @@ inline const SourceInfo& SourceAt(int s)
 		{"ButtonL3", "L3", 0x00000002u, T_L3},
 		{"ButtonR3", "R3", 0x00000004u, T_R3},
 		{"ButtonOptions", "Options", 0x00000008u, T_START},
-		{"ButtonTouchpad", "the touchpad's click", 0x00100001u, T_SELECT},
+		{"ButtonTouchpad", "the touchpad's click", 0x40100000u, T_SELECT},
 		{"ButtonUp", "D-pad up", 0x00000010u, T_UP},
 		{"ButtonDown", "D-pad down", 0x00000040u, T_DOWN},
 		{"ButtonLeft", "D-pad left", 0x00000080u, T_LEFT},
@@ -223,7 +225,7 @@ inline uint32_t ComboBits(ComboButton b)
 		case CB_L3: return 0x00000002u;
 		case CB_R3: return 0x00000004u;
 		case CB_OPTIONS: return 0x00000008u;
-		case CB_TOUCHPAD: return 0x00100001u; // the click, and the keyboard's Backspace (as the remapping's source)
+		case CB_TOUCHPAD: return 0x40100000u; // the click, and the keyboard's Backspace (as the remapping's source)
 		case CB_UP: return 0x00000010u;
 		case CB_DOWN: return 0x00000040u;
 		case CB_LEFT: return 0x00000080u;

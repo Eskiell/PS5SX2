@@ -71,7 +71,8 @@ int main()
 		CHECK(Only(Apply(c, Held(0x0004)), {T_R3}));
 		CHECK(Only(Apply(c, Held(0x0008)), {T_START}));
 		CHECK(Only(Apply(c, Held(0x00100000)), {T_SELECT}));
-		CHECK(Only(Apply(c, Held(0x00000001)), {T_SELECT}));
+		CHECK(Only(Apply(c, Held(0x40000000)), {T_SELECT})); // the keyboard's Backspace
+		CHECK(Only(Apply(c, Held(0x00000001)), {}));        // vk-285-122: the Create (Share) button presses nothing
 		CHECK(Only(Apply(c, Held(0x0010)), {T_UP}));
 		CHECK(Only(Apply(c, Held(0x0040)), {T_DOWN}));
 		CHECK(Only(Apply(c, Held(0x0080)), {T_LEFT}));
@@ -164,7 +165,8 @@ int main()
 		CHECK(Only(Apply(c, Held(0x0040)), {T_CROSS}));
 		CHECK(Only(Apply(c, Held(0x0008)), {T_SELECT}));
 		CHECK(Only(Apply(c, Held(0x00100000)), {T_START}));
-		CHECK(Only(Apply(c, Held(0x00000001)), {T_START})); // the keyboard's Backspace follows the touchpad's click
+		CHECK(Only(Apply(c, Held(0x40000000)), {T_START})); // the keyboard's Backspace follows the touchpad's click
+		CHECK(Only(Apply(c, Held(0x00000001)), {}));        // vk-285-122: the Create (Share) button follows nothing
 	}
 
 	// Sticks: swapped, then inverted (the PS2's sticks), then the left one on the D-pad.
@@ -275,8 +277,12 @@ int main()
 		CHECK(save.Update(c.save, c.hold_ms, s, 10508, block));
 		// The keyboard's Backspace counts as the touchpad's click.
 		ComboWatch k;
-		s.buttons = 0x1 | 0x800;
+		s.buttons = 0x40000000 | 0x800;
 		CHECK(!k.Update(c.save, c.hold_ms, s, 0, block) && k.Update(c.save, c.hold_ms, s, 1500, block));
+		// vk-285-122: the Create (Share) button, ScePad's 0x1, does not.
+		ComboWatch cr;
+		s.buttons = 0x1 | 0x800;
+		CHECK(!cr.Update(c.save, c.hold_ms, s, 0, block) && !cr.Update(c.save, c.hold_ms, s, 5000, block));
 		CHECK(DescribeCombo(c.save, c.hold_ms) == "the touchpad's click + R1 held 1.5 s");
 		CHECK(Describe(c) == "save state on the touchpad's click + R1 held 1.5 s, load on the touchpad's click + L1 held 1.5 s");
 	}
