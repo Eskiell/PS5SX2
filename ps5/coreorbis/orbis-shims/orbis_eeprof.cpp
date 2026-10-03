@@ -722,20 +722,24 @@ void AutoReport()
 	TopBuckets(lb, 8);
 	TopBuckets(cb, 8);
 	char line[1600];
-	OrbisDeferredPrintf("[autoprof] #%d %s | %u samples in %d s, %u skipped (waits) | eboot %.1f%% jit %.1f%% lib %.1f%% other %.1f%% | ref=%#llx\n",
+	std::snprintf(line, sizeof(line), "[autoprof] #%d %s | %u samples in %d s, %u skipped (waits) | eboot %.1f%% jit %.1f%% lib %.1f%% other %.1f%% | ref=%#llx",
 		s_auto_index, s_auto_head, n, kAutoSeconds, s_auto_skipped.load(std::memory_order_relaxed), eboot * pct, jit * pct, lib * pct, other * pct,
 		static_cast<unsigned long long>(s_auto_ref));
+	OrbisDeferredPrintf("%s\n", line);
+	OrbisDeferredEvent(line);
 	int at = std::snprintf(line, sizeof(line), "[autoprof] #%d eboot:", s_auto_index);
 	for (const Bucket& b : eb)
 		if (at < static_cast<int>(sizeof(line)) - 40)
 			at += std::snprintf(line + at, sizeof(line) - at, " %s%#llx %.1f%%", b.key < 0 ? "-" : "+",
 				static_cast<unsigned long long>(b.key < 0 ? -b.key : b.key), b.n * pct);
 	OrbisDeferredPrintf("%s\n", line);
+	OrbisDeferredEvent(line); // the settings log too: the installer's report keeps only boot.log's first 64 KB and last 448 KB
 	at = std::snprintf(line, sizeof(line), "[autoprof] #%d jit:", s_auto_index);
 	for (const Area& a : areas)
 		if (a.n)
 			at += std::snprintf(line + at, sizeof(line) - at, " %s %.1f%%", a.name, a.n * pct);
 	OrbisDeferredPrintf("%s\n", line);
+	OrbisDeferredEvent(line);
 	at = std::snprintf(line, sizeof(line), "[autoprof] #%d lib:", s_auto_index);
 	for (const Bucket& b : lb)
 		if (at < static_cast<int>(sizeof(line)) - 40)
@@ -751,10 +755,7 @@ void AutoReport()
 					static_cast<unsigned long long>(b.key < 0 ? -b.key : b.key), b.n * pct);
 		}
 	OrbisDeferredPrintf("%s\n", line);
-	char ev[300];
-	std::snprintf(ev, sizeof(ev), "autoprof #%d: %s; eboot %.0f%% recompiled code %.0f%% libraries %.0f%% (details in boot.log)", s_auto_index,
-		s_auto_head, eboot * pct, jit * pct, lib * pct);
-	OrbisDeferredEvent(ev);
+	OrbisDeferredEvent(line);
 }
 
 void* AutoSamplerThread(void*)

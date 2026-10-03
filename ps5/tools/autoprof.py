@@ -39,6 +39,8 @@ def name_of(addrs, names, a):
 def windows(path):
     game = '?'
     cur = None
+    seen = set()  # vk-285-118's lines are in boot.log and in the settings log: each window once
+    skip = False
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.startswith('Game: '):
             game = re.sub(r' \(from /mnt/.*\)$', '', line[6:].strip())
@@ -47,13 +49,17 @@ def windows(path):
         line = line[line.index('[autoprof]'):].rstrip('\n')
         m = HEAD.match(line)
         if m:
+            skip = line in seen
+            seen.add(line)
+            if skip:
+                continue
             if cur:
                 yield cur
             cur = dict(game=game, file=path, thread=m.group(2), speed=int(m.group(3)), loads=tuple(map(int, m.group(4, 5, 6))),
                        n=int(m.group(7)), eboot=float(m.group(9)), jit=float(m.group(10)), lib=float(m.group(11)), buckets=[], areas={},
                        libs=[], callers=[])
             continue
-        if not cur:
+        if not cur or skip:
             continue
         body = line.split(':', 1)[1] if ':' in line else ''
         if ' eboot:' in line:
