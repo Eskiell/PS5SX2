@@ -16,6 +16,8 @@
 
 struct GS_Packet;
 extern void Gif_MTGS_Wait(bool isMTVU);
+// vk-285-124 (PS5 port): waits until a path's readAmount + extra is at most target (MTGS.cpp); false: wait the old way.
+extern bool Gif_MTGS_WaitRead(std::atomic<int>& readAmount, s32 extra, s32 target);
 extern void Gif_FinishIRQ();
 extern bool Gif_HandlerAD(u8* pMem);
 extern void Gif_HandlerAD_MTVU(u8* pMem);
@@ -283,8 +285,15 @@ struct Gif_Path
 	bool isDone() const { return isMTVU() ? !g_orbis_gif_fake.count[GIF_PATH_1] : (!hasDataRemaining() && (state == GIF_PATH_IDLE || state == GIF_PATH_WAIT)); }
 
 	// Waits on the MTGS to process gs packets
-	void mtgsReadWait()
+	// PS5 port (vk-285-124, AI-assisted): `target` is the most getReadAmount() can be for the caller's room check to
+	// pass. On the EE thread the wait ends once the GS thread has read that far (Gif_MTGS_WaitRead, MTGS.cpp) instead
+	// of draining the whole ring: GTA Liberty City Stories with Instant DMA pushes ~200 MB/s through PATH2, so this
+	// buffer wrapped ~23 times a second and each wrap emptied the GS thread's ring (~11 ms of the EE waiting, then the
+	// GS thread idle until the EE caught up again: 26% and 16% of the two threads).
+	void mtgsReadWait(s32 target)
 	{
+		if (!isMTVU() && Gif_MTGS_WaitRead(readAmount, gsPack.readAmount, target))
+			return;
 		if (IsDevBuild)
 		{
 			DevCon.WriteLn(Color_Red, "Gif Path[%d] - MTGS Wait! [r=0x%x]", idx + 1, getReadAmount());
@@ -309,7 +318,7 @@ struct Gif_Path
 			s32 frontFree = offset - getReadAmount();
 			if (frontFree >= sizeToAdd - intersect)
 				break;
-			mtgsReadWait();
+			mtgsReadWait(offset - (sizeToAdd - intersect)); // vk-285-124: frontFree >= sizeToAdd - intersect
 		}
 		if (offset < (s32)buffLimit)
 		{ // Needed for correct readAmount values
@@ -343,7 +352,9 @@ struct Gif_Path
 				break; // MTGS is reading in back of curOffset
 			if ((s32)buffLimit + readPos > (s32)curSize + (s32)size)
 				break;      // Enough free front space
-			mtgsReadWait(); // Let MTGS run to free up buffer space
+			// Let MTGS run to free up buffer space. vk-285-124: either check above passes once getReadAmount() is at
+			// most offset (readPos >= 0) or below buffLimit + offset - curSize - size.
+			mtgsReadWait(std::max<s32>(offset, (s32)buffLimit + offset - (s32)curSize - (s32)size - 1));
 		}
 		pxAssertMsg(curSize + size <= buffSize, "Gif Path Buffer Overflow!");
 		// PS5 port (vk-285-99): the next copy's lines, 1 KB on, asked for with write intent (see

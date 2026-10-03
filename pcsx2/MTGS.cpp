@@ -16,6 +16,7 @@
 #include "common/StringUtil.h"
 #include "common/WrappedMemCopy.h"
 
+#include <immintrin.h> // vk-285-124: _mm_pause (Gif_MTGS_WaitRead)
 #include <list>
 #include <mutex>
 #include <thread>
@@ -1227,4 +1228,42 @@ void Gif_AddBlankGSPacket(u32 size, GIF_PATH path)
 void Gif_MTGS_Wait(bool isMTVU)
 {
 	MTGS::WaitGS(false, true, isMTVU);
+}
+
+// PS5 port (vk-285-124, AI-assisted): the EE thread's wait for room in a GIF path's buffer (Gif_Path::mtgsReadWait),
+// until the GS thread has read the path down to `target` bytes still to read (it gives the bytes back packet by
+// packet, MainLoop's GSPacket case), instead of WaitGS's drain of the whole ring. In GTA Liberty City Stories with
+// Instant DMA the drains came ~23 times a second, ~11 ms each, and left the GS thread with an empty ring until the
+// EE thread caught up (GS idle 16%, EE waiting 26%, fps unchanged at ~48). Spins with pause, then yields. Returns
+// false (the caller waits the old way) when the ring is empty before the target is reached, which the accounting
+// doesn't allow but which must not spin forever, or when flags/gifwaitfull asks for the old wait (live).
+// Counted with WaitGS's waits ([threads] ee_waitgs_ms). Needs proper testing.
+extern bool OrbisFlag(const char* name);
+bool Gif_MTGS_WaitRead(std::atomic<int>& readAmount, s32 extra, s32 target)
+{
+	if (!MTGS::IsOpen() || OrbisFlag("gifwaitfull"))
+		return false;
+	// As WaitGS: a VU1 kick deferred inside a VIF1 transfer goes out first (the GS thread may be waiting for that
+	// program's XGKICK before it reaches this path's packets).
+	vu1Thread.FlushKick();
+	MTGS::SetEvent();
+	const unsigned long long t0 = __builtin_ia32_rdtsc();
+	OrbisEEWaitScope orbis_wait;
+	bool reached = true;
+	for (u32 spin = 0; readAmount.load(std::memory_order_acquire) + extra > target; spin++)
+	{
+		if (MTGS::s_ReadPos.load(std::memory_order_acquire) == MTGS::s_WritePos.load(std::memory_order_relaxed) &&
+			readAmount.load(std::memory_order_acquire) + extra > target)
+		{
+			reached = false;
+			break;
+		}
+		if (spin < 4096)
+			_mm_pause();
+		else
+			std::this_thread::yield();
+	}
+	g_orbis_ee_waitgs_ticks += __builtin_ia32_rdtsc() - t0;
+	++g_orbis_ee_waitgs_n;
+	return reached;
 }
