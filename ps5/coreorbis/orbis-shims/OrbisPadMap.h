@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -241,6 +242,11 @@ struct Config
 	float pressure[S_COUNT];
 	bool swap_sticks = false;
 	uint8_t left_dpad = 0;    // 0 no, 1 the D-pad too, 2 the D-pad only
+	// vk-285-118: each stick's dead zone, percent of the way out (0..50; PS5SX2/DeadzoneLeft, DeadzoneRight): inside it the
+	// stick reads as centred, past it the rest of the way is stretched over the whole range (no jump at its edge). For
+	// sticks that drift, or games that read a resting stick as a push. Of the controller's sticks, before Swap sticks.
+	uint8_t deadzone_left = 0;
+	uint8_t deadzone_right = 0;
 	uint8_t invert_left = 0;  // bit 0 up-down, bit 1 left-right
 	uint8_t invert_right = 0;
 	// vk-285-117: the save and load state combos (two buttons each) and how long they're held first.
@@ -262,7 +268,8 @@ struct Config
 		for (int s = 0; s < S_COUNT; s++)
 			if (target[s] != o.target[s] || pressure[s] != o.pressure[s])
 				return false;
-		return swap_sticks == o.swap_sticks && left_dpad == o.left_dpad && invert_left == o.invert_left && invert_right == o.invert_right &&
+		return swap_sticks == o.swap_sticks && left_dpad == o.left_dpad && deadzone_left == o.deadzone_left &&
+		       deadzone_right == o.deadzone_right && invert_left == o.invert_left && invert_right == o.invert_right &&
 		       save[0] == o.save[0] && save[1] == o.save[1] && load[0] == o.load[0] && load[1] == o.load[1] && hold_ms == o.hold_ms;
 	}
 	bool operator!=(const Config& o) const { return !(*this == o); }
@@ -319,6 +326,12 @@ inline Config FromSettings(Get get)
 	v.clear();
 	if (get("LeftStickDpad", v))
 		c.left_dpad = SmallInt(v, 2);
+	v.clear();
+	if (get("DeadzoneLeft", v))
+		c.deadzone_left = SmallInt(v, 50);
+	v.clear();
+	if (get("DeadzoneRight", v))
+		c.deadzone_right = SmallInt(v, 50);
 	v.clear();
 	if (get("InvertLeft", v))
 		c.invert_left = SmallInt(v, 3);
@@ -488,6 +501,27 @@ inline uint8_t Invert(uint8_t v)
 	return static_cast<uint8_t>(std::min(255, 256 - static_cast<int>(v)));
 }
 
+// vk-285-118: a stick through a round dead zone of `percent` (Config::deadzone_left/right).
+inline void DeadZone(uint8_t& x, uint8_t& y, int percent)
+{
+	if (percent <= 0)
+		return;
+	const float dx = (static_cast<float>(x) - 128.0f) / 127.0f, dy = (static_cast<float>(y) - 128.0f) / 127.0f;
+	const float r = std::sqrt(dx * dx + dy * dy), dz = static_cast<float>(percent) / 100.0f;
+	if (r <= dz)
+	{
+		x = y = 128;
+		return;
+	}
+	const float k = std::min(1.0f, (r - dz) / (1.0f - dz)) / r;
+	auto axis = [&](float d) {
+		const int v = static_cast<int>(std::lround(128.0f + d * k * 127.0f));
+		return static_cast<uint8_t>(std::max(0, std::min(255, v)));
+	};
+	x = axis(dx);
+	y = axis(dy);
+}
+
 inline Out Apply(const Config& c, const State& s)
 {
 	Out o;
@@ -512,6 +546,8 @@ inline Out Apply(const Config& c, const State& s)
 	}
 
 	uint8_t lx = s.lx, ly = s.ly, rx = s.rx, ry = s.ry;
+	DeadZone(lx, ly, c.deadzone_left);
+	DeadZone(rx, ry, c.deadzone_right);
 	if (c.swap_sticks)
 	{
 		std::swap(lx, rx);
@@ -569,6 +605,10 @@ inline std::string Describe(const Config& c)
 		add(std::string("left stick ") + axes[c.invert_left & 3] + " inverted");
 	if (c.invert_right)
 		add(std::string("right stick ") + axes[c.invert_right & 3] + " inverted");
+	if (c.deadzone_left)
+		add("left stick dead zone " + std::to_string(c.deadzone_left) + "%");
+	if (c.deadzone_right)
+		add("right stick dead zone " + std::to_string(c.deadzone_right) + "%");
 	if (c.left_dpad == 1)
 		add("left stick also the D-pad");
 	if (c.left_dpad == 2)

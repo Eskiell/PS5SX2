@@ -373,6 +373,33 @@ int main()
 		CHECK(Apply(m, Held(0x0002)).value[T_PRESSURE] == 1.0f);
 	}
 
+	// vk-285-118: dead zones (round, then stretched; the right stick's own; before Swap sticks).
+	{
+		const Config c = From({{"DeadzoneLeft", "20"}, {"DeadzoneRight", "60"}});
+		CHECK(c.deadzone_left == 20 && c.deadzone_right == 0 && !c.IsDefault());
+		State st;
+		st.lx = 128 + 20; // about 16%: inside
+		st.ly = 128 - 10;
+		st.rx = 140;
+		Out o = Apply(c, st);
+		CHECK(o.lx == 128 && o.ly == 128 && o.rx == 140);
+		st.lx = 255; st.ly = 128; // all the way: still all the way
+		o = Apply(c, st);
+		CHECK(o.lx == 255 && o.ly == 128);
+		st.lx = 0;
+		CHECK(Apply(c, st).lx <= 1);
+		st.lx = 128 + 76; // 60% out: (0.6 - 0.2) / 0.8 = half way
+		o = Apply(c, st);
+		CHECK(o.lx >= 190 && o.lx <= 193);
+		const Config sw = From({{"DeadzoneLeft", "30"}, {"SwapSticks", "1"}});
+		State drift;
+		drift.lx = 150;
+		drift.rx = 150;
+		o = Apply(sw, drift);
+		CHECK(o.rx == 128 && o.lx == 150);
+		CHECK(Describe(From({{"DeadzoneLeft", "10"}})) == "left stick dead zone 10%");
+	}
+
 	if (s_failures == 0)
 		printf("test_pad_map: all checks passed\n");
 	return s_failures == 0 ? 0 : 1;

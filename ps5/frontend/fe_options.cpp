@@ -147,6 +147,14 @@ std::vector<OptionDef> StrengthGroup()
 	return out;
 }
 
+// vk-285-118: the sticks' dead zones (OrbisPadMap.h Config::deadzone_left/right), as the page's DEADZONES.
+std::vector<OptionChoice> DeadzoneChoices()
+{
+	return {{"0", "Off"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}};
+}
+
+constexpr const char* kDeadzoneHint = "Inside this much of the way out, the stick reads as centred; past it, the rest of the way still reaches full. For a stick that drifts, or a game that walks or turns by itself. Off is the stick as it is.";
+
 std::vector<OptionChoice> InvertChoices()
 {
 	return {{"0", "Off"}, {"1", "Up-down"}, {"2", "Left-right"}, {"3", "Both"}};
@@ -302,6 +310,8 @@ const std::vector<OptionGroup>& OptionGroups()
 				Seg("PS5SX2/LeftStickDpad", "Left stick as D-pad", "0", "", {{"0", "Off"}, {"1", "Also"}, {"2", "Only"}},
 					"For games that only read the D-pad. Also: the left stick presses the D-pad as it moves. Only: it presses just the D-pad, "
 					"and the game's left stick stays still."),
+				Seg("PS5SX2/DeadzoneLeft", "Left stick dead zone", "0", "", DeadzoneChoices(), kDeadzoneHint),
+				Seg("PS5SX2/DeadzoneRight", "Right stick dead zone", "0", "", DeadzoneChoices(), kDeadzoneHint),
 			},
 			kTabControls},
 		{"Controller",
@@ -309,6 +319,9 @@ const std::vector<OptionGroup>& OptionGroups()
 				Toggle("PS5SX2/Rumble", "Rumble", "true", "Rumble %",
 					"The game's vibration on the controller. In a game, hold L2 and D-pad down for 2 seconds to open the settings page in the "
 					"PS5's own web browser; the game keeps running behind it."),
+				Seg("PS5SX2/RumbleStrength", "Rumble strength", "1", "",
+					{{"0.25", "25%"}, {"0.5", "50%"}, {"0.75", "75%"}, {"1", "100%"}, {"1.25", "125%"}, {"1.5", "150%"}, {"2", "200%"}},
+					"How strongly the controller vibrates, as a share of what the game asks for. Above 100% lifts weak rumble; it never goes past the motors' full strength."),
 			},
 			kTabControls},
 		{"Keyboard and mouse",

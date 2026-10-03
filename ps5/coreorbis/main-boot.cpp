@@ -345,6 +345,8 @@ static std::string orbis_ini_summary(const std::string& path)
 // with scePadSetVibration. PS5SX2/Rumble=false (the settings page's Controller group) turns it off.
 static std::atomic<u32> g_orbis_rumble_state[2]; // (big << 8) | small, each 0..255
 static std::atomic<int> g_orbis_rumble_on{1};
+// vk-285-118: PS5SX2/RumbleStrength (0.25..2, the Controller group's Strength): each motor's value times this, at most full.
+static std::atomic<int> g_orbis_rumble_pct{100};
 // vk-285-116 (AI-assisted): the controller remapping (orbis-shims/OrbisPadMap.h: PS5SX2/Button*, SwapSticks, InvertLeft,
 // InvertRight, LeftStickDpad; vk-285-117: the save and load state combos, SaveButton1/2, LoadButton1/2, StateHold; the
 // Controls tab). orbis_ps5opts_from sets it at boot and at every live apply; the pad thread copies it when the version
@@ -644,7 +646,13 @@ static void orbis_rumble_send(int index, int32_t handle, OrbisRumbleOut &out)
   if (handle < 0)
     return;
   const bool on = g_orbis_rumble_on.load(std::memory_order_relaxed) != 0 && !g_orbis_menu_request.load(std::memory_order_relaxed);
-  const u32 want = on ? g_orbis_rumble_state[index].load(std::memory_order_relaxed) : 0u;
+  u32 want = on ? g_orbis_rumble_state[index].load(std::memory_order_relaxed) : 0u;
+  const u32 pct = static_cast<u32>(g_orbis_rumble_pct.load(std::memory_order_relaxed));
+  if (want != 0u && pct != 100u)
+  {
+    const u32 big = std::min<u32>(255u, ((want >> 8) * pct + 50u) / 100u), small = std::min<u32>(255u, ((want & 0xFFu) * pct + 50u) / 100u);
+    want = (big << 8) | small;
+  }
   if (want == out.sent)
     return;
   const uint8_t param[2] = {static_cast<uint8_t>(want >> 8), static_cast<uint8_t>(want & 0xFFu)};
@@ -1214,6 +1222,18 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
   const int old_overlay = g_orbis_overlay_mode.exchange(overlay, std::memory_order_relaxed);
   const int old_graph = g_orbis_fps_graph.exchange(graph ? 1 : 0, std::memory_order_relaxed);
   const int old_rumble = g_orbis_rumble_on.exchange(rumble ? 1 : 0, std::memory_order_relaxed);
+  int rumble_pct = 100;
+  {
+    std::string v;
+    if (si.GetStringValue("PS5SX2", "RumbleStrength", &v))
+    {
+      char *end = nullptr;
+      const double k = std::strtod(v.c_str(), &end);
+      if (end != v.c_str() && k >= 0.1 && k <= 3.0)
+        rumble_pct = static_cast<int>(k * 100.0 + 0.5);
+    }
+  }
+  const int old_rumble_pct = g_orbis_rumble_pct.exchange(rumble_pct, std::memory_order_relaxed);
   std::string textures_dir; // vk-285-113: PS5SX2/TexturesDir, where a game's texture packs are besides USB drives
   si.GetStringValue("PS5SX2", "TexturesDir", &textures_dir);
   orbis_set_textures_dir(textures_dir);
@@ -1239,16 +1259,16 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
     if (changed)
     {
       g_orbis_padmap_version.fetch_add(1, std::memory_order_release);
-      printf("[boot] controls: %s (PS5SX2/Button*, SwapSticks, InvertLeft, InvertRight, LeftStickDpad, SaveButton*, LoadButton*, StateHold)\n",
+      printf("[boot] controls: %s (PS5SX2/Button*, SwapSticks, InvertLeft, InvertRight, LeftStickDpad, DeadzoneLeft, DeadzoneRight, SaveButton*, LoadButton*, StateHold)\n",
         orbis_padmap::Describe(map).c_str());
       fflush(stdout);
     }
   }
-  if (old_overlay != overlay || old_graph != (graph ? 1 : 0) || old_rumble != (rumble ? 1 : 0))
+  if (old_overlay != overlay || old_graph != (graph ? 1 : 0) || old_rumble != (rumble ? 1 : 0) || old_rumble_pct != rumble_pct)
   {
-    printf("[boot] on-screen box %s, FPS graph %s, rumble %s (PS5SX2/Overlay, FpsGraph, Rumble)\n",
+    printf("[boot] on-screen box %s, FPS graph %s, rumble %s at %d%% (PS5SX2/Overlay, FpsGraph, Rumble, RumbleStrength)\n",
       overlay < 0 ? "as live.ini says" : overlay == 0 ? "off" : overlay == 1 ? "FPS" : "FPS and loads", graph ? "on" : "off",
-      rumble ? "on" : "off");
+      rumble ? "on" : "off", rumble_pct);
     fflush(stdout);
   }
 }
