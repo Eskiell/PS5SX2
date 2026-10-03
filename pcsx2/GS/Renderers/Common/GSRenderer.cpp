@@ -412,11 +412,16 @@ bool OrbisFlag(const char* name);
 // more, the game is under 92% speed, for 3 seconds in a row -- GPU readbacks switch to Don't wait (HWDownloadMode 3) for
 // the rest of the game, unless gs.ini or the game's file sets HWDownloadMode itself (OrbisReadbackAutoCpu, on the CPU
 // thread). The flag noautoreadback turns it off.
+// vk-285-119 (AI-assisted): the same switch for many short waits. The vk-285-118 logs (firmware 13.x) had games that
+// read back ~90-170 times a second, each wait only 2.6-5 ms but together 435-500 ms of every second on the GS thread:
+// The Punisher (77% speed), Max Payne 2, Guitar Hero World Tour. So: 300 ms a second or more of readback waits, at 20
+// readbacks or more, under 92% speed, for 5 seconds in a row (the 10 ms-each rule still needs 3).
+std::atomic<int> g_orbis_rb_auto_kind{0}; // 1: each wait 10 ms or more (old firmware), 2: many short waits (main-boot.cpp)
 static void OrbisReadbackAutoSecond(float speed)
 {
 	static int s_checked = -1;
 	static bool s_done = false;
-	static int s_streak = 0;
+	static int s_streak = 0, s_streak_many = 0;
 	static unsigned long long s_n0 = 0, s_ns0 = 0;
 	const unsigned long long n = g_orbis_readback_wait_n - s_n0, ns = g_orbis_readback_wait_ns - s_ns0;
 	s_n0 = g_orbis_readback_wait_n;
@@ -432,12 +437,19 @@ static void OrbisReadbackAutoSecond(float speed)
 		s_streak++;
 	else
 		s_streak = 0;
-	if (s_streak < 3)
+	if (n >= 20 && ms >= 300.0 && speed < 92.0f)
+		s_streak_many++;
+	else
+		s_streak_many = 0;
+	const int kind = (s_streak >= 3) ? 1 : (s_streak_many >= 5) ? 2 : 0;
+	if (kind == 0)
 		return;
 	s_done = true;
 	printf("[readbacks] the GS thread waited %.0f ms in the last second for %llu readbacks (%.1f ms each) at %.0f%% speed, "
-		   "3 s in a row: asking for GPU readbacks Don't wait\n", ms, n, ms / static_cast<double>(n), speed);
+		   "%d s in a row: asking for GPU readbacks Don't wait (%s)\n", ms, n, ms / static_cast<double>(n), speed,
+		kind == 1 ? s_streak : s_streak_many, kind == 1 ? "each wait 10 ms or more" : "many waits, 300 ms a second or more");
 	fflush(stdout);
+	g_orbis_rb_auto_kind.store(kind, std::memory_order_relaxed);
 	g_orbis_rb_auto_request.store(1, std::memory_order_release);
 }
 #endif

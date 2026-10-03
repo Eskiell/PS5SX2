@@ -1365,24 +1365,30 @@ void orbis_reload_gs_ini_cpu();
 // OrbisReadbackAutoSecond (older firmware's readback stall). Not when gs.ini or the game's file sets HWDownloadMode: that
 // choice stays. Put under gs.ini in the base layer, so a live reload keeps it and a later HWDownloadMode in those files
 // still wins.
+extern std::atomic<int> g_orbis_rb_auto_kind; // vk-285-119 (GSRenderer.cpp): 1 each wait 10 ms+, 2 many short waits
 void OrbisReadbackAutoCpu()
 {
+  const bool many = g_orbis_rb_auto_kind.load(std::memory_order_relaxed) == 2;
   MemorySettingsInterface peek;
   orbis_apply_gs_ini(peek, true);
   if (peek.ContainsValue("EmuCore/GS", "HWDownloadMode"))
   {
     printf("[readbacks] not switched: HWDownloadMode=%d is set in gs.ini or the game's file\n",
       peek.GetIntValue("EmuCore/GS", "HWDownloadMode", 0));
-    orbis_eventf("readbacks: each one takes 10 ms or more and the game is slow, but HWDownloadMode is set in gs.ini or the "
-                 "game's file: left as it is");
+    orbis_eventf(many ? "readbacks: they take 300 ms a second or more and the game is slow, but HWDownloadMode is set in "
+                        "gs.ini or the game's file: left as it is" :
+                        "readbacks: each one takes 10 ms or more and the game is slow, but HWDownloadMode is set in gs.ini or the "
+                        "game's file: left as it is");
     fflush(stdout);
     return;
   }
   s_base_pre_gsini.SetIntValue("EmuCore/GS", "HWDownloadMode", static_cast<int>(GSHardwareDownloadMode::Unsynchronized));
   orbis_reload_gs_ini_cpu();
   OrbisOSDLabel("READBACKS: DON'T WAIT (AUTO)");
-  orbis_eventf("readbacks: each one took 10 ms or more and slowed the game, so GPU readbacks are on Don't wait (auto) "
-               "for this game; set GPU readbacks to Accurate to keep them, or add the flag noautoreadback");
+  orbis_eventf(many ? "readbacks: waiting for them took 300 ms a second or more and slowed the game, so GPU readbacks are on "
+                      "Don't wait (auto) for this game; set GPU readbacks to Accurate to keep them, or add the flag noautoreadback" :
+                      "readbacks: each one took 10 ms or more and slowed the game, so GPU readbacks are on Don't wait (auto) "
+                      "for this game; set GPU readbacks to Accurate to keep them, or add the flag noautoreadback");
   printf("[readbacks] GPU readbacks set to Don't wait (HWDownloadMode 3) for this game\n");
   fflush(stdout);
 }
