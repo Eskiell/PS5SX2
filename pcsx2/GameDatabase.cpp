@@ -1119,9 +1119,43 @@ void OrbisSetSpeedHack(GameDatabaseSchema::GameEntry& entry, SpeedHack id, int v
 	entry.speedHacks.emplace_back(id, value);
 }
 
+// vk-285-125 (AI-assisted): game fixes PS5SX2 adds. Instant DMA lets the event loop take a VIF1 DMA chain in one go
+// (with vk-285-100's fused passes) instead of returning to the EE between ~1.6 million chain steps a second.
+struct OrbisGameFixAddition
+{
+	const char* serial;
+	const char* name; // for a serial GameIndex.yaml doesn't have
+	GamefixId fix;
+};
+
+constexpr OrbisGameFixAddition kOrbisGameFixAdditions[] = {
+	// GTA Liberty City Stories with its 60 FPS patch at 6x (Spyros's Pro, 2026-10-03): event tests 1.9 M -> 0.13 M a
+	// second, the EE thread 100% -> 80% busy at the same view; with vk-285-124's GIF path wait 47-53 fps became 58-60.
+	// Minutes of driving showed nothing wrong. The US release only; the EU (SLES-54135/54136) and JP (SLPM-66851,
+	// SLPM-55038) ones are untested.
+	{"SLUS-21423", "Grand Theft Auto - Liberty City Stories", Fix_InstantDMA},
+};
+
 void OrbisApplyGameDbAdditions()
 {
 	int added = 0;
+	for (const OrbisGameFixAddition& add : kOrbisGameFixAdditions) // vk-285-125
+	{
+		const std::string serial = StringUtil::toLower(add.serial);
+		auto iter = s_game_db.find(serial);
+		if (iter == s_game_db.end())
+		{
+			GameDatabaseSchema::GameEntry entry;
+			entry.name = add.name;
+			iter = s_game_db.emplace(serial, std::move(entry)).first;
+			added++;
+		}
+		auto& fixes = iter->second.gameFixes;
+		if (std::find(fixes.begin(), fixes.end(), add.fix) == fixes.end())
+			fixes.push_back(add.fix);
+	}
+	Console.WriteLn("GameDB: PS5SX2's additions: %zu game fixes (Instant DMA for GTA Liberty City Stories)",
+		std::size(kOrbisGameFixAdditions));
 	for (const OrbisSpeedHackFix& fix : kOrbisSpeedHackFixes)
 	{
 		const std::string serial = StringUtil::toLower(fix.serial);

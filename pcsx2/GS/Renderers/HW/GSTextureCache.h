@@ -5,6 +5,7 @@
 
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "GS/Renderers/Common/GSFastList.h"
+#include "GS/Renderers/HW/OrbisPool.h" // vk-285-125: node free lists for the hash containers and Sources
 #include "GS/Renderers/Common/GSDirtyRect.h"
 
 #include <unordered_set>
@@ -135,7 +136,9 @@ public:
 		bool is_replacement;
 	};
 
-	using HashCacheMap = std::unordered_map<HashCacheKey, HashCacheEntry, HashCacheKeyHash>;
+	// vk-285-125 (PS5 port): nodes from OrbisPool.h's free lists (GS thread only).
+	using HashCacheMap = std::unordered_map<HashCacheKey, HashCacheEntry, HashCacheKeyHash, std::equal_to<HashCacheKey>,
+		OrbisNodeAllocator<std::pair<const HashCacheKey, HashCacheEntry>>>;
 
 	class Surface : public GSAlignedClass<32>
 	{
@@ -296,6 +299,8 @@ public:
 			GSVector4i* rect;
 			u32 count;
 		} m_write = {};
+		// vk-285-125 (PS5 port): Write's three rectangles live here instead of in an _aligned_malloc block per Source.
+		alignas(16) GSVector4i m_write_rects[3];
 
 		void PreloadLevel(int level);
 
@@ -334,6 +339,12 @@ public:
 		Source(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA);
 		virtual ~Source();
 
+		// vk-285-125 (PS5 port): Sources come and go by the thousand when a game streams textures (every upload over a
+		// hash-cached source removes it); their blocks go through a free list (OrbisPool.h) instead of the system's
+		// aligned malloc and free. GS thread only, like the rest of the texture cache.
+		static void* operator new(size_t size);
+		static void operator delete(void* p);
+
 		__fi bool CanPreload() const { return CanPreloadTextureSize(m_TEX0.TW, m_TEX0.TH); }
 		__fi bool IsFromTarget() const { return m_target; }
 		bool IsPaletteFormat() const;
@@ -359,7 +370,10 @@ public:
 		// Array of 2 maps, the first for 64B palettes and the second for 1024B palettes.
 		// Each map stores the key PaletteKey (clut copy, pal value) pointing to the relevant shared pointer to Palette object.
 		// There is one PaletteKey per Palette, and the hashing and comparison of PaletteKey is done with custom operators PaletteKeyHash and PaletteKeyEqual.
-		std::array<std::unordered_map<PaletteKey, std::shared_ptr<Palette>, PaletteKeyHash, PaletteKeyEqual>, 2> m_maps;
+		std::array<std::unordered_map<PaletteKey, std::shared_ptr<Palette>, PaletteKeyHash, PaletteKeyEqual,
+					   OrbisNodeAllocator<std::pair<const PaletteKey, std::shared_ptr<Palette>>>>,
+			2>
+			m_maps; // vk-285-125: OrbisPool.h nodes
 
 	public:
 		PaletteMap();
@@ -374,7 +388,7 @@ public:
 	class SourceMap
 	{
 	public:
-		std::unordered_set<Source*> m_surfaces;
+		std::unordered_set<Source*, std::hash<Source*>, std::equal_to<Source*>, OrbisNodeAllocator<Source*>> m_surfaces; // vk-285-125
 		std::array<FastList<Source*>, GS_MAX_PAGES> m_map;
 
 		void Add(Source* s, const GIFRegTEX0& TEX0);
@@ -450,7 +464,9 @@ protected:
 	int m_remembered_dst_bp = -1;
 
 	constexpr static size_t S_SURFACE_OFFSET_CACHE_MAX_SIZE = std::numeric_limits<u16>::max();
-	std::unordered_map<SurfaceOffsetKey, SurfaceOffset, SurfaceOffsetKeyHash, SurfaceOffsetKeyEqual> m_surface_offset_cache;
+	std::unordered_map<SurfaceOffsetKey, SurfaceOffset, SurfaceOffsetKeyHash, SurfaceOffsetKeyEqual,
+		OrbisNodeAllocator<std::pair<const SurfaceOffsetKey, SurfaceOffset>>>
+		m_surface_offset_cache; // vk-285-125: OrbisPool.h nodes
 
 	Source* m_temporary_source = nullptr; // invalidated after the draw
 	GSTexture* m_temporary_z = nullptr; // invalidated after the draw
@@ -502,6 +518,11 @@ protected:
 		bool m_clear = true;
 	};
 public:
+	// vk-285-125 (PS5 port): sizes for the [tcstat] line.
+	size_t OrbisSourceCount() const { return m_src.m_surfaces.size(); }
+	size_t OrbisHashCacheCount() const { return m_hash_cache.size(); }
+	size_t OrbisSurfaceOffsetCount() const { return m_surface_offset_cache.size(); }
+
 	GSTextureCache();
 	~GSTextureCache();
 
@@ -617,3 +638,11 @@ public:
 };
 
 extern std::unique_ptr<GSTextureCache> g_texture_cache;
+
+// vk-285-125 (PS5 port, AI-assisted): the texture cache's counters for the [tcstat] line (GS thread only).
+struct OrbisTCStats
+{
+	unsigned long long src_new = 0, src_del = 0, inval = 0, dirty_page = 0, hc_lookup = 0, hc_miss = 0;
+};
+extern OrbisTCStats g_orbis_tcstat;
+void OrbisPrintTCStats();

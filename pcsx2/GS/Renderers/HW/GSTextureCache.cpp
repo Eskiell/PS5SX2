@@ -9,6 +9,7 @@
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
 #include "GS/GSXXH.h"
+#include "OrbisDeferredLog.h" // vk-285-125: the [tcstat] line
 
 #include "common/Console.h"
 #include "common/BitUtils.h"
@@ -678,6 +679,7 @@ void GSTextureCache::DirtyRectByPage(u32 sbp, u32 spsm, u32 sbw, Target* t, GSVe
 {
 	if (src_r.rempty())
 		return;
+	g_orbis_tcstat.dirty_page++; // vk-285-125
 
 	const u32 start_bp = GSLocalMemory::GetStartBlockAddress(sbp, sbw, spsm, src_r);
 	const u32 end_bp = GSLocalMemory::GetEndBlockAddress(sbp, sbw, spsm, src_r);
@@ -4753,6 +4755,7 @@ void GSTextureCache::InvalidateVideoMemType(int type, u32 bp, u32 write_psm, u32
 // Called each time you want to write to the GS memory
 void GSTextureCache::InvalidateVideoMem(const GSOffset& off, const GSVector4i& rect, bool target)
 {
+	g_orbis_tcstat.inval++; // vk-285-125
 	const u32 bp = off.bp();
 	const u32 bw = off.bw();
 	const u32 psm = off.psm();
@@ -7075,6 +7078,7 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
 	}
 
 	// check with the full key
+	g_orbis_tcstat.hc_lookup++; // vk-285-125
 	auto it = m_hash_cache.find(key);
 
 	// if this fails, and paltex is on, try indexed texture
@@ -7094,6 +7098,7 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
 	}
 
 	// cache miss.
+	g_orbis_tcstat.hc_miss++; // vk-285-125
 	GL_CACHE("TC: HC Miss: %" PRIx64 " %" PRIx64 " R-%ux%u", key.TEX0Hash, key.CLUTHash, key.region_width, key.region_height);
 
 	// check for a replacement texture with the full clut key
@@ -7583,9 +7588,28 @@ GSTextureCache::Source::Source(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA)
 	m_TEXA = TEXA;
 }
 
+// vk-285-125 (PS5 port, AI-assisted): see GSTextureCache.h. 32-byte aligned like GSAlignedClass<32>; up to 4096 freed
+// Sources (~6 MB) wait for reuse. Counted for the [tcstat] line.
+OrbisTCStats g_orbis_tcstat;
+using OrbisSourceList = OrbisFreeList<sizeof(GSTextureCache::Source), 32, 4096>;
+
+void* GSTextureCache::Source::operator new(size_t size)
+{
+	pxAssert(size == sizeof(Source));
+	g_orbis_tcstat.src_new++;
+	return OrbisSourceList::Get();
+}
+
+void GSTextureCache::Source::operator delete(void* p)
+{
+	if (p)
+		g_orbis_tcstat.src_del++;
+	OrbisSourceList::Put(p);
+}
+
 GSTextureCache::Source::~Source()
 {
-	_aligned_free(m_write.rect);
+	// vk-285-125: m_write.rect points into this object (m_write_rects), nothing to free.
 
 	// Shared textures are pointers copy. Therefore no allocation
 	// to recycle.
@@ -7743,7 +7767,7 @@ void GSTextureCache::Source::UpdateLayer(const GIFRegTEX0& TEX0, const GSVector4
 void GSTextureCache::Source::Write(const GSVector4i& r, int layer, const GSOffset& off)
 {
 	if (!m_write.rect)
-		m_write.rect = static_cast<GSVector4i*>(_aligned_malloc(3 * sizeof(GSVector4i), 16));
+		m_write.rect = m_write_rects; // vk-285-125 (was an _aligned_malloc block)
 
 	m_write.rect[m_write.count++] = r;
 
@@ -9252,4 +9276,27 @@ u64 GSTextureCache::HashCacheKeyHash::operator()(const HashCacheKey& key) const
 	HashCombine(h, key.TEX0Hash, key.CLUTHash, key.TEX0.U64, key.TEXA.U64,
 		static_cast<u64>(key.region_width) | (static_cast<u64>(key.region_height) << 16));
 	return h;
+}
+
+// vk-285-125 (PS5 port, AI-assisted): the texture cache's churn this second, for GTA Liberty City Stories-like texture
+// streaming: Sources made and removed, invalidations (host-to-local transfers and draws), DirtyRectByPage calls, hash
+// cache lookups and misses, the free lists' reuse (OrbisPool.h), and the containers' sizes. GSRenderer.cpp's
+// OrbisPrintLoad calls it once a second (GS thread), into the deferred log.
+void OrbisPrintTCStats()
+{
+	static OrbisTCStats s_prev;
+	static unsigned long long s_prev_reused = 0, s_prev_fresh = 0;
+	if (!g_texture_cache)
+		return;
+	const OrbisTCStats& c = g_orbis_tcstat;
+	OrbisDeferredPrintf(
+		"[tcstat] per s: sources new=%llu del=%llu | inval=%llu dirtypage=%llu | hash lookups=%llu misses=%llu | "
+		"pool reused=%llu fresh=%llu | now: sources=%zu hashcache=%zu offsets=%zu\n",
+		c.src_new - s_prev.src_new, c.src_del - s_prev.src_del, c.inval - s_prev.inval, c.dirty_page - s_prev.dirty_page,
+		c.hc_lookup - s_prev.hc_lookup, c.hc_miss - s_prev.hc_miss, g_orbis_pool_reused - s_prev_reused,
+		g_orbis_pool_fresh - s_prev_fresh, g_texture_cache->OrbisSourceCount(), g_texture_cache->OrbisHashCacheCount(),
+		g_texture_cache->OrbisSurfaceOffsetCount());
+	s_prev = c;
+	s_prev_reused = g_orbis_pool_reused;
+	s_prev_fresh = g_orbis_pool_fresh;
 }

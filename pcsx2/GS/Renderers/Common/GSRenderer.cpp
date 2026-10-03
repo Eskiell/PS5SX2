@@ -564,6 +564,7 @@ static void OrbisMeasureLoad()
 	}
 }
 
+void OrbisPrintTCStats(); // vk-285-125 (GSTextureCache.cpp)
 // The [load] line of the second OrbisMeasureLoad last measured, and the [rec]/[mcd] lines after it.
 static void OrbisPrintLoad()
 {
@@ -578,6 +579,7 @@ static void OrbisPrintLoad()
 		printf("%s%.0f", i ? "/" : "", m.sw_busy[i]);
 	OrbisPrintCpu(); // eerec-285
 	printf("\n");
+	OrbisPrintTCStats(); // vk-285-125: the texture cache's churn (HW renderer only; GSTextureCache.cpp)
 	if (m.nsw != 0)
 	{
 		// vk-285-119: why the GS thread waited for the raster workers (count and ms this second, GSRendererSW::Sync):
