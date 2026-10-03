@@ -151,8 +151,9 @@ if [[ ${ORBIS_WAR_SHIM:-1} != 0 ]]; then
     "$OBJCOPY" --redefine-sym ps5vk_cmd_buffer_note_draw_samples=ps5vk_cmd_buffer_note_draw_samples_orig \
       --redefine-sym ps5vk_cmd_buffer_sampled_earlier=ps5vk_cmd_buffer_sampled_earlier_orig "$war_dir/ps5vk_cmd_buffer.o"
     (cd "$war_dir" && ar r "$OUT/driver/libps5vk.ps5.a" ps5vk_cmd_buffer.o)
+    "$NM" "$OUT/driver/libps5vk.ps5.a" > "$war_dir/nm.txt" 2>/dev/null || true
     for s in ps5vk_cmd_buffer_note_draw_samples_orig ps5vk_cmd_buffer_sampled_earlier_orig; do
-      "$NM" "$OUT/driver/libps5vk.ps5.a" 2>/dev/null | grep -qE " T $s$" ||
+      grep -qE " T $s$" "$war_dir/nm.txt" ||
         { echo "[link-vk] error: the WAR shim's rename left no $s in the driver archive" >&2; exit 1; }
     done
     sh "$NATIVE/tooling/prospero-clang18" -std=c11 -O2 -march=znver2 -mavx2 -ffunction-sections -fdata-sections \
