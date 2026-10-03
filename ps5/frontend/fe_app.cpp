@@ -102,8 +102,8 @@ void App::SetWebUrl(const std::string& url, const std::string& shown)
 	m_qr_size = 0;
 	if (url.empty())
 		return;
-	// Byte mode up to version 10 (57 modules) is plenty for "http://255.255.255.255:65535/?t=" and a
-	// 16-character token; medium error correction.
+	// Byte mode up to version 10 (57 modules) is plenty for "http://255.255.255.255:65535/" (vk-285-118: no key
+	// after it any more); medium error correction.
 	uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
 	if (!qrcodegen_encodeText(url.c_str(), tmp, qr, qrcodegen_Ecc_MEDIUM, 1, 10, qrcodegen_Mask_AUTO, true))
 	{

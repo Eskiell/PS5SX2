@@ -1012,7 +1012,6 @@ bool orbis_web_start(const OrbisFrontendPaths& paths, const char* build_tag)
 	cfg.patches_dir = paths.patches_dir;
 	cfg.covers_dir = paths.covers_dir;
 	cfg.cache_dir = paths.cache_dir;
-	cfg.token_path = paths.top_dir + "/webui_token.txt";
 	cfg.build_tag = build_tag ? build_tag : "";
 	cfg.port = 8844;
 	cfg.presets.assign(reinterpret_cast<const char*>(fe_presets), static_cast<size_t>(fe_presets_end - fe_presets));

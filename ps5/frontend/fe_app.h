@@ -53,7 +53,7 @@ public:
 	// Fills `f` for this moment; `clock` is the time of day to show ("" for none).
 	void Build(FrameDesc& f, const std::string& clock);
 
-	// The settings page's address for the QR tile (vk-285-50): "http://<ip>:<port>/?t=<token>", or
+	// The settings page's address for the QR tile (vk-285-50): "http://<ip>:<port>/" (vk-285-118: no key), or
 	// empty when there is no network (the tile then says so). Call it again when the address changes.
 	void SetWebUrl(const std::string& url, const std::string& shown);
 

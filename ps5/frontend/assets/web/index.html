@@ -195,11 +195,6 @@ footer a { color: var(--dim); }
          color: var(--text); padding: 10px 16px; border-radius: 99px; font-size: 14px; white-space: nowrap;
          box-shadow: 0 8px 30px rgba(0,0,0,0.5), 0 0 20px rgba(var(--glow),0.25); pointer-events: none; z-index: 5; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
-.gate { display: none; text-align: center; padding: 18vh 20px 0; }
-.gate.show { display: block; }
-.gate .big { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
-.gate .qr { width: 86px; height: 86px; margin: 0 auto 22px; border-radius: 14px; background:
-  conic-gradient(from 90deg at 30% 30%, #fff 25%, transparent 0) 0 0 / 28px 28px, rgba(255,255,255,0.08); opacity: 0.8; }
 .hide { display: none !important; }
 @media (min-width: 700px) {
   .case { flex-basis: 170px; height: 242px; }
@@ -222,12 +217,6 @@ footer a { color: var(--dim); }
     </div>
     <div class="clock" id="clock"></div>
   </header>
-
-  <div class="gate" id="gate">
-    <div class="qr"></div>
-    <div class="big">Scan the QR code on the TV</div>
-    <div style="color:var(--dim)">It's in the corner of the game shelf. This page needs the key it carries.</div>
-  </div>
 
   <main id="main" class="hide">
     <div class="testing hide" id="testing"><span><b>TESTING</b> · <span id="testlabel"></span></span><a href="#report">Report a problem</a></div>
@@ -445,7 +434,6 @@ let mcdBusy = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let token = "";
 let games = [];
 let state = { mode: "menu", playing: null };
 let current = null;      // the game id shown, or "@global"
@@ -457,25 +445,23 @@ let ctlArmed = 0;        // vk-285-116: the controls' reset button's
 let tab = "settings";    // vk-285-116: the tab shown, "settings" or "controls" (kept in this browser)
 try { if (localStorage.getItem("ps5sx2.tab") === "controls") tab = "controls"; } catch (e) {}
 
-// ---- The key from the QR code: kept in this browser for this address.
+// vk-285-118: no key any more: the console's address is enough (fe_web.cpp refuses other sites' requests instead). An old
+// bookmark's ?t= is dropped from the address bar.
 (function () {
-  const u = new URL(location.href);
-  const t = u.searchParams.get("t");
   try {
-    if (t) { localStorage.setItem("ps5sx2.token", t); u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search); }
-    token = t || localStorage.getItem("ps5sx2.token") || "";
-  } catch (e) { token = t || ""; }
+    const u = new URL(location.href);
+    if (u.searchParams.has("t")) { u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search); }
+    localStorage.removeItem("ps5sx2.token");
+  } catch (e) {}
 })();
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, Object.assign({}, opts, { headers: Object.assign({ "X-Token": token }, opts.headers || {}) }));
-  if (r.status === 401) { showGate(); throw new Error("unauthorized"); }
+  const r = await fetch(path, opts);
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
-const cover = (id) => "/api/cover?id=" + encodeURIComponent(id) + "&t=" + encodeURIComponent(token);
-function showGate() { $("gate").classList.add("show"); $("main").classList.add("hide"); }
+const cover = (id) => "/api/cover?id=" + encodeURIComponent(id);
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
   clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 2200);
@@ -568,7 +554,7 @@ async function select(id) {
     data = await api("/api/settings?id=" + encodeURIComponent(id));
     if (current === id) render();
     loadCards(); // vk-285-113: the list may have changed (a card copied in); it draws again only when it has
-  } catch (e) { if (e.message !== "unauthorized") toast("Couldn't load the settings: " + e.message); }
+  } catch (e) { toast("Couldn't load the settings: " + e.message); }
 }
 
 function effective(item) {
@@ -801,7 +787,7 @@ async function mcdCreate() {
     const r = await api("/api/memcards", { method: "POST", body: "create " + mcdSize + " " + name, headers: { "Content-Type": "text/plain" } });
     cards = r; mcdName = "";
     toast("Made " + r.created + " (" + mcdSize + " MB) \u00b7 pick it in a slot");
-  } catch (e) { if (e.message !== "unauthorized") toast("Card not made: " + e.message); }
+  } catch (e) { toast("Card not made: " + e.message); }
   mcdBusy = false;
   if (data) render();
 }
@@ -816,7 +802,7 @@ async function useRecommended() {
     const live = state.playing && (id === "@global" || state.playing.id === id);
     toast(live ? "Recommended settings on \u00b7 applying" + (mtvu ? ", MTVU at next launch" : " in the game") : "Recommended settings on");
     refreshGames();
-  } catch (e) { if (e.message !== "unauthorized") toast("Not saved: " + e.message); }
+  } catch (e) { toast("Not saved: " + e.message); }
 }
 
 // Changes show at once and go to the console after a short pause, so a few taps make one write.
@@ -852,7 +838,7 @@ async function save() {
     const live = state.playing && (id === "@global" || state.playing.id === id);
     toast(live ? (later.length ? "Saved \u00b7 the rest applies now, " + later.join(" and ") + " at next launch" : "Saved \u00b7 applying in the game") : "Saved");
     refreshGames();
-  } catch (e) { if (e.message !== "unauthorized") toast("Not saved: " + e.message); }
+  } catch (e) { toast("Not saved: " + e.message); }
 }
 
 async function refreshGames() {
@@ -904,7 +890,7 @@ async function sendNote() {
     toast("Note added to the logs");
     return true;
   } catch (e) {
-    if (e.message !== "unauthorized") toast("The note didn't reach the console");
+    toast("The note didn't reach the console");
     return false;
   }
 }
@@ -913,7 +899,7 @@ $("dllogs").addEventListener("click", async (ev) => {
   ev.preventDefault();
   await sendNote();
   toast("Downloading the logs…");
-  location.href = "/api/report?t=" + encodeURIComponent(token);
+  location.href = "/api/report";
 });
 function showTesting(s) {
   if (!(s.test > 0)) return;
@@ -934,14 +920,13 @@ $("discord").addEventListener("click", async () => {
 });
 
 (async function start() {
-  if (!token) { showGate(); return; }
   try {
     const s = await api("/api/state");
     state = s;
     $("build").textContent = s.build;
     showTesting(s);
     games = await api("/api/games");
-  } catch (e) { if (e.message !== "unauthorized") toast("The console didn't answer"); return; }
+  } catch (e) { toast("The console didn't answer"); return; }
   $("main").classList.remove("hide");
   buildFlow();
   if (state.playing) { $("now").classList.add("show"); $("nowtitle").textContent = state.playing.title; $("nowcover").src = cover(state.playing.id); }
