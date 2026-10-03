@@ -1842,6 +1842,17 @@ static void orbis_ensure_data_layout()
     if (rc == 0)
       orbis_eventf("created /data/PCSX2/games/ for the disc images");
   }
+  // vk-285-121 (AI-assisted): settings/ as well. The shelf's sheet and the settings page write a game's own settings
+  // there and nothing made the folder: two testers' 1.7 logs had every save fail with errno 2 ("[web] writing
+  // /data/PCSX2/settings/... failed (errno 2)"). The writers make it too now (fe_settings.cpp, WriteFileAtomic).
+  const std::string settings = std::string(kRoot) + "/settings";
+  if (stat(settings.c_str(), &st) != 0)
+  {
+    const int rc = mkdir(settings.c_str(), 0777);
+    printf("[boot] data layout: created %s (rc=%d errno=%d)\n", settings.c_str(), rc, rc ? errno : 0);
+    if (rc == 0)
+      orbis_eventf("created /data/PCSX2/settings/ for the games' own settings");
+  }
   const std::string flags = std::string(kRoot) + "/flags";
   const bool have_dir = stat(flags.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
   int entries = 0;
