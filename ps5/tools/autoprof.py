@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# PS5SX2 (vk-285-118, AI-assisted): reads the [autoprof] lines of session reports or boot logs and names the busy code.
+# PS5SX2 (vk-285-118, AI-assisted; vk-285-119: windows counted once across reports, games from the settings log,
+# buckets named by their middle, coverage): reads the [autoprof] lines of session reports or boot logs and names the busy code.
 #
 #   autoprof.py --elf llvm-pie.elf REPORT_OR_BOOTLOG...   [--by-game] [--top 25]
 #
@@ -36,14 +37,32 @@ def name_of(addrs, names, a):
     return names[i] if i >= 0 else '?'
 
 
-def windows(path):
-    game = '?'
+GAME_START = re.compile(r'^\S+ \S+  game start: (.*?)(?: \| its settings:.*)?$')
+BOOT_GAME = re.compile(r'^\[boot\] game: (?:.*/)?(.+)$')
+
+
+def windows(path, seen=None):
+    """The windows of one report or boot log. vk-285-119: `seen` is shared by every file given, because a console's
+    reports all carry its settings log from the start, so one window is in many reports (and in boot.log too); each
+    is counted once. Its game is the settings log's "game start:" before it (or boot.log's "[boot] game:"), and the
+    report's "Game:" line only when neither is there: a report names the session that ended, not every game its
+    settings log covers."""
+    header_game = '?'
+    game = None
     cur = None
-    seen = set()  # vk-285-118's lines are in boot.log and in the settings log: each window once
+    seen = set() if seen is None else seen
     skip = False
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.startswith('Game: '):
-            game = re.sub(r' \(from /mnt/.*\)$', '', line[6:].strip())
+            header_game = re.sub(r' \(from /mnt/.*\)$', '', line[6:].strip())
+        if line.startswith('===== '):
+            game = None  # a new section: its own game lines decide
+        m = GAME_START.match(line.rstrip('\n'))
+        if m:
+            game = re.sub(r' \(from /.*\)$', '', m.group(1).strip())
+        m = BOOT_GAME.match(line.rstrip('\n'))
+        if m:
+            game = m.group(1).strip()
         if '[autoprof]' not in line:
             continue
         line = line[line.index('[autoprof]'):].rstrip('\n')
@@ -55,7 +74,7 @@ def windows(path):
                 continue
             if cur:
                 yield cur
-            cur = dict(game=game, file=path, thread=m.group(2), speed=int(m.group(3)), loads=tuple(map(int, m.group(4, 5, 6))),
+            cur = dict(game=game or header_game, file=path, thread=m.group(2), speed=int(m.group(3)), loads=tuple(map(int, m.group(4, 5, 6))),
                        n=int(m.group(7)), eboot=float(m.group(9)), jit=float(m.group(10)), lib=float(m.group(11)), buckets=[], areas={},
                        libs=[], callers=[])
             continue
@@ -64,6 +83,8 @@ def windows(path):
         body = line.split(':', 1)[1] if ':' in line else ''
         if ' eboot:' in line:
             cur['buckets'] = [((-1 if s == '-' else 1) * int(o, 16), float(p)) for s, o, p in BUCKET.findall(body)]
+            m = re.search(r'\| these (\d+) = ([\d.]+)% of the samples', body)  # vk-285-119
+            cur['covered'] = float(m.group(2)) if m else sum(p for _, p in cur['buckets'])
         elif ' jit:' in line:
             cur['areas'] = {a: float(p) for a, p in AREA.findall(body)}
         elif ' lib:' in line:
@@ -82,7 +103,8 @@ def main():
     ap.add_argument('files', nargs='+')
     args = ap.parse_args()
     addrs, names, ref = symbols(args.elf)
-    W = [w for f in args.files for w in windows(f)]
+    seen = set()
+    W = [w for f in args.files for w in windows(f, seen)]
     groups = collections.defaultdict(list)
     for w in W:
         groups[(w['game'], w['thread']) if args.by_game else (w['file'], w['thread'])].append(w)
@@ -94,14 +116,16 @@ def main():
         for w in ws:
             k = w['n'] / n
             for off, p in w['buckets']:
-                fn[name_of(addrs, names, ref + off)] += p * k
+                # vk-285-119: by the bucket's middle; its first byte can be the tail of the function before.
+                fn[name_of(addrs, names, ref + off + 32)] += p * k
             for off, p in w['callers']:
                 callers[name_of(addrs, names, ref + off)] += p * k
             for a, p in w['areas'].items():
                 areas[a] += p * k
         avg = lambda f: sum(w[f] * w['n'] for w in ws) / n
+        covered = sum(w.get('covered', 0.0) * w['n'] for w in ws) / n
         print(f"== {key[0]} | {key[1]} thread | {len(ws)} window(s), {n} samples, speed {sum(w['speed'] for w in ws) / len(ws):.0f}%"
-              f" | eboot {avg('eboot'):.1f}% jit {avg('jit'):.1f}% lib {avg('lib'):.1f}%")
+              f" | eboot {avg('eboot'):.1f}% jit {avg('jit'):.1f}% lib {avg('lib'):.1f}% | named below: {covered:.1f}% of the samples")
         for name, p in fn.most_common(args.top):
             print(f"  {p:5.1f}%  {name[:150]}")
         if areas:

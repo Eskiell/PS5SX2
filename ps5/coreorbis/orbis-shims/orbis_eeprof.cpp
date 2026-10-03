@@ -586,7 +586,7 @@ void OrbisEEProfMark()
 // lines summarise it in boot.log, which every session report carries:
 //   [autoprof] #N <thread> ... : the loads and speed that picked it, the samples, and where they fell (eboot,
 //              recompiled code, system libraries, other), and ref=<run-time address of OrbisEEProfStart>
-//   [autoprof] #N eboot: the 24 busiest 64-byte buckets as signed offsets from ref (tools: add the ELF's address
+//   [autoprof] #N eboot: the 40 busiest 64-byte buckets (24 in vk-285-118) as signed offsets from ref (tools: add the ELF's address
 //              of OrbisEEProfStart and symbolize with the build's llvm-pie.elf)
 //   [autoprof] #N jit: the recompiled code by area (EE, IOP, VIF0/1, mVU0/1, VIF unpack, SW renderer)
 //   [autoprof] #N lib: the busiest library addresses and the eboot code that called them (from the stack)
@@ -614,10 +614,21 @@ uint64_t s_auto_ref; // &OrbisEEProfStart at run time
 char s_auto_head[200];
 int s_auto_index = 0;
 
+} // namespace
+// vk-285-119: the eboot's code, from the port's linker script (orbis-shims/ehframe.ld).
+extern "C" const unsigned char __orbis_text_start[], __orbis_text_end[];
+namespace
+{
+// vk-285-119 (AI-assisted): a word on the stack counts as the eboot code that called a library only when it is inside
+// the eboot's .text. vk-285-118 took anything within 128 MiB of ref, and with the eboot at 0x400000 that let in every
+// small integer on the stack: the testers' "callers" were mostly 0x10, 0x4 and 0x1 (shown as -0xa530a0, -0xa530ac,
+// -0xa530af), which said nothing about the GS thread's 31% in two libkernel addresses. (The bytes before the word are
+// not read to check for a call: a fault in this signal handler would end the app.)
 bool AutoInEboot(uint64_t a)
 {
-	return a + 0x8000000ull >= s_auto_ref && a < s_auto_ref + 0x8000000ull; // the eboot: within 128 MiB of ref
+	return a >= reinterpret_cast<uint64_t>(__orbis_text_start) && a < reinterpret_cast<uint64_t>(__orbis_text_end);
 }
+
 
 void AutoHandler(int, siginfo_t*, void* ctx)
 {
@@ -718,7 +729,11 @@ void AutoReport()
 		else
 			other++;
 	}
-	TopBuckets(eb, 24);
+	// vk-285-119: 40 buckets (24 in vk-285-118 covered only 20-30% of a GS thread's eboot samples), and their share.
+	TopBuckets(eb, 40);
+	uint32_t covered = 0;
+	for (const Bucket& b : eb)
+		covered += b.n;
 	TopBuckets(lb, 8);
 	TopBuckets(cb, 8);
 	char line[1600];
@@ -732,6 +747,8 @@ void AutoReport()
 		if (at < static_cast<int>(sizeof(line)) - 40)
 			at += std::snprintf(line + at, sizeof(line) - at, " %s%#llx %.1f%%", b.key < 0 ? "-" : "+",
 				static_cast<unsigned long long>(b.key < 0 ? -b.key : b.key), b.n * pct);
+	if (at < static_cast<int>(sizeof(line)) - 40)
+		std::snprintf(line + at, sizeof(line) - at, " | these %u = %.1f%% of the samples", static_cast<unsigned>(eb.size()), covered * pct);
 	OrbisDeferredPrintf("%s\n", line);
 	OrbisDeferredEvent(line); // the settings log too: the installer's report keeps only boot.log's first 64 KB and last 448 KB
 	at = std::snprintf(line, sizeof(line), "[autoprof] #%d jit:", s_auto_index);
