@@ -1136,9 +1136,46 @@ constexpr OrbisGameFixAddition kOrbisGameFixAdditions[] = {
 	{"SLUS-21423", "Grand Theft Auto - Liberty City Stories", Fix_InstantDMA},
 };
 
+// vk-285-127 (AI-assisted): fan mods that keep a game's engine but carry a serial of their own get that game's GameDB
+// entry (its hardware fixes above all), unless GameIndex.yaml already knows the serial. Patches, dynamic patches and
+// memory card filters are not copied: they belong to the base game's discs.
+struct OrbisGameDbAlias
+{
+	const char* serial;
+	const char* from;
+	const char* name;
+};
+
+constexpr OrbisGameDbAlias kOrbisGameDbAliases[] = {
+	// Dragon Ball Z Budokai Tenkaichi 4, a fan mod of Budokai Tenkaichi 3 ("BT4 Beta 14 REV2 ENG", CRC 428113C2). Without
+	// BT3's fixes (half pixel offset 5, native scaling 4, the OI_DBZBTGames draw hook) Vegeta's shadow sat off at 6x and
+	// was right at 1x (Spyros's Pro, 2026-10-04); with the first two in its settings file it was right at 6x.
+	{"SLUS-21978", "SLUS-21678", "Dragon Ball Z - Budokai Tenkaichi 4 (fan mod of Budokai Tenkaichi 3)"},
+};
+
 void OrbisApplyGameDbAdditions()
 {
 	int added = 0;
+	int aliased = 0;
+	for (const OrbisGameDbAlias& alias : kOrbisGameDbAliases) // vk-285-127
+	{
+		const std::string serial = StringUtil::toLower(alias.serial);
+		const auto from = s_game_db.find(StringUtil::toLower(alias.from));
+		if (from == s_game_db.end() || s_game_db.find(serial) != s_game_db.end())
+			continue;
+		GameDatabaseSchema::GameEntry entry = from->second;
+		entry.name = alias.name;
+		entry.name_sort.clear();
+		entry.name_en.clear();
+		entry.patches.clear();
+		entry.dynaPatches.clear();
+		entry.memcardFilters.clear();
+		s_game_db.emplace(serial, std::move(entry));
+		aliased++;
+	}
+	Console.WriteLn("GameDB: PS5SX2's additions: %d of %zu fan mods given their base game's entry (Budokai Tenkaichi 4 mod "
+					"-> Budokai Tenkaichi 3)",
+		aliased, std::size(kOrbisGameDbAliases));
 	for (const OrbisGameFixAddition& add : kOrbisGameFixAdditions) // vk-285-125
 	{
 		const std::string serial = StringUtil::toLower(add.serial);
