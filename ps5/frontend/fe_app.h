@@ -114,6 +114,9 @@ private:
 	std::string m_web_url, m_web_shown;
 	std::vector<uint8_t> m_qr;
 	int m_qr_size = 0;
+	// vk-285-118 (AI-assisted): Triangle shows the QR code large in the middle (a tester's phone couldn't read the small tile).
+	bool m_qr_big = false;
+	float m_qr_big_anim = 0.0f;
 	bool m_web_known = false; // SetWebUrl was called (the host preview may never call it)
 
 	// vk-285-114: the options sheet: open or not, its slide (0 closed .. 1 open), the focused row, the list's scroll (in
