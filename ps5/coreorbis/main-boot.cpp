@@ -347,6 +347,8 @@ static std::atomic<u32> g_orbis_rumble_state[8]; // (big << 8) | small, each 0..
 static std::atomic<int> g_orbis_rumble_on{1};
 // vk-285-118: PS5SX2/RumbleStrength (0.25..2, the Controller group's Strength): each motor's value times this, at most full.
 static std::atomic<int> g_orbis_rumble_pct{100};
+// vk-285-118: PS5SX2/FastSpeed, how fast fast forward runs: 0 as fast as it can, else that many times full speed (StubHost.cpp).
+std::atomic<int> g_orbis_fast_speed{0};
 // vk-285-116 (AI-assisted): the controller remapping (orbis-shims/OrbisPadMap.h: PS5SX2/Button*, SwapSticks, InvertLeft,
 // InvertRight, LeftStickDpad; vk-285-117: the save and load state combos, SaveButton1/2, LoadButton1/2, StateHold; the
 // Controls tab). orbis_ps5opts_from sets it at boot and at every live apply; the pad thread copies it when the version
@@ -802,7 +804,7 @@ static void *orbis_pad_thread(void *)
       bool state_fired = false;
       {
         const orbis_padmap::Config &cfg = orbis_padmap_current();
-        static orbis_padmap::ComboWatch s_save, s_load;
+        static orbis_padmap::ComboWatch s_save, s_load, s_fast;
         orbis_padmap::ComboState cs;
         cs.buttons = d.buttons;
         cs.l2 = d.l2;
@@ -816,6 +818,15 @@ static void *orbis_pad_thread(void *)
         uint32_t block = 0;
         const bool save = s_save.Update(cfg.save, cfg.hold_ms, cs, now_ms, block);
         const bool load = s_load.Update(cfg.load, cfg.hold_ms, cs, now_ms, block) && !save;
+        // vk-285-118: the fast forward combo (StubHost.cpp turns it on or off on the CPU thread).
+        const bool fast = s_fast.Update(cfg.fast, cfg.hold_ms, cs, now_ms, block) && !save && !load;
+        if (fast)
+        {
+          g_orbis_state_request.store(4, std::memory_order_release);
+          state_fired = true;
+          printf("[pad] fast forward on/off: %s\n", orbis_padmap::DescribeCombo(cfg.fast, cfg.hold_ms).c_str());
+          fflush(stdout);
+        }
         if (save || load)
         {
           g_orbis_state_request.store(save ? 1 : 2, std::memory_order_release);
@@ -1264,6 +1275,10 @@ static void orbis_ps5opts_from(const SettingsInterface& si)
     }
   }
   const int old_rumble_pct = g_orbis_rumble_pct.exchange(rumble_pct, std::memory_order_relaxed);
+  {
+    const int fast = si.GetIntValue("PS5SX2", "FastSpeed", 0);
+    g_orbis_fast_speed.store(fast >= 2 && fast <= 8 ? fast : 0, std::memory_order_relaxed);
+  }
   std::string textures_dir; // vk-285-113: PS5SX2/TexturesDir, where a game's texture packs are besides USB drives
   si.GetStringValue("PS5SX2", "TexturesDir", &textures_dir);
   orbis_set_textures_dir(textures_dir);

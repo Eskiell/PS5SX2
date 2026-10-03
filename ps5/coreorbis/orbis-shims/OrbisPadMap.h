@@ -253,6 +253,9 @@ struct Config
 	ComboButton save[2] = {CB_L3R3, CB_UP};
 	ComboButton load[2] = {CB_L3R3, CB_DOWN};
 	int hold_ms = 0;
+	// vk-285-118: the fast forward combo (PS5SX2/FastButton1/2, experimental, to skip videos): it turns fast forward on and
+	// off, after the same hold time. Nothing on both (the default): no combo.
+	ComboButton fast[2] = {CB_NONE, CB_NONE};
 
 	Config()
 	{
@@ -270,7 +273,8 @@ struct Config
 				return false;
 		return swap_sticks == o.swap_sticks && left_dpad == o.left_dpad && deadzone_left == o.deadzone_left &&
 		       deadzone_right == o.deadzone_right && invert_left == o.invert_left && invert_right == o.invert_right &&
-		       save[0] == o.save[0] && save[1] == o.save[1] && load[0] == o.load[0] && load[1] == o.load[1] && hold_ms == o.hold_ms;
+		       save[0] == o.save[0] && save[1] == o.save[1] && load[0] == o.load[0] && load[1] == o.load[1] && hold_ms == o.hold_ms &&
+		       fast[0] == o.fast[0] && fast[1] == o.fast[1];
 	}
 	bool operator!=(const Config& o) const { return !(*this == o); }
 	bool IsDefault() const { return *this == Config(); }
@@ -339,9 +343,9 @@ inline Config FromSettings(Get get)
 	if (get("InvertRight", v))
 		c.invert_right = SmallInt(v, 3);
 	// vk-285-117: the save and load combos; a value that isn't a button leaves that one at its default.
-	static const char* const combo_keys[4] = {"SaveButton1", "SaveButton2", "LoadButton1", "LoadButton2"};
-	ComboButton* const combo[4] = {&c.save[0], &c.save[1], &c.load[0], &c.load[1]};
-	for (int i = 0; i < 4; i++)
+	static const char* const combo_keys[6] = {"SaveButton1", "SaveButton2", "LoadButton1", "LoadButton2", "FastButton1", "FastButton2"};
+	ComboButton* const combo[6] = {&c.save[0], &c.save[1], &c.load[0], &c.load[1], &c.fast[0], &c.fast[1]};
+	for (int i = 0; i < 6; i++)
 	{
 		v.clear();
 		ComboButton b;
@@ -619,6 +623,8 @@ inline std::string Describe(const Config& c)
 	if (c.save[0] != def.save[0] || c.save[1] != def.save[1] || c.load[0] != def.load[0] || c.load[1] != def.load[1] ||
 		c.hold_ms != def.hold_ms)
 		states = "save state on " + DescribeCombo(c.save, c.hold_ms) + ", load on " + DescribeCombo(c.load, c.hold_ms);
+	if (c.fast[0] != CB_NONE || c.fast[1] != CB_NONE)
+		states += (states.empty() ? "" : ", ") + std::string("fast forward on ") + DescribeCombo(c.fast, c.hold_ms);
 	std::string out = buttons;
 	for (const std::string* part : {&sticks, &states})
 		if (!part->empty())

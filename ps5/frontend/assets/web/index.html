@@ -360,13 +360,17 @@ const GROUPS = [
   // vk-285-116 (AI-assisted): the Controls tab: the remapping, (vk-285-117) the save and load combos and their hold time
   // (main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h), the sticks, rumble, the keyboard and mouse.
   { title: "Buttons", tab: "controls",
-    hint: "Save and load: hold the two buttons together (slot 1). L3 + R3 is both sticks pressed in; Touchpad left or right is a finger on that side. Below: what each button presses in games (Light press: the other buttons press at half strength, for Metal Gear Solid 2 and 3). PS5SX2's own combos always use the real buttons.",
+    hint: "Save and load: hold the two buttons together (slot 1). L3 + R3 is both sticks pressed in; Touchpad left or right is a finger on that side. Fast forward (experimental, for skipping videos): hold its two buttons to speed the game up, and again for full speed; Nothing on both turns it off. Below: what each button presses in games (Light press: the other buttons press at half strength, for Metal Gear Solid 2 and 3). PS5SX2's own combos always use the real buttons.",
     items: [
     combo("SaveButton1", "Save: button 1", "L3R3", "Save state"), combo("SaveButton2", "Save: button 2", "Up"),
     combo("LoadButton1", "Load: button 1", "L3R3", "Load state"), combo("LoadButton2", "Load: button 2", "Down"),
     { key: "PS5SX2/StateHold", label: "Hold time", type: "seg", def: "0", cols: 6,
       options: [["0","Instant"],["0.5","0.5 s"],["1","1 s"],["1.5","1.5 s"],["2","2 s"],["3","3 s"]],
       hint: "How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't reach the game. A second or two stops saving or loading by accident." },
+    combo("FastButton1", "Fast forward: button 1", "None", "Fast forward (experimental)"), combo("FastButton2", "Fast forward: button 2", "None"),
+    { key: "PS5SX2/FastSpeed", label: "Fast forward speed", type: "seg", def: "0", cols: 4,
+      options: [["0","Max"],["2","2x"],["3","3x"],["4","4x"]],
+      hint: "How fast fast forward runs. Max: as fast as the console can. Some games' videos skip only at Max." },
     button("Cross", "Cross", "Cross"), button("Circle", "Circle", "Circle"), button("Square", "Square", "Square"),
     button("Triangle", "Triangle", "Triangle"), button("L1", "L1", "L1"), button("R1", "R1", "R1"), button("L2", "L2", "L2"),
     button("R2", "R2", "R2"), button("L3", "L3", "L3"), button("R3", "R3", "R3"), button("Options", "Options", "Start"),

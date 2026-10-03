@@ -400,6 +400,19 @@ int main()
 		CHECK(Describe(From({{"DeadzoneLeft", "10"}})) == "left stick dead zone 10%");
 	}
 
+	// vk-285-118: the fast forward combo: off by default; set, it fires like the others.
+	{
+		CHECK(Config().fast[0] == CB_NONE && Config().fast[1] == CB_NONE);
+		const Config c = From({{"FastButton1", "L3R3"}, {"FastButton2", "Right"}});
+		CHECK(c.fast[0] == CB_L3R3 && c.fast[1] == CB_RIGHT && !c.IsDefault());
+		CHECK(Describe(c) == "fast forward on L3+R3 + D-pad right");
+		ComboWatch w;
+		ComboState st;
+		st.buttons = 0x6u | 0x20u;
+		uint32_t block = 0;
+		CHECK(w.Update(c.fast, c.hold_ms, st, 0, block) && !w.Update(c.fast, c.hold_ms, st, 10, block));
+	}
+
 	if (s_failures == 0)
 		printf("test_pad_map: all checks passed\n");
 	return s_failures == 0 ? 0 : 1;

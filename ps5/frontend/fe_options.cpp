@@ -179,6 +179,7 @@ std::vector<OptionDef> ButtonsGroup()
 	constexpr const char* load_hint = "Hold both load buttons together to load the state (slot 1). L3 + R3: both sticks pressed in. Touchpad "
 									  "left or right: a finger on that side. Nothing, or the same button twice, makes it one button. F3 on a "
 									  "keyboard loads too.";
+	constexpr const char* fast_hint = "Experimental, for skipping videos: hold both fast forward buttons together (for the hold time above) to run the game as fast as it goes, and again to go back to full speed. Nothing on both: no fast forward button. Sound may skip while it's on.";
 	std::vector<OptionDef> out = {
 		Seg("PS5SX2/SaveButton1", "Save: button 1", "L3R3", "", ComboChoices(), save_hint),
 		Seg("PS5SX2/SaveButton2", "Save: button 2", "Up", "", ComboChoices(), save_hint),
@@ -187,6 +188,10 @@ std::vector<OptionDef> ButtonsGroup()
 		Seg("PS5SX2/StateHold", "Hold time", "0", "", {{"0", "Instant"}, {"0.5", "0.5 s"}, {"1", "1 s"}, {"1.5", "1.5 s"}, {"2", "2 s"}, {"3", "3 s"}},
 			"How long the save or load buttons are held before it happens. Instant: as soon as both are down, and that last press doesn't "
 			"reach the game. A second or two stops saving or loading by accident."),
+		// vk-285-118: fast forward (experimental), after the same hold time.
+		Seg("PS5SX2/FastButton1", "Fast forward: button 1", "None", "", ComboChoices(), fast_hint),
+		Seg("PS5SX2/FastButton2", "Fast forward: button 2", "None", "", ComboChoices(), fast_hint),
+		Seg("PS5SX2/FastSpeed", "Fast forward speed", "0", "", {{"0", "Max"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}}, "How fast fast forward runs. Max: as fast as the console can. Some games' videos skip only at Max."),
 	};
 	for (OptionDef& d : ButtonRows())
 		out.push_back(std::move(d));
