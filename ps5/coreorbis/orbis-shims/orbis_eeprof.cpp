@@ -590,7 +590,8 @@ void OrbisEEProfMark()
 //              of OrbisEEProfStart and symbolize with the build's llvm-pie.elf)
 //   [autoprof] #N jit: the recompiled code by area (EE, IOP, VIF0/1, mVU0/1, VIF unpack, SW renderer)
 //   [autoprof] #N lib: the busiest library addresses and the eboot code that called them (from the stack)
-// At most 4 windows a session, 90 s apart; none while a flag-file profiler runs; the flag "noautoprof" turns it off.
+// At most 4 windows a session, 90 s apart; none while a flag-file profiler runs; the flag "noautoprof" turns it off, and
+// "autoprof_now" takes one window 20 s into the game at any speed (to check it).
 namespace
 {
 std::atomic<uintptr_t> s_auto_thread[3]; // pthread_self() of the EE, GS and VU1 threads, as last seen
@@ -817,8 +818,13 @@ void OrbisAutoProfSecond(float speed, float ee, float gs, float vu)
 	static timespec last = {0, 0};
 	if (off || s_started.load(std::memory_order_relaxed) || windows >= kAutoWindows)
 		return;
+	// The switch autoprof_now (a test): one window 20 s into the game whatever the speed.
+	static const bool now_flag = OrbisFlag("autoprof_now");
+	static int seconds = 0;
+	seconds++;
 	slow = (speed > 2.0f && speed < kAutoSlowSpeed) ? slow + 1 : 0;
-	if (slow < kAutoSlowSeconds || s_auto_state.load(std::memory_order_acquire) != 0)
+	const bool forced = now_flag && windows == 0 && seconds >= 20;
+	if ((slow < kAutoSlowSeconds && !forced) || s_auto_state.load(std::memory_order_acquire) != 0)
 		return;
 	timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
