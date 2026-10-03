@@ -103,6 +103,8 @@ The first start downloads the covers for your games, then the shelf opens.
 | Hold L2 + D-pad Down for 2 seconds | Open the settings page in the PS5's web browser; the game keeps running |
 | The fast forward buttons (Controls tab; none by default) | Fast forward on or off |
 
+In a game the touchpad click is the PS2's SELECT and OPTIONS its START. The Create button (left of the touchpad) does nothing.
+
 You can change the save and load buttons on the *Controls* tab (*Buttons*): pick two buttons for each, and how long to hold them (instant up to 3 seconds). A finger on the touchpad's left or right side counts as a button too: the old touchpad + Cross combo is *Touchpad left* + *Cross* to save and *Touchpad right* + *Cross* to load. These combos always use the controller's own buttons, whatever the remapping below.
 
 ### USB keyboard and mouse
@@ -132,7 +134,7 @@ Scan the QR code in the corner of the shelf with a phone on the same network, or
 
 - **Display:** resolution (1x to 6x), aspect ratio, widescreen patches and display filter (FSR, FSR soft, Classic, CRT).
 - **Graphics:** the renderer (hardware, or software for games the hardware renderer gets wrong; it takes a restart), texture filtering, anisotropic filtering, blending accuracy, mipmapping, texture replacements and the folder they're read from.
-- **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed. On firmware below 10 a readback can wait for the next vblank, so a game that slows down for them switches to *Don't wait* by itself unless you've set this.
+- **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed. On firmware below 10 a readback can wait for the next vblank, and some games read back so often that the waits add up elsewhere too, so a game that slows down for them switches to *Don't wait* by itself unless you've set this.
 - **Game:** the language the PS2 tells games.
 - **On screen:** the info box in the top right corner (off, FPS, or FPS and how busy the EE, GS and VU threads are) and the blue FPS graph.
 - **Patches:** the game's patch groups, such as 60 FPS.
