@@ -415,9 +415,12 @@ bool OrbisFlag(const char* name);
 // vk-285-119 (AI-assisted): the same switch for many short waits. The vk-285-118 logs (firmware 13.x) had games that
 // read back ~90-170 times a second, each wait only 2.6-5 ms but together 435-500 ms of every second on the GS thread:
 // The Punisher (77% speed), Max Payne 2, Guitar Hero World Tour. So: 300 ms a second or more of readback waits, at 20
-// readbacks or more, under 92% speed, for 5 seconds in a row (the 10 ms-each rule still needs 3).
+// readbacks or more, under 92% speed, for 5 seconds in a row (the 10 ms-each rule still needs 3) -- and at least 1.5
+// readbacks a displayed frame: a wait also covers the GPU work queued before it, so a game held back by the GPU that
+// reads back once a frame would reach 300 ms too, and Don't wait would buy it little (review of vk-285-119). The three
+// games above read back 2 to 3.4 times a frame.
 std::atomic<int> g_orbis_rb_auto_kind{0}; // 1: each wait 10 ms or more (old firmware), 2: many short waits (main-boot.cpp)
-static void OrbisReadbackAutoSecond(float speed)
+static void OrbisReadbackAutoSecond(float speed, unsigned fps)
 {
 	static int s_checked = -1;
 	static bool s_done = false;
@@ -437,7 +440,7 @@ static void OrbisReadbackAutoSecond(float speed)
 		s_streak++;
 	else
 		s_streak = 0;
-	if (n >= 20 && ms >= 300.0 && speed < 92.0f)
+	if (n >= 20 && ms >= 300.0 && speed < 92.0f && 2ull * n >= 3ull * fps)
 		s_streak_many++;
 	else
 		s_streak_many = 0;
@@ -446,8 +449,8 @@ static void OrbisReadbackAutoSecond(float speed)
 		return;
 	s_done = true;
 	printf("[readbacks] the GS thread waited %.0f ms in the last second for %llu readbacks (%.1f ms each) at %.0f%% speed, "
-		   "%d s in a row: asking for GPU readbacks Don't wait (%s)\n", ms, n, ms / static_cast<double>(n), speed,
-		kind == 1 ? s_streak : s_streak_many, kind == 1 ? "each wait 10 ms or more" : "many waits, 300 ms a second or more");
+		   "%d s in a row: asking for GPU readbacks Don't wait (%s, %u fps)\n", ms, n, ms / static_cast<double>(n), speed,
+		kind == 1 ? s_streak : s_streak_many, kind == 1 ? "each wait 10 ms or more" : "many waits, 300 ms a second or more", fps);
 	fflush(stdout);
 	g_orbis_rb_auto_kind.store(kind, std::memory_order_relaxed);
 	g_orbis_rb_auto_request.store(1, std::memory_order_release);
@@ -1156,7 +1159,7 @@ static void OrbisGLOSD()
 		const float vu = s_orbis_load_valid ? s_orbis_load_vu : PerformanceMetrics::GetVUThreadUsage();
 		OrbisPerfMinute(s_fps, PerformanceMetrics::GetSpeed(), ee, gs, vu); // test build 1
 		OrbisAutoProfSecond(PerformanceMetrics::GetSpeed(), ee, gs, vu); // vk-285-118: a slow stretch samples the busy thread
-		OrbisReadbackAutoSecond(PerformanceMetrics::GetSpeed()); // vk-285-118: older firmware's readback stall
+		OrbisReadbackAutoSecond(PerformanceMetrics::GetSpeed(), s_fps); // vk-285-118: older firmware's readback stall
 		if (print)
 		{
 			printf("[perf] fps=%u vfreq=%.2f speed=%.0f ee=%.0f gs=%.0f vu=%.0f ft=%.1f/%.1f/%.1f sw=", s_fps,
