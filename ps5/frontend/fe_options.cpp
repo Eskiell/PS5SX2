@@ -283,7 +283,9 @@ const std::vector<OptionGroup>& OptionGroups()
 				Seg("HWDownloadMode", "GPU readbacks", "0", "Readbacks %", {{"0", "Accurate"}, {"1", "Whole area"}, {"3", "Don't wait"}, {"4", "Skip"}},
 					"Some games read the picture back from the GPU, which is slow on the PS5. Accurate is PCSX2's default. Whole area reads "
 					"everything drawn since the last read in one go, so there are fewer stops. Don't wait doesn't stop the game for the GPU: "
-					"quicker, but effects that depend on it can flicker. Skip ignores the reads: fastest, and those effects break."),
+					"quicker, but effects that depend on it can flicker. Skip ignores the reads: fastest, and those effects break. On firmware "
+					"below 10, where each read can wait a vblank, a game that slows down for them switches to Don't wait by itself unless "
+					"this is set."),
 			}},
 		{"Game",
 			{

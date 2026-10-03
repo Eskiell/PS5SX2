@@ -226,6 +226,8 @@ void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool def
 // menu (the port's main-boot.cpp stops the VM and re-executes the app into its frontend).
 std::atomic<int> g_orbis_state_request{0};
 extern std::atomic<int> g_orbis_fast_speed; // vk-285-118 (main-boot.cpp): PS5SX2/FastSpeed
+extern std::atomic<int> g_orbis_rb_auto_request; // vk-285-118 (GSRenderer.cpp OrbisReadbackAutoSecond)
+void OrbisReadbackAutoCpu(); // vk-285-118 (main-boot.cpp)
 void OrbisOSDLabel(const char* text);
 void OrbisBackToMenuCpu();
 
@@ -250,6 +252,8 @@ void Host::PumpMessagesOnCPUThread()
 		orbis_reload_gs_ini_cpu();
 	if (const int pin = g_orbis_pin_request.exchange(-1, std::memory_order_acq_rel); pin >= 0)
 		OrbisApplyPinning(pin);
+	if (g_orbis_rb_auto_request.exchange(0, std::memory_order_acq_rel))
+		OrbisReadbackAutoCpu();
 	const int req = g_orbis_state_request.exchange(0, std::memory_order_acq_rel);
 	if (req == 1)
 	{
