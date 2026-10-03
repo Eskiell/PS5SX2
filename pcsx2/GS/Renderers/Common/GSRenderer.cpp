@@ -420,6 +420,34 @@ bool OrbisFlag(const char* name);
 // reads back once a frame would reach 300 ms too, and Don't wait would buy it little (review of vk-285-119). The three
 // games above read back 2 to 3.4 times a frame.
 std::atomic<int> g_orbis_rb_auto_kind{0}; // 1: each wait 10 ms or more (old firmware), 2: many short waits (main-boot.cpp)
+// vk-285-128 (AI-assisted): games that build textures from what they read back. With GPU readbacks on Don't wait
+// TimeSplitters: Future Perfect's textures didn't load and its input lagged (Spyros's Pro, 2026-10-04, set by hand): it
+// reads back once a frame, 5-14 ms each at 6x on the Pro, so a slower console or a heavier scene could trip the rule
+// below and switch it. These games keep Accurate unless their own file or gs.ini says otherwise.
+static bool OrbisReadbackMustWait(std::string* name)
+{
+	struct Game
+	{
+		const char* serial;
+		const char* name;
+	};
+	static constexpr Game kGames[] = {
+		{"SLUS-21148", "TimeSplitters: Future Perfect"},
+		{"SLES-52993", "TimeSplitters: Future Perfect"},
+		{"SLED-53066", "TimeSplitters: Future Perfect (demo)"},
+	};
+	const std::string serial = VMManager::GetDiscSerial();
+	for (const Game& game : kGames)
+	{
+		if (serial == game.serial)
+		{
+			*name = game.name;
+			return true;
+		}
+	}
+	return false;
+}
+
 static void OrbisReadbackAutoSecond(float speed, unsigned fps)
 {
 	static int s_checked = -1;
@@ -435,6 +463,19 @@ static void OrbisReadbackAutoSecond(float speed, unsigned fps)
 		s_checked = OrbisFlag("noautoreadback") ? 1 : 0;
 	if (s_checked == 1 || GSConfig.HWDownloadMode > GSHardwareDownloadMode::EnabledForceFull)
 		return;
+	std::string must_wait;
+	if (OrbisReadbackMustWait(&must_wait)) // vk-285-128
+	{
+		static std::string s_said;
+		if (s_said != must_wait)
+		{
+			printf("[readbacks] no automatic Don't wait for %s: it builds textures from its readbacks\n", must_wait.c_str());
+			fflush(stdout);
+			s_said = must_wait;
+		}
+		s_streak = s_streak_many = 0;
+		return;
+	}
 	const double ms = static_cast<double>(ns) / 1e6;
 	if (n >= 3 && ms >= 150.0 && ms / static_cast<double>(n) >= 10.0 && speed < 92.0f)
 		s_streak++;
