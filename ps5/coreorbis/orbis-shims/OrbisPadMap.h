@@ -234,6 +234,11 @@ inline uint32_t ComboBits(ComboButton b)
 struct Config
 {
 	Target target[S_COUNT];
+	// vk-285-118: how hard each button presses what it presses, 0.05..1 (PS5SX2/Button<Name>Pressure; 1, a full press, by
+	// default). A DualShock 2's face buttons, D-pad and shoulders read pressure, and some games act on a partial press: SOCOM
+	// II crouches at about 0.20 on Triangle, Combined Assault at 0.30 (a full press goes prone). The triggers press at most
+	// this hard. Targets that only read on or off (Start, Select, L3, R3, Analog, Light press) press the same at any strength.
+	float pressure[S_COUNT];
 	bool swap_sticks = false;
 	uint8_t left_dpad = 0;    // 0 no, 1 the D-pad too, 2 the D-pad only
 	uint8_t invert_left = 0;  // bit 0 up-down, bit 1 left-right
@@ -246,13 +251,16 @@ struct Config
 	Config()
 	{
 		for (int s = 0; s < S_COUNT; s++)
+		{
 			target[s] = SourceAt(s).def;
+			pressure[s] = 1.0f;
+		}
 	}
 
 	bool operator==(const Config& o) const
 	{
 		for (int s = 0; s < S_COUNT; s++)
-			if (target[s] != o.target[s])
+			if (target[s] != o.target[s] || pressure[s] != o.pressure[s])
 				return false;
 		return swap_sticks == o.swap_sticks && left_dpad == o.left_dpad && invert_left == o.invert_left && invert_right == o.invert_right &&
 		       save[0] == o.save[0] && save[1] == o.save[1] && load[0] == o.load[0] && load[1] == o.load[1] && hold_ms == o.hold_ms;
@@ -276,6 +284,18 @@ inline uint8_t SmallInt(const std::string& v, int max)
 	return static_cast<uint8_t>(n);
 }
 
+// vk-285-118: a button's strength, "0.2" or "20%"; anything outside 0.05..1, or not a number, is a full press.
+inline float ParsePressure(const std::string& v)
+{
+	char* end = nullptr;
+	double p = std::strtod(v.c_str(), &end);
+	if (v.empty() || end == v.c_str())
+		return 1.0f;
+	if (*end == '%')
+		p /= 100.0;
+	return (p >= 0.05 && p <= 1.0) ? static_cast<float>(p) : 1.0f;
+}
+
 // The settings, read with `get(key, value)` (the key within [PS5SX2]; true when it is set). An unknown value leaves that
 // button or stick option as it is by default.
 template <typename Get>
@@ -289,6 +309,9 @@ inline Config FromSettings(Get get)
 		Target t;
 		if (get(SourceAt(s).key, v) && ParseTarget(v, t))
 			c.target[s] = t;
+		v.clear();
+		if (get((std::string(SourceAt(s).key) + "Pressure").c_str(), v))
+			c.pressure[s] = ParsePressure(v);
 	}
 	v.clear();
 	if (get("SwapSticks", v))
@@ -478,10 +501,10 @@ inline Out Apply(const Config& c, const State& s)
 		{
 			const uint8_t raw = src == S_L2 ? s.l2 : s.r2;
 			const bool to_trigger = t == T_L2 || t == T_R2;
-			v = (to_trigger || raw >= kTriggerPress) ? raw / 255.0f : 0.0f;
+			v = (to_trigger || raw >= kTriggerPress) ? raw / 255.0f * c.pressure[src] : 0.0f;
 		}
 		else
-			v = (s.buttons & SourceAt(src).bits) ? 1.0f : 0.0f;
+			v = (s.buttons & SourceAt(src).bits) ? c.pressure[src] : 0.0f;
 		// PCSX2 reads the analog button and the pressure modifier as on or off (it acts when they change).
 		if ((t == T_ANALOG || t == T_PRESSURE) && v > 0.0f)
 			v = 1.0f;
@@ -529,12 +552,14 @@ inline std::string Describe(const Config& c)
 	for (int s = 0; s < S_COUNT; s++)
 	{
 		const Target t = c.target[s];
-		if (t == SourceAt(s).def)
+		if (t == SourceAt(s).def && c.pressure[s] == 1.0f)
 			continue;
 		if (!buttons.empty())
 			buttons += ", ";
 		buttons += SourceAt(s).name;
 		buttons += t == T_NONE ? std::string(" presses nothing") : std::string(" presses ") + TargetName(t);
+		if (t != T_NONE && c.pressure[s] != 1.0f)
+			buttons += " at " + std::to_string(static_cast<int>(c.pressure[s] * 100.0f + 0.5f)) + "%";
 	}
 	auto add = [&](const std::string& what) { sticks += (sticks.empty() ? "" : ", ") + what; };
 	static const char* const axes[4] = {"", "up-down", "left-right", "up-down and left-right"};

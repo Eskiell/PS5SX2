@@ -352,6 +352,27 @@ int main()
 		CHECK(!ParseTarget("Crosss", x) && !ParseTarget("Cros", x) && !ParseTarget("", x));
 	}
 
+	// vk-285-118: a button's strength (SOCOM II's crouch: the touchpad click as Triangle at 0.20).
+	{
+		const Config c = From({{"ButtonTouchpad", "Triangle"}, {"ButtonTouchpadPressure", "0.20"}, {"ButtonCrossPressure", "30%"},
+			{"ButtonL2Pressure", "0.5"}, {"ButtonCirclePressure", "2"}, {"ButtonSquarePressure", "0"}, {"ButtonR1Pressure", "x"}});
+		CHECK(std::fabs(c.pressure[S_TOUCHPAD] - 0.2f) < 1e-6f && std::fabs(c.pressure[S_CROSS] - 0.3f) < 1e-6f);
+		CHECK(c.pressure[S_CIRCLE] == 1.0f && c.pressure[S_SQUARE] == 1.0f && c.pressure[S_R1] == 1.0f);
+		CHECK(!c.IsDefault() && !From({{"ButtonCrossPressure", "0.5"}}).IsDefault() && From({{"ButtonCrossPressure", "1"}}).IsDefault());
+		const Out touch = Apply(c, Held(0x00100000u));
+		CHECK(Only(touch, {T_TRIANGLE}) && std::fabs(touch.value[T_TRIANGLE] - 0.2f) < 1e-6f);
+		// the real Triangle still presses fully; the two together press as the harder one
+		const Out both = Apply(c, Held(0x00100000u | 0x1000u));
+		CHECK(both.value[T_TRIANGLE] == 1.0f);
+		State trig;
+		trig.l2 = 255;
+		CHECK(std::fabs(Apply(c, trig).value[T_L2] - 0.5f) < 1e-6f);
+		CHECK(Describe(c) == "Cross presses Cross at 30%, L2 presses L2 at 50%, the touchpad's click presses Triangle at 20%");
+		// on/off targets press as on at any strength
+		const Config m = From({{"ButtonL3", "Pressure"}, {"ButtonL3Pressure", "0.2"}});
+		CHECK(Apply(m, Held(0x0002)).value[T_PRESSURE] == 1.0f);
+	}
+
 	if (s_failures == 0)
 		printf("test_pad_map: all checks passed\n");
 	return s_failures == 0 ? 0 : 1;

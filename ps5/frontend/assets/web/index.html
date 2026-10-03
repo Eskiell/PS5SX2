@@ -284,6 +284,9 @@ const BUTTON_TARGETS = [["Cross","Cross"],["Circle","Circle"],["Square","Square"
   ["L2","L2"],["R2","R2"],["L3","L3"],["R3","R3"],["Start","Start"],["Select","Select"],["Up","D-pad up"],["Down","D-pad down"],
   ["Left","D-pad left"],["Right","D-pad right"],["Analog","Analog button"],["Pressure","Light press"],["None","Nothing"]];
 const button = (name, label, def) => ({ key: "PS5SX2/Button" + name, label, type: "pick", def, options: BUTTON_TARGETS });
+// vk-285-118: how hard each button presses (OrbisPadMap.h Config::pressure), as the sheet's StrengthChoices().
+const STRENGTHS = [["1","Full"],["0.75","75%"],["0.5","50%"],["0.4","40%"],["0.3","30%"],["0.25","25%"],["0.2","20%"],["0.15","15%"],["0.1","10%"]];
+const strength = (name, label) => ({ key: "PS5SX2/Button" + name + "Pressure", label, type: "pick", def: "1", options: STRENGTHS });
 const INVERT = [["0","Off"],["1","Up-down"],["2","Left-right"],["3","Both"]];
 // vk-285-117: what a save or load button can be (OrbisPadMap.h ComboButtonName), as the sheet's ComboChoices().
 const COMBO_BUTTONS = [["L3R3","L3 + R3"],["Cross","Cross"],["Circle","Circle"],["Square","Square"],["Triangle","Triangle"],["L1","L1"],
@@ -375,6 +378,13 @@ const GROUPS = [
     button("R2", "R2", "R2"), button("L3", "L3", "L3"), button("R3", "R3", "R3"), button("Options", "Options", "Start"),
     button("Touchpad", "Touchpad click", "Select"), button("Up", "D-pad up", "Up"), button("Down", "D-pad down", "Down"),
     button("Left", "D-pad left", "Left"), button("Right", "D-pad right", "Right"),
+  ]},
+  { title: "Button strength", tab: "controls",
+    hint: "How hard each button presses what it's set to press. The PS2's face buttons, D-pad and shoulders read pressure, and some games act on a light press: SOCOM II crouches at 20% on Triangle, Combined Assault at 30% (a full press goes prone). Set the touchpad click to Triangle at 20% for a crouch button. L2 and R2 press at most this hard.",
+    items: [
+    strength("Cross", "Cross"), strength("Circle", "Circle"), strength("Square", "Square"), strength("Triangle", "Triangle"),
+    strength("L1", "L1"), strength("R1", "R1"), strength("L2", "L2"), strength("R2", "R2"), strength("Touchpad", "Touchpad click"),
+    strength("Up", "D-pad up"), strength("Down", "D-pad down"), strength("Left", "D-pad left"), strength("Right", "D-pad right"),
   ]},
   { title: "Sticks", tab: "controls", items: [
     { key: "PS5SX2/SwapSticks", label: "Swap sticks", type: "toggle", def: "false",

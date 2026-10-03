@@ -108,6 +108,45 @@ std::vector<OptionDef> ButtonRows()
 	return out;
 }
 
+// vk-285-118: how hard each button presses (OrbisPadMap.h Config::pressure, PS5SX2/Button<Name>Pressure), as the page's
+// STRENGTHS and its Button strength group.
+std::vector<OptionChoice> StrengthChoices()
+{
+	return {{"1", "Full"}, {"0.75", "75%"}, {"0.5", "50%"}, {"0.4", "40%"}, {"0.3", "30%"}, {"0.25", "25%"}, {"0.2", "20%"},
+		{"0.15", "15%"}, {"0.1", "10%"}};
+}
+
+std::vector<OptionDef> StrengthGroup()
+{
+	static const struct
+	{
+		const char* key;
+		const char* glyph;
+		const char* name;
+	} rows[] = {
+		{"PS5SX2/ButtonCrossPressure", icon::Cross, "Cross"},
+		{"PS5SX2/ButtonCirclePressure", icon::Circle, "Circle"},
+		{"PS5SX2/ButtonSquarePressure", icon::Square, "Square"},
+		{"PS5SX2/ButtonTrianglePressure", icon::Triangle, "Triangle"},
+		{"PS5SX2/ButtonL1Pressure", icon::Blank, "L1"},
+		{"PS5SX2/ButtonR1Pressure", icon::Blank, "R1"},
+		{"PS5SX2/ButtonL2Pressure", icon::Blank, "L2"},
+		{"PS5SX2/ButtonR2Pressure", icon::Blank, "R2"},
+		{"PS5SX2/ButtonTouchpadPressure", icon::Blank, "Touchpad click"},
+		{"PS5SX2/ButtonUpPressure", icon::DpadUp, "D-pad up"},
+		{"PS5SX2/ButtonDownPressure", icon::DpadDown, "D-pad down"},
+		{"PS5SX2/ButtonLeftPressure", icon::DpadLeft, "D-pad left"},
+		{"PS5SX2/ButtonRightPressure", icon::DpadRight, "D-pad right"},
+	};
+	std::vector<OptionDef> out;
+	for (const auto& r : rows)
+		out.push_back(Seg(r.key, Sym(r.glyph, r.name).c_str(), "1", "", StrengthChoices(),
+			"How hard this button presses what it's set to press. The PS2's face buttons, D-pad and shoulders read pressure, and some "
+			"games act on a light press: SOCOM II crouches at 20% on Triangle, Combined Assault at 30% (a full press goes prone). Set "
+			"the touchpad click to Triangle at 20% for a crouch button. L2 and R2 press at most this hard."));
+	return out;
+}
+
 std::vector<OptionChoice> InvertChoices()
 {
 	return {{"0", "Off"}, {"1", "Up-down"}, {"2", "Left-right"}, {"3", "Both"}};
@@ -251,6 +290,7 @@ const std::vector<OptionGroup>& OptionGroups()
 		// vk-285-116 (AI-assisted): the Controls tab (R2 on the sheet, as the page's Controls tab). The remapping, (vk-285-117) the
 		// save and load combos: main-boot.cpp orbis_ps5opts_from, orbis-shims/OrbisPadMap.h.
 		{"Buttons", ButtonsGroup(), kTabControls},
+		{"Button strength", StrengthGroup(), kTabControls}, // vk-285-118
 		{"Sticks",
 			{
 				Toggle("PS5SX2/SwapSticks", "Swap sticks", "false", "", "The left stick moves the game's right stick, and the right stick its left one."),
