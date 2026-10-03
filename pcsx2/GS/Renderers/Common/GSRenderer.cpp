@@ -473,7 +473,9 @@ struct OrbisLoadMeasure
 	u32 nsw = 0;
 	double vu_mcycles = 0.0; // vk-285-74: VU1 cycles the MTVU thread ran this second, in millions
 	double vu_runs = 0.0; // and VU1 program runs
+	double sw_sync_n[8] = {}, sw_sync_ms[8] = {}; // vk-285-119: the GS thread's SW syncs by reason, per second
 };
+extern unsigned long long g_orbis_sw_sync_n[8], g_orbis_sw_sync_ticks[8]; // vk-285-119 (GSRasterizer.cpp)
 extern std::atomic<u64> g_orbis_vu1_cycles, g_orbis_vu1_runs; // vk-285-74 (MTVU.cpp)
 extern std::atomic<int> g_orbis_vu1_dump_request;
 static OrbisLoadMeasure s_orbis_load_measure;
@@ -510,6 +512,18 @@ static void OrbisMeasureLoad()
 		s_prev[i] = cur[i];
 	for (u32 i = 0; i < m.nsw; i++)
 		s_prev[10 + i] = g_orbis_sw_busy_ticks[i];
+	{
+		// vk-285-119: the software renderer's syncs this second, by reason (GSRendererSW::Sync).
+		static unsigned long long s_sync_n[8] = {}, s_sync_ticks[8] = {};
+		for (int i = 0; i < 8; i++)
+		{
+			const unsigned long long n = g_orbis_sw_sync_n[i], t = g_orbis_sw_sync_ticks[i];
+			m.sw_sync_n[i] = m.measured ? static_cast<double>(n - s_sync_n[i]) / sec : 0.0;
+			m.sw_sync_ms[i] = m.measured ? static_cast<double>(t - s_sync_ticks[i]) * m.k : 0.0;
+			s_sync_n[i] = n;
+			s_sync_ticks[i] = t;
+		}
+	}
 	s_tsc = tsc;
 	s_t = now;
 
@@ -561,6 +575,21 @@ static void OrbisPrintLoad()
 		printf("%s%.0f", i ? "/" : "", m.sw_busy[i]);
 	OrbisPrintCpu(); // eerec-285
 	printf("\n");
+	if (m.nsw != 0)
+	{
+		// vk-285-119: why the GS thread waited for the raster workers (count and ms this second, GSRendererSW::Sync):
+		// at vsync, for the output, a texture the queued draws render into, a target they sample, a transfer or a
+		// readback touching pages in use, anything else.
+		double total = 0.0;
+		for (int i = 0; i < 8; i++)
+			total += m.sw_sync_n[i];
+		if (total > 0.0)
+			printf("[swsync] per s count/ms: vsync=%.0f/%.0f output=%.0f/%.0f texture=%.0f/%.0f target=%.0f/%.0f transfer=%.0f/%.0f "
+				   "readback=%.0f/%.0f other=%.0f/%.0f\n",
+				m.sw_sync_n[0], m.sw_sync_ms[0], m.sw_sync_n[1], m.sw_sync_ms[1], m.sw_sync_n[4], m.sw_sync_ms[4],
+				m.sw_sync_n[5], m.sw_sync_ms[5], m.sw_sync_n[6], m.sw_sync_ms[6], m.sw_sync_n[7], m.sw_sync_ms[7],
+				m.sw_sync_n[2], m.sw_sync_ms[2]);
+	}
 	{
 		// vk-285-77: VU1 program lengths this second (MTVU.cpp).
 		extern std::atomic<u32> g_orbis_vu1_run_hist[8];
