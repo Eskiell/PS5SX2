@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "OrbisPaths.h" // vk-285-33 (the port's include-orbis)
+#include "OrbisEEDiag.h" // vk-285-126: the wider wait-loop rule's switch and counters
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
 #include "Elfheader.h"
@@ -119,6 +120,7 @@ static BASEBLOCKEX* s_pCurBlockEx = nullptr;
 u32 s_nEndBlock = 0; // what pc the current block ends
 u32 s_branchTo;
 static bool s_nBlockFF;
+static bool s_orbis_ff_ext; // vk-285-126: s_nBlockFF only by the wider rule (counted when it runs)
 
 // save states for branches
 GPR_reg64 s_saveConstRegs[32];
@@ -1647,6 +1649,8 @@ static void iBranchTest(u32 newpc)
 
 	if (EmuConfig.Speedhacks.WaitLoop && s_nBlockFF && newpc == s_branchTo)
 	{
+		if (s_orbis_ff_ext) // vk-285-126: counted for the [eefast] line
+			xADD(ptr64[&g_orbis_waitloop_ext_runs], 1);
 		xMOV(rax, ptr64[&cpuRegs.nextEventCycle]);
 		xADD(ptr64[&cpuRegs.cycle], scaleblockcycles());
 		xCMP(rax, ptr64[&cpuRegs.cycle]);
@@ -2783,81 +2787,110 @@ StartRecomp:
 	// which alter the machine state apart from registers, it will do the same thing on every
 	// iteration.
 	s_nBlockFF = false;
+	s_orbis_ff_ext = false;
 	if (s_branchTo == startpc)
 	{
-		s_nBlockFF = true;
-
-		u32 reads = 0, loads = 1;
-
-		for (i = startpc; i < s_nEndBlock; i += 4)
-		{
-			if (i == s_nEndBlock - 8)
-				continue;
-			cpuRegs.code = *(u32*)PSM(i);
-			// nop
-			if (cpuRegs.code == 0)
-				continue;
-			// cache, sync
-			else if (_Opcode_ == 057 || (_Opcode_ == 0 && _Funct_ == 017))
-				continue;
-			// imm arithmetic
-			else if ((_Opcode_ & 070) == 010 || (_Opcode_ & 076) == 030)
+		// PS5 port (vk-285-126, AI-assisted): the rule below, as a function of `wider`. Upstream only treats a
+		// loaded register as "initialised by a memory load" when the load's base register was itself set in the
+		// loop, so a loop like GTA Vice City's frame wait with its 60 FPS patch,
+		//     lw v0, -4836(gp); slti v0, v0, 1; bnez v0, <the lw>
+		// fails at the slti (it reads and writes v0) and runs every iteration: at EE Cycle Rate 3 it was ~2 ms of
+		// each 16.7 ms frame on the EE thread at a busy spot (EE thread at 99-100%). The same shape polls DMA and
+		// other status registers through a base set before the loop (lw v0, 0(v1); andi v0, v0, 0x100; bnez v0).
+		// The wider rule (only tried on a block upstream's rule turned down) also marks a full load's destination
+		// as loaded when its base register is not written anywhere in the loop: not before the load (`writes`),
+		// and not after it, since every write is then checked against `reads` -- also on the paths that upstream
+		// lets through without the check, so a list walk like
+		//     lw v0, 0(a2); lw v1, 8(v0); bne v1, a1, <the first lw>; addiu a2, v0, 8
+		// stays a normal loop. The address is then the same every iteration and the loop's registers are a
+		// function of memory, as upstream's rule requires. Partial loads (LWL/LWR/LDL/LDR) keep part of the old
+		// value and are left as upstream. flags/waitloop_upstream switches the wider rule off for blocks compiled
+		// after it (a savestate load recompiles everything).
+		const auto detect = [startpc](bool wider) -> bool {
+			u32 reads = 0, loads = 1, writes = 0;
+			for (u32 pc = startpc; pc < s_nEndBlock; pc += 4)
 			{
-				if (loads & 1 << _Rs_)
-				{
-					loads |= 1 << _Rt_;
+				if (pc == s_nEndBlock - 8)
 					continue;
-				}
-				else
+				cpuRegs.code = *(u32*)PSM(pc);
+				// nop
+				if (cpuRegs.code == 0)
+					continue;
+				// cache, sync
+				else if (_Opcode_ == 057 || (_Opcode_ == 0 && _Funct_ == 017))
+					continue;
+				// imm arithmetic
+				else if ((_Opcode_ & 070) == 010 || (_Opcode_ & 076) == 030)
+				{
+					if (loads & 1 << _Rs_)
+					{
+						if (wider && (reads & 1 << _Rt_))
+							return false;
+						writes |= 1 << _Rt_;
+						loads |= 1 << _Rt_;
+						continue;
+					}
+					writes |= 1 << _Rt_;
 					reads |= 1 << _Rs_;
-				if (reads & 1 << _Rt_)
-				{
-					s_nBlockFF = false;
-					break;
+					if (reads & 1 << _Rt_)
+						return false;
 				}
-			}
-			// common register arithmetic instructions
-			else if (_Opcode_ == 0 && (_Funct_ & 060) == 040 && (_Funct_ & 076) != 050)
-			{
-				if (loads & 1 << _Rs_ && loads & 1 << _Rt_)
+				// common register arithmetic instructions
+				else if (_Opcode_ == 0 && (_Funct_ & 060) == 040 && (_Funct_ & 076) != 050)
 				{
-					loads |= 1 << _Rd_;
-					continue;
-				}
-				else
+					if (loads & 1 << _Rs_ && loads & 1 << _Rt_)
+					{
+						if (wider && (reads & 1 << _Rd_))
+							return false;
+						writes |= 1 << _Rd_;
+						loads |= 1 << _Rd_;
+						continue;
+					}
+					writes |= 1 << _Rd_;
 					reads |= 1 << _Rs_ | 1 << _Rt_;
-				if (reads & 1 << _Rd_)
-				{
-					s_nBlockFF = false;
-					break;
+					if (reads & 1 << _Rd_)
+						return false;
 				}
-			}
-			// loads
-			else if ((_Opcode_ & 070) == 040 || (_Opcode_ & 076) == 032 || _Opcode_ == 067)
-			{
-				if (loads & 1 << _Rs_)
+				// loads
+				else if ((_Opcode_ & 070) == 040 || (_Opcode_ & 076) == 032 || _Opcode_ == 067)
 				{
+					const bool base_unwritten = !(writes & 1 << _Rs_);
+					if (loads & 1 << _Rs_)
+					{
+						if (wider && (reads & 1 << _Rt_))
+							return false;
+						writes |= 1 << _Rt_;
+						loads |= 1 << _Rt_;
+						continue;
+					}
+					writes |= 1 << _Rt_;
+					reads |= 1 << _Rs_;
+					if (reads & 1 << _Rt_)
+						return false;
+					// vk-285-126: LB LH LW LBU LHU LWU LD (not LWL 042, LWR 046, LDL/LDR 032/033)
+					if (wider && base_unwritten && _Opcode_ != 042 && _Opcode_ != 046 && (_Opcode_ & 076) != 032)
+						loads |= 1 << _Rt_;
+				}
+				// mfc*, cfc*
+				else if ((_Opcode_ & 074) == 020 && _Rs_ < 4)
+				{
+					if (wider && (reads & 1 << _Rt_))
+						return false;
+					writes |= 1 << _Rt_;
 					loads |= 1 << _Rt_;
-					continue;
 				}
 				else
-					reads |= 1 << _Rs_;
-				if (reads & 1 << _Rt_)
-				{
-					s_nBlockFF = false;
-					break;
-				}
+					return false;
 			}
-			// mfc*, cfc*
-			else if ((_Opcode_ & 074) == 020 && _Rs_ < 4)
-			{
-				loads |= 1 << _Rt_;
-			}
-			else
-			{
-				s_nBlockFF = false;
-				break;
-			}
+			return true;
+		};
+
+		s_nBlockFF = detect(false);
+		if (!s_nBlockFF && g_orbis_waitloop_ext.load(std::memory_order_relaxed) && detect(true))
+		{
+			s_nBlockFF = true;
+			s_orbis_ff_ext = true;
+			g_orbis_waitloop_ext_blocks++;
 		}
 	}
 	else

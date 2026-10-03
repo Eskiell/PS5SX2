@@ -41,6 +41,11 @@ extern u64 g_orbis_hle_flushes; // FlushCache/iFlushCache calls answered without
 // vk-285-102 (EE thread): GetThreadId answered from the cache, checked against the kernel's answer while the
 // cache is off (a call the cache could have answered), and the mismatches; ERETs without the event test.
 extern u64 g_orbis_tid_hits, g_orbis_tid_checks, g_orbis_tid_mismatches, g_orbis_eret_skips;
+// vk-285-126: the EE recompiler's wait-loop rule also trusts a register loaded through a base the loop never writes
+// (iR5900.cpp); 1 unless flags/waitloop_upstream (read when a block is compiled). Blocks that only the wider rule
+// fast-forwards, and how often they did (EE thread).
+extern std::atomic<int> g_orbis_waitloop_ext;
+extern u64 g_orbis_waitloop_ext_blocks, g_orbis_waitloop_ext_runs;
 
 #define ORBIS_EEDIAG(expr) \
 	do \

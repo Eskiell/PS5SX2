@@ -60,6 +60,7 @@ alignas(64) std::atomic<int> g_orbis_vif1_fuse{1};
 std::atomic<int> g_orbis_hle_tid{1}; // vk-285-105: on by default (flags/nohletid)
 std::atomic<int> g_orbis_eret_fast{1}; // vk-285-105: on by default (flags/noeretfast)
 std::atomic<int> g_orbis_vif_fast{1};
+std::atomic<int> g_orbis_waitloop_ext{1}; // vk-285-126: on unless flags/waitloop_upstream
 alignas(64) std::atomic<int> g_orbis_gs_pfw{1}; // vk-285-103: flags/gspfw; vk-285-107: on unless flags/nogspfw (VKStreamBuffer.cpp)
 OrbisTidCache g_orbis_tid; // vk-285-102 (OrbisEEHle.h)
 alignas(64) char g_orbis_ee_data_fence[64] = {1};
@@ -72,6 +73,7 @@ alignas(64) u64 g_orbis_vif1_fused = 0;
 u64 g_orbis_hle_flushes = 0;
 u64 g_orbis_tid_hits = 0, g_orbis_tid_checks = 0, g_orbis_tid_mismatches = 0, g_orbis_eret_skips = 0;
 u64 g_orbis_eret_block[4] = {}; // vk-285-103: ERETs whose event test flags/eretfast kept: INTC, DMAC, timer, VU0
+u64 g_orbis_waitloop_ext_blocks = 0, g_orbis_waitloop_ext_runs = 0; // vk-285-126
 alignas(64) char g_orbis_ee_counters_fence[64] = {};
 
 // The EE core's cycles per TSC tick, x1e6, measured on the EE thread every 300 vsyncs (0: not yet).
@@ -186,6 +188,7 @@ void OrbisEEDiagSecond(bool print)
 		{g_orbis_vif_fast, OrbisHasFlag("vifslow") ? 0 : 1, "VIF simple codes in the loop"},
 		{g_orbis_nt_store, OrbisHasFlag("ntstore") ? 1 : 0, "GS streaming stores"},
 		{g_orbis_gs_pfw, OrbisHasFlag("nogspfw") ? 0 : 1, "GS stream prefetch"}, // vk-285-107: on unless flags/nogspfw
+		{g_orbis_waitloop_ext, OrbisHasFlag("waitloop_upstream") ? 0 : 1, "wider wait-loop rule"}, // vk-285-126
 	};
 	bool changed = diag != was_diag;
 	for (Switch& sw : switches)
@@ -204,20 +207,21 @@ void OrbisEEDiagSecond(bool print)
 
 	// The fast paths' counts per second, when any moved (plain loads of EE-thread counters).
 	{
-		static u64 s_prev[10] = {};
-		const u64 cur[10] = {g_orbis_vif1_fused, g_orbis_hle_flushes, g_orbis_tid_hits, g_orbis_tid_checks,
+		static u64 s_prev[12] = {};
+		const u64 cur[12] = {g_orbis_vif1_fused, g_orbis_hle_flushes, g_orbis_tid_hits, g_orbis_tid_checks,
 			g_orbis_tid_mismatches, g_orbis_eret_skips, g_orbis_eret_block[0], g_orbis_eret_block[1],
-			g_orbis_eret_block[2], g_orbis_eret_block[3]};
+			g_orbis_eret_block[2], g_orbis_eret_block[3], g_orbis_waitloop_ext_runs, g_orbis_waitloop_ext_blocks};
 		if (std::memcmp(cur, s_prev, sizeof(cur)) != 0)
 			printf("[eefast] per s: vif1 passes in place=%llu FlushCache HLE=%llu | GetThreadId cached=%llu checked=%llu "
 				   "mismatched=%llu (total %llu) | ERETs without event test=%llu, kept by intc=%llu dmac=%llu timer=%llu "
-				   "vu0=%llu\n",
+				   "vu0=%llu | wider wait loops: fast-forwards=%llu blocks=%llu (total)\n",
 				static_cast<unsigned long long>(cur[0] - s_prev[0]), static_cast<unsigned long long>(cur[1] - s_prev[1]),
 				static_cast<unsigned long long>(cur[2] - s_prev[2]), static_cast<unsigned long long>(cur[3] - s_prev[3]),
 				static_cast<unsigned long long>(cur[4] - s_prev[4]), static_cast<unsigned long long>(cur[4]),
 				static_cast<unsigned long long>(cur[5] - s_prev[5]), static_cast<unsigned long long>(cur[6] - s_prev[6]),
 				static_cast<unsigned long long>(cur[7] - s_prev[7]), static_cast<unsigned long long>(cur[8] - s_prev[8]),
-				static_cast<unsigned long long>(cur[9] - s_prev[9]));
+				static_cast<unsigned long long>(cur[9] - s_prev[9]), static_cast<unsigned long long>(cur[10] - s_prev[10]),
+				static_cast<unsigned long long>(cur[11]));
 		std::memcpy(s_prev, cur, sizeof(cur));
 	}
 
