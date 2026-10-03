@@ -57,6 +57,7 @@ extern volatile unsigned long long g_orbis_map_addr;
 #include <mutex>
 // vk-285-108 (GSRenderer.cpp): the helper threads' CPUs and the ticker's heartbeat for the GS thread's watchdog.
 void OrbisHelperThreadAdd(pthread_t thread);
+extern "C" const int orbis_ps5vk_war_shim __attribute__((weak)); // vk-285-119 (orbis-shims/orbis_ps5vk_war.c)
 extern std::atomic<unsigned long long> g_orbis_ticker_beat;
 extern std::atomic<int> g_orbis_ticker_step, g_orbis_ticker_cpu;
 extern pthread_t g_orbis_ticker_thread;
@@ -2098,6 +2099,8 @@ int main()
   printf("[boot] sources: driver %s, pcsx2 %s\n", ORBIS_DRIVER_REV, ORBIS_PCSX2_REV);
 #endif
   printf("[boot] Vulkan driver: %s\n", OrbisDriverName()); // vk-285-115: link-vk.sh links ps5vk, link-radv.sh RADV
+  if (&orbis_ps5vk_war_shim != nullptr) // vk-285-119: link-vk.sh linked orbis-shims/orbis_ps5vk_war.c
+    printf("[boot] ps5vk write-after-read list: AVX2 lookup (orbis_ps5vk_war.c)\n");
   fflush(stdout);
   printf("[boot] main tid=%llu\n", (unsigned long long)pthread_self());
   {
