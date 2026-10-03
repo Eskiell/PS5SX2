@@ -320,6 +320,9 @@ const GROUPS = [
     { key: "CropBottom", label: "Crop bottom", type: "seg", def: "0", short: "Crop bottom %", cols: 5, options: CROP_PX },
   ]},
   { title: "Graphics", items: [
+    { key: "PS5SX2/Renderer", label: "Renderer", type: "seg", def: "Hardware", short: "%", restart: true,
+      options: [["Hardware","Hardware"],["Software","Software"]],
+      hint: "Software draws the game on the CPU, as a PS2 does it: slower, but right in games whose effects the hardware renderer gets wrong. Set it for one game in that game's settings. Takes effect when the game starts." },
     { key: "filter", label: "Texture filtering", type: "seg", def: "2", short: "% filtering",
       options: [["0","Nearest"],["2","PS2"],["1","Bilinear"],["3","Not sprites"]] },
     { key: "MaxAnisotropy", label: "Anisotropic filtering", type: "seg", def: "0", short: "AF %",

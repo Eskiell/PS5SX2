@@ -258,6 +258,7 @@ const std::vector<OptionGroup>& OptionGroups()
 			}},
 		{"Graphics",
 			{
+				Seg("PS5SX2/Renderer", "Renderer", "Hardware", "%", {{"Hardware", "Hardware"}, {"Software", "Software"}}, "Software draws the game on the CPU, as a PS2 does it: slower, but right in games whose effects the hardware renderer gets wrong. Set it for one game in that game's settings. Takes effect when the game starts.", true), // vk-285-118
 				Seg("filter", "Texture filtering", "2", "% filtering", {{"0", "Nearest"}, {"2", "PS2"}, {"1", "Bilinear"}, {"3", "Not sprites"}}),
 				Seg("MaxAnisotropy", "Anisotropic filtering", "0", "AF %", {{"0", "Off"}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}}),
 				Seg("accurate_blending_unit", "Blending accuracy", "1", "Blending %", {{"0", "Min"}, {"1", "Basic"}, {"2", "Med"}, {"3", "High"}},

@@ -2319,7 +2319,36 @@ int main()
   }
 #endif
 
-  g_orbis_sw_on_gl = g_sw_renderer && orbis_flag("swgl");
+  // vk-285-118 (AI-assisted): PS5SX2/Renderer per game (or for all games in gs.ini): Hardware or Software, read at game
+  // start (the renderer can't change while a game runs here). Software renders on the CPU and GSDeviceVK presents it, as
+  // swgl does; PCSX2's own EmuCore/GS/Renderer=13 in those files means the same. Unset: the flags decide, as before.
+  bool sw_by_setting = false;
+  {
+    MemorySettingsInterface peek;
+    orbis_apply_gs_ini(peek, true);
+    std::string r;
+    peek.GetStringValue("PS5SX2", "Renderer", &r);
+    const int pcsx2_renderer = peek.GetIntValue("EmuCore/GS", "Renderer", -1);
+    if (r == "Software" || r == "software" || r == "sw" || (r.empty() && pcsx2_renderer == static_cast<int>(GSRendererType::SW)))
+    {
+      g_sw_renderer = true;
+      sw_by_setting = true;
+    }
+    else if ((r == "Hardware" || r == "hardware" || r == "hw") && g_sw_renderer)
+    {
+      g_sw_renderer = false;
+#ifdef ORBIS_VULKAN
+      orbis_vk_environment(); // the hardware renderer's driver variables, which the sw_renderer flag left out
+#endif
+    }
+    if (!r.empty() || pcsx2_renderer >= 0)
+    {
+      printf("[boot] renderer: %s (PS5SX2/Renderer=%s, EmuCore/GS/Renderer=%d)\n", g_sw_renderer ? "software" : "hardware",
+        r.empty() ? "(unset)" : r.c_str(), pcsx2_renderer);
+      fflush(stdout);
+    }
+  }
+  g_orbis_sw_on_gl = g_sw_renderer && (orbis_flag("swgl") || sw_by_setting);
   // SW path: CPU GSDeviceOrbis + debug overlay presents, unless swgl (GSDeviceOGL presents the SW frames).
   if (g_sw_renderer && !g_orbis_sw_on_gl) g_use_gl_renderer = false;
   g_no_speedhacks = orbis_flag("nospeedhacks");
