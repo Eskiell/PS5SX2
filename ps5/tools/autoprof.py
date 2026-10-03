@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # PS5SX2 (vk-285-118, AI-assisted; vk-285-119: windows counted once across reports, games from the settings log,
-# buckets named by their middle, coverage): reads the [autoprof] lines of session reports or boot logs and names the busy code.
+# buckets named by their middle, the logged buckets' share): reads the [autoprof] lines of session reports or boot logs and names the busy code.
 #
 #   autoprof.py --elf llvm-pie.elf REPORT_OR_BOOTLOG...   [--by-game] [--top 25]
 #
@@ -125,7 +125,7 @@ def main():
         avg = lambda f: sum(w[f] * w['n'] for w in ws) / n
         covered = sum(w.get('covered', 0.0) * w['n'] for w in ws) / n
         print(f"== {key[0]} | {key[1]} thread | {len(ws)} window(s), {n} samples, speed {sum(w['speed'] for w in ws) / len(ws):.0f}%"
-              f" | eboot {avg('eboot'):.1f}% jit {avg('jit'):.1f}% lib {avg('lib'):.1f}% | named below: {covered:.1f}% of the samples")
+              f" | eboot {avg('eboot'):.1f}% jit {avg('jit'):.1f}% lib {avg('lib'):.1f}% | the logged buckets: {covered:.1f}% of the samples")
         for name, p in fn.most_common(args.top):
             print(f"  {p:5.1f}%  {name[:150]}")
         if areas:

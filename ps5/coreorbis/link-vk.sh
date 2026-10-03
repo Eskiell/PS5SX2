@@ -132,7 +132,10 @@ else
 fi
 cp "$VK_LIB_PS5VK" "$OUT/driver/libps5vk.ps5.a"
 "$OBJCOPY" --redefine-sym vkGetInstanceProcAddr=ps5vk_driver_vkGetInstanceProcAddr "$OUT/driver/libps5vk.ps5.a"
-if "$NM" "$OUT/driver/libps5vk.ps5.a" 2>/dev/null | grep -qE " [A-Za-z] vkGetInstanceProcAddr$"; then
+# vk-285-119: nm's output through a file -- `nm | grep -q` under pipefail failed whenever grep found the name and stopped
+# reading, so this check could never fire.
+"$NM" "$OUT/driver/libps5vk.ps5.a" > "$OUT/driver/libps5vk.nm.txt" 2>/dev/null || true
+if grep -qE " [A-Za-z] vkGetInstanceProcAddr$" "$OUT/driver/libps5vk.nm.txt"; then
   echo "[link-vk] error: the driver archive still names vkGetInstanceProcAddr" >&2; exit 1
 fi
 # vk-285-119: the driver's write-after-read list lookup, four entries a compare (orbis-shims/orbis_ps5vk_war.c, which
