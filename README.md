@@ -134,7 +134,7 @@ Scan the QR code in the corner of the shelf with a phone on the same network, or
 
 - **Display:** resolution (1x to 6x), aspect ratio, widescreen patches and display filter (FSR, FSR soft, Classic, CRT).
 - **Graphics:** the renderer (hardware, or software for games the hardware renderer gets wrong; it takes a restart), texture filtering, anisotropic filtering, blending accuracy, mipmapping, texture replacements and the folder they're read from.
-- **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed. On firmware below 10 a readback can wait for the next vblank, and some games read back so often that the waits add up elsewhere too, so a game that slows down for them switches to *Don't wait* by itself unless you've set this.
+- **Performance:** EE cycle rate and skip, MTVU, and *GPU readbacks* for the few games that read the picture back from the GPU (Guitar Hero II and III, OutRun 2006): *Accurate* is PCSX2's own way, the others trade accuracy for speed. On firmware below 10 a readback can wait for the next vblank, and some games read back so often that the waits add up elsewhere too, so a game that slows down for them switches to *Don't wait* by itself unless you've set this. TimeSplitters: Future Perfect never switches by itself: it builds textures from what it reads back.
 - **Game:** the language the PS2 tells games.
 - **On screen:** the info box in the top right corner (off, FPS, or FPS and how busy the EE, GS and VU threads are) and the blue FPS graph.
 - **Patches:** the game's patch groups, such as 60 FPS.
@@ -249,9 +249,9 @@ How to read the table:
 | **God of War II**<br><sub>SCUS-97481</sub> | PS5 Pro 10.01<br>PS5 6.02, 10.60, 11.40 | Full speed at 4x, about 40 fps. |
 | **The Godfather: The Game**<br><sub>SLUS-21385</sub> | PS5 10.60 | Full speed at 4x, about 60 fps with the 60 FPS patch (30 without). |
 | **Gran Turismo 4**<br><sub>SCUS-97328</sub> | PS5 Pro 11.40<br>PS5 8.40, 12.00 | Recommended: 6x. Also set 16:9 in the game's own options. Full speed at 6x, about 60 fps. |
-| **Grand Theft Auto: Liberty City Stories**<br><sub>SLUS-21423</sub> | PS5 10.01 | Full speed at 4x, about 35 fps; slowdowns at 6x. |
-| **Grand Theft Auto: San Andreas**<br><sub>SLUS-20946</sub> | PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. Dips to 53–57 fps now and then. |
-| **Grand Theft Auto: Vice City**<br><sub>SLUS-20552</sub> | PS5 11.60 | Full speed at 4x, about 60 fps with the 60 FPS patch (30 without). |
+| **Grand Theft Auto: Liberty City Stories**<br><sub>SLUS-21423</sub> | PS5 Pro 11.40<br>PS5 10.01 | Full speed at 4x, about 35 fps; slowdowns at 6x. Since 1.85, with the 60 FPS patch on the PS5 Pro: full speed at 6x, about 60 fps. |
+| **Grand Theft Auto: San Andreas**<br><sub>SLUS-20946</sub> | PS5 Pro 11.40<br>PS5 12.00 | Full speed at 6x, about 60 fps. With the 60 FPS patch. Dips to 53–57 fps now and then. With the 60 FPS patch, set EE cycle rate to 180% (*Performance* tab): it held 60 fps at 6x on the PS5 Pro. |
+| **Grand Theft Auto: Vice City**<br><sub>SLUS-20552</sub> | PS5 Pro 11.40<br>PS5 11.60 | Full speed at 4x, about 60 fps with the 60 FPS patch (30 without). On the PS5 Pro at 6x the 60 FPS patch needs EE cycle rate 300% (*Performance* tab) to hold 60 in busy places; 180% gives 58–60 fps. |
 | **Guitar Hero III: Legends of Rock**<br><sub>SLUS-21672</sub> | PS5 6.02, 10.01, 12.00 | Mostly full speed at 6x, with dips (about 50 fps). Slowdowns in songs, worst with the crowd in view. |
 | **Guitar Hero: Smash Hits**<br><sub>SLUS-21866</sub> | PS5 10.01 | Short test at 4x: about 80% speed. Still slow in places. |
 | **I-Ninja**<br><sub>SLUS-20705</sub> | PS5 10.60 | Full speed at 4x, about 50 fps. |
