@@ -12,6 +12,8 @@ to the releases:
 | `zlib/` | zlib 1.3.1 (`zlib-1.3.1.tar.gz`, zlib.net) | `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23` | zlib (`zlib/LICENSE`) |
 | `zstd/` | zstd 1.5.6 (`zstd-1.5.6.tar.gz`, github.com/facebook/zstd releases) | `8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1` | BSD (`zstd/LICENSE`), used under BSD; also GPLv2 (`zstd/COPYING`) |
 | `lz4/` | LZ4 1.10.0 (`lz4-1.10.0.tar.gz`, github.com/lz4/lz4 releases) | `537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b` | BSD 2-Clause (`lz4/LICENSE`, the library's) |
+| `libarchive/` | libarchive 3.8.9 (`libarchive-3.8.9.tar.xz`, libarchive.org/downloads) | `888c934f9d95648ecb9163dc8e23ab80a476ecb81a8f1154704a227b5b676dde` | BSD 2-Clause (`libarchive/COPYING`); the BLAKE2 files are CC0/OpenSSL/Apache 2.0, used under CC0 |
+| `mbedtls/` | Mbed TLS 3.6.7 (`mbedtls-3.6.7.tar.bz2`, github.com/Mbed-TLS/mbedtls releases) | `a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6` | Apache-2.0 OR GPL-2.0-or-later (`mbedtls/LICENSE`), used under GPL-2.0-or-later |
 
 - **zlib:** inflate only: `adler32.c crc32.c inffast.c inflate.c inftrees.c zutil.c` and their headers
   (`gzguts.h` because `zutil.c` includes it). No deflate, no gz* file functions.
@@ -22,4 +24,23 @@ to the releases:
 - **lz4:** `lib/lz4.c`, `lib/lz4.h` and `lib/LICENSE` of the release (the library is BSD 2-Clause; the release's
   programs, GPLv2, are not here).
 
-`ps5/coreorbis/Makefile.vk` builds them (`CHD_CSRCS`, `LZ4_CSRCS`).
+- **libarchive** (2026-10-05, AI-assisted): the texture pack downloads (`ps5/frontend/fe_texpacks.cpp`) unpack the
+  packs of archive.org's "PCSX2 HD Texture Packs", which are RAR 5 files. Only the reading side, with the RAR (4 and 5)
+  and zip readers: the 30 `.c` files in `libarchive/libarchive/` and the 25 headers they include, byte-identical to the
+  release. `config.h` is ours: it picks `config_ps5.h`, what the release's own CMake checks found with the payload
+  SDK's toolchain (`prospero-cmake`, every optional library off), plus zlib switched on at its end (the inflate
+  above), or `config_linux.h`, the same build on Linux for the PC preview (`ps5/frontend/host`). The official unrar
+  code is not used: its licence doesn't allow combining it with GPL code. Needs proper testing on more packs.
+
+- **mbedtls** (2026-10-05, AI-assisted): the frontend's own HTTPS (`ps5/frontend/fe_https.cpp`), which the texture
+  pack downloads and RetroAchievements (`ps5/coreorbis/orbis-shims/ProsperoHTTPConsole.cpp`) use. After the jailbreak the console's libSceSsl can't reach its certificate store, and with roots
+  handed to it, it still can't follow cross-signed chains like archive.org's (diagnostic payloads texnet3-5). Only what
+  `mbedtls/port/ps5sx2_mbedtls_config.h` compiles (a TLS 1.2 client with legacy crypto: ECDHE, AES-GCM and
+  ChaCha20-Poly1305, RSA and ECDSA, X.509): the 41 `library/*.c` files listed in `mbedtls/port/files.mk`, and the
+  `library/` and `include/` headers they include, byte-identical to the release. `port/` is ours: the config, and
+  `ps5sx2_mbedtls_platform.c` (gmtime_r and the zeroing, which the PS5's libc lacks). The roots it trusts are
+  Mozilla's, `ps5/frontend/fe_https_roots.inc`, made from certifi 2026.04.22's `cacert.pem` (MPL-2.0; SHA-256
+  `16be3f6feb15408195dcfe3aa1a75ef9db72f646b96ebbefdc68f56255f799f8`, the same as that tag on GitHub) by
+  `ps5/frontend/host/make-https-roots.py`. Tests: `ps5/frontend/host/test-https.sh`.
+
+`ps5/coreorbis/Makefile.vk` builds them (`CHD_CSRCS`, `LZ4_CSRCS`, `LIBARCHIVE_CSRCS`, `MBEDTLS_CSRCS`).
