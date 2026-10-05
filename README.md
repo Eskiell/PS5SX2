@@ -38,10 +38,11 @@ Expect rough edges. Bug reports with logs are very welcome, and so is patience.
   - Most changes apply while you play.
   - In a game, hold L2 + D-pad Down for 2 seconds to open the page in the PS5's own web browser. The game keeps running.
 - **Widescreen and 60 FPS patches.** Put PCSX2 patch files (`.pnach`) in `/data/PCSX2/patches/` and switch them on per game from the settings page.
-- **Online play.** PCSX2's emulated network adapter goes out through the PS5's own connection. SOCOM II has played online matches on [PS Rewired](https://psrewired.com)'s revival servers.
+- **RetroAchievements.** Sign in on the shelf and earn [RetroAchievements](https://retroachievements.org) as you play (softcore). Unlocks pop up like PS5 trophies, with the badge and the trophy sound, and every game's list is in its Square menu. [RetroAchievements](#retroachievements) has the details.
+- **Online play.** PCSX2's emulated network adapter is on for every game and goes out through the PS5's own connection. SOCOM II has played online matches on [PS Rewired](https://psrewired.com)'s revival servers.
 - **Recommended settings** for the games played during development, one tap away on the settings page.
 - **Bigger memory cards.** Make blank 8, 16, 32 or 64 MB cards on the settings page and pick the card in each slot, for all games or for one.
-- **Texture packs.** A game's textures can be replaced with PNG or DDS files kept on the console, on a USB drive or in any folder you name.
+- **HD texture packs in one button.** Press Square on a game to download its HD texture pack from archive.org's [PCSX2 HD Texture Packs](https://archive.org/details/pcsx2-hd-texture-packs) collection (about 340 games). It installs itself. Your own PNG or DDS packs work too, kept on the console, on a USB drive or in any folder you name.
 - **Rumble and an FPS graph.** The game's vibration goes to the controller, at the strength you choose, and a blue frame-rate graph can sit in the corner of the picture. The settings page switches them on and off, and chooses what the info box shows.
 - **Up to 4 players** with a multitap: the other PS5 users logged in when the game starts play on their own controllers.
 - **Fast forward** (experimental) on a button combo you choose, to skip videos.
@@ -90,7 +91,8 @@ The first start downloads the covers for your games, then the shelf opens.
 | D-pad or left stick | Browse the games |
 | L1 / R1 | Jump a page |
 | Cross or OPTIONS | Play |
-| Square | The game's settings: L1 / R1 switch between this game and all games, L2 / R2 between *Settings* and *Controls* |
+| Square | The game's settings: L1 / R1 switch between this game and all games, L2 / R2 between *Settings*, *Controls* and *Achievements* |
+| L1 + Square | RetroAchievements: sign in or out |
 | Triangle | The settings page's QR code, large |
 
 **In a game**
@@ -156,7 +158,9 @@ In a game, hold L2 + D-pad Down for 2 seconds and the PS5's own web browser open
 
 ## Texture packs
 
-PS5SX2 loads PCSX2-style texture replacement packs as PNG or DDS files (DDS in BC1, BC2, BC3, BC7 or uncompressed). Switch on *Texture replacements* on the settings page. A game's pack is a folder named after its serial with a `replacements` folder inside: `<serial>/replacements/`. PS5SX2 looks for it here, in this order:
+**Downloading a pack:** press Square on a game. When archive.org's [PCSX2 HD Texture Packs](https://archive.org/details/pcsx2-hd-texture-packs) collection has a pack for it, the *HD texture pack* row shows its size: press Cross to download it. It downloads in the background (the shelf shows how far it is), unpacks into one file, `/data/PCSX2/textures/<serial>/replacements.pak`, switches on *Texture replacements* for that game and pops up when it's ready. A download that a game interrupts carries on when you're back on the shelf. Triangle twice cancels a download or deletes a pack PS5SX2 downloaded. The packs are made by the community; PS5SX2 only fetches them.
+
+**Your own packs:** PS5SX2 loads PCSX2-style texture replacement packs as PNG or DDS files (DDS in BC1, BC2, BC3, BC7 or uncompressed). Switch on *Texture replacements* on the settings page. A game's pack is a folder named after its serial with a `replacements` folder inside: `<serial>/replacements/`. PS5SX2 looks for it here, in this order:
 
 1. The folder the *Textures folder* setting names, as `<that folder>/<serial>/`.
 2. A USB drive: `PS5SX2/textures/<serial>/`, `PCSX2/textures/<serial>/` or `textures/<serial>/`, and a pack copied to the drive's top folder as it is (`PS5SX2/<serial>/` or `<serial>/`, with its `replacements` folder).
@@ -166,19 +170,17 @@ Folder names match in any case.
 
 ## Online play
 
-PS5SX2 emulates the PS2's network adapter on top of the PS5's own connection. SOCOM II (SCUS-97275) has played online matches on PS Rewired's servers.
+PS5SX2 emulates the PS2's network adapter on top of the PS5's own connection. It's on for every game: PCSX2's sockets backend, its DHCP server giving the game an address, and the DNS servers the PS5 uses. Games that never use the network don't pay for it. Switch it off for a game with *Network adapter* in its Square menu or on the settings page, or for every game with a file named `nonetwork` in `/data/PCSX2/flags/`.
+
+Revival servers usually need their own DNS server and sometimes a DNAS bypass cheat: see their guides. SOCOM II (SCUS-97275) has played online matches on PS Rewired's servers.
 
 <details>
 <summary>How SOCOM II was set up</summary>
 
 1. **The DNAS bypass:** put PS Rewired's DNAS bypass cheat (`0F6FC6CF.pnach`, linked from their [SOCOM II guide](https://psrewired.com/guides/socom2)) in `/data/PCSX2/cheats/`.
-2. **The game's settings file:** add these lines to `/data/PCSX2/settings/SOCOM II - U.S. Navy SEALs (USA).ini`:
+2. **The game's settings file:** add these lines to `/data/PCSX2/settings/SOCOM II - U.S. Navy SEALs (USA).ini` (the network adapter's own lines, `EthEnable`, `EthApi`, `EthDevice` and `InterceptDHCP`, are the defaults since 1.9; files that still have them work the same):
 
    ```ini
-   DEV9/Eth/EthEnable=true
-   DEV9/Eth/EthApi=Sockets
-   DEV9/Eth/EthDevice=Auto
-   DEV9/Eth/InterceptDHCP=true
    DEV9/Eth/ModeDNS1=Manual
    DEV9/Eth/DNS1=67.222.156.250
    EmuCore/EnableCheats=true
@@ -190,6 +192,16 @@ PS5SX2 emulates the PS2's network adapter on top of the PS5's own connection. SO
 PS Rewired doesn't allow the widescreen patch online. Stretching the picture to 16:9 on the settings page is fine. See [PS Rewired's guides](https://psrewired.com) for other games.
 
 </details>
+
+## RetroAchievements
+
+Earn [RetroAchievements](https://retroachievements.org) as you play. It's softcore only: hardcore mode isn't available.
+
+- **Signing in:** on the shelf, press L1 + Square and sign in with your RetroAchievements account. The password isn't kept, only a sign-in token, in `/data/PCSX2/achievements-secrets.ini`. Sign out from the same panel. Until you sign in, nothing connects.
+- **Unlocks** pop up like PS5 trophies, with the achievement's badge, its title and the trophy sound. Mastering a game plays the platinum sound. The popups go through your jailbreak's ELF loader (port 9021); without one they're plain notifications.
+- **The lists:** press Square on a game and go to *Achievements* with L2 / R2 to see its achievements and the ones you've unlocked. While you play, the settings page has the running game's list.
+- **A dropped connection:** unlocks are retried. Going back to the shelf waits up to 5 seconds for any still being sent, and a notification says if one couldn't be.
+- **Your disc has to be a version RetroAchievements knows.** One it doesn't recognise gets no achievements.
 
 ## Tested consoles
 
@@ -328,7 +340,7 @@ How to read the table:
 ## Known limitations
 
 - **Some games are too heavy for 6x on a regular PS5.** [Tested games](#tested-games) shows what ran at full speed where.
-- **No RetroAchievements** yet.
+- **RetroAchievements is softcore only:** hardcore mode isn't available.
 - **USB keyboard and mouse don't work on firmware 11.x and 12.00** yet. [The keyboard and mouse section](#usb-keyboard-and-mouse) has the details.
 - **Restart needed for a few settings:** the renderer and MTVU only change when the game restarts.
 - **Covers need the PS5SX2 Helper,** which gives the app `/data` before it starts. Without it, nothing downloads.
@@ -344,10 +356,13 @@ The PS5 layer lives in [`ps5/`](ps5/). [`ps5/README.md`](ps5/README.md) covers t
 - **BlackBearReloaded,** for ps5-native-app-boilerplate.
 - **John Törnblom,** for the ps5-payload-dev SDK.
 - **[xlenore/ps2-covers](https://github.com/xlenore/ps2-covers),** for the covers the shelf downloads.
+- **Gabriel Fonseca ([gbfonseca](https://github.com/gbfonseca)),** for the RetroAchievements groundwork PS5SX2's achievements are built on.
+- **[RetroAchievements](https://retroachievements.org),** for the achievements and its rcheevos library.
+- **The makers of the [PCSX2 HD Texture Packs](https://archive.org/details/pcsx2-hd-texture-packs),** for the packs the shelf downloads.
 - **[PS Rewired](https://psrewired.com),** for keeping PS2 online games alive.
 - **OnionHEN,** which the PS5SX2 Helper is based on.
 - **drakmor,** for [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus), and **VoidWhisper,** for ShadowMount, which it's based on.
-- **Project Nayuki's QR Code generator and Font Awesome Free:** see [`ps5/README.md`](ps5/README.md) for their licences.
+- **Project Nayuki's QR Code generator and Font Awesome Free:** see [`ps5/README.md`](ps5/README.md) for their licences; **Mbed TLS, libarchive** and the other libraries in [`ps5/third_party/`](ps5/third_party/README.md): see its README.
 
 ## Licence
 
