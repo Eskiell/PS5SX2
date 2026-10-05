@@ -5,7 +5,7 @@
 // at the next vsync (GSRenderer.cpp OrbisLiveTune -> main-boot.cpp orbis_reload_gs_ini_cpu).
 //
 // Plain BSD sockets, one thread, one request per connection; the same code runs on the PC in
-// fe_host for testing. Every /api/ request needs the access token, which the QR code carries.
+// fe_host for testing. Every /api/ request uses the same-site checks; the console address is sufficient.
 //
 // Copyright (C) 2026 Spyros
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -14,6 +14,7 @@
 
 #include "fe_covers.h"
 #include "fe_games.h"
+#include "fe_game_achievements.h"
 
 #include <atomic>
 #include <cstdint>
@@ -57,6 +58,8 @@ struct WebConfig
 	std::string top_dir;                // /data/PCSX2: gs.ini, live.ini, flags/, settings/, patches/, cheats/
 	std::string memcards_dir;           // vk-285-113: memcards/, the cards PCSX2 uses ("" for none: no cards page)
 	std::string report_header;          // the report's first lines: build, sources, console
+	std::function<GameAchievementsState()> achievements; // Runtime snapshot, no client pointers (AI-assisted).
+	std::function<std::vector<uint8_t>(uint32_t)> achievement_badge;
 	int test_build = 0;                 // names the report file "PS5SX2-test<N>-..."
 };
 
@@ -128,6 +131,8 @@ private:
 
 	void ApiState(Response& res);
 	void ApiGames(Response& res);
+	void ApiAchievements(Response& res);
+	void ApiAchievementBadge(const Request& req, Response& res);
 	void ApiCover(const Request& req, Response& res);
 	void ApiSettings(const Request& req, Response& res);
 	void ApiSave(const Request& req, Response& res);

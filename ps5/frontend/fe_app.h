@@ -7,13 +7,17 @@
 #pragma once
 
 #include "fe_covers.h"
+#include "fe_achievements.h"
+#include "fe_game_achievements.h"
 #include "fe_games.h"
 #include "fe_options.h"
 #include "fe_renderer.h"
 #include "fe_sound.h"
+#include "fe_texpacks.h"
 #include "fe_text.h"
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -39,6 +43,10 @@ struct AppConfig
 	// after its settings changed (fe_games.cpp ReadBadges; null: the badges stay as they were).
 	OptionsPaths options;
 	std::function<void(GameInfo&)> refresh_game;
+	AchievementAccountService achievements;
+	GameAchievementsService game_achievements;
+	TextEntryService text_entry; // 2026-10-05: the PS5's own keyboard for the account panel (fe_ps5.cpp)
+	TexturePackService texture_packs; // 2026-10-05: HD texture packs from archive.org (fe_texpacks.h); unset: no row
 };
 
 class App
@@ -62,6 +70,11 @@ public:
 	int Chosen() const { return m_selected; }
 
 	const std::vector<GameInfo>& games() const { return m_games; }
+
+	// pr9n: what the host tests check (fe_host's "expect" step).
+	bool AccountOpen() const { return m_account.open; }
+	bool SheetOpen() const { return m_sheet_open; }
+	int SheetTab() const { return m_sheet.tab(); }
 
 private:
 	struct Slot
@@ -88,7 +101,16 @@ private:
 	bool SheetMove(int dir); // false at either end
 	void BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent);
 	void RefreshBadges();
+	// 2026-10-05: the sheet's HD texture pack row (fe_texpacks.h): its buttons, what it shows, its help line, and the
+	// shelf's line while a pack is on its way.
+	void UpdateTexturePackRow(const Input& in, double now);
+	std::string TexturePackValue(const TexturePackStatus& s, int pick) const;
+	std::string TexturePackHelp(const TexturePackStatus& s, int pick, const std::string& serial) const;
+	void BuildTexturePackActivity(std::vector<UiVertex>& ui, float x, float y, float k, uint32_t accent);
 	void PollCovers();
+	void UpdateAccount(const Input& in);
+	void BuildAccount(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent);
+	void BuildAccountKeyboard(std::vector<UiVertex>& ui, float x, float y, float w, float k);
 	void Pose(float d, float t, Mat4& model, float& brightness) const;
 
 	Renderer* m_renderer = nullptr;
@@ -109,6 +131,11 @@ private:
 	double m_held_for = 0, m_next_repeat = 0;
 	Input m_prev;
 	bool m_released = false; // buttons held at start count only once released
+	// pr9n (AI-assisted), PR #9 review item 11: L1 + Square in either order. L1 first jumps 5 games at once (undone when
+	// Square follows while L1 is held, within kChordWindow); Square first opens the sheet (closed again when L1 follows).
+	static constexpr double kChordWindow = 0.5; // seconds between the chord's two presses
+	int m_chord_from = -1; // the selection before L1's jump
+	double m_chord_l1_time = -10, m_chord_square_time = -10;
 
 	// The QR tile (vk-285-50): the code's modules, row by row, 1 = dark.
 	std::string m_web_url, m_web_shown;
@@ -132,10 +159,36 @@ private:
 	std::string m_sheet_status;
 	double m_sheet_status_time = -10;
 	int m_sheet_saved_at_open = 0;
+	// 2026-10-05: the texture pack picked on each game's row (left and right), Triangle's first press (cancel, delete),
+	// and the state seen last (a pack that comes in reloads the sheet: its game's file has Texture replacements on then).
+	std::map<std::string, int> m_texpack_pick;
+	std::string m_texpack_armed;
+	double m_texpack_armed_until = -1;
+	std::string m_texpack_seen_serial;
+	TexturePackStatus::State m_texpack_seen = TexturePackStatus::State::Loading;
 
 	bool m_launching = false;
 	double m_launch_time = 0;
 	bool m_done = false;
 	Texture* m_atlas = nullptr;
+	AchievementAccountPanel m_account;
+	// 2026-10-05: the account panel's fade (0 closed .. 1 open), its keyboard's slide, and the field the PS5's keyboard
+	// is typing into (-1: none open).
+	float m_account_anim = 0, m_account_kb_anim = 0;
+	int m_ime_field = -1;
+	GameAchievementsState m_game_achievements;
+	struct Badge
+	{
+		Texture* texture = nullptr;
+		VkDescriptorSet set = VK_NULL_HANDLE;
+		bool attempted = false;
+	};
+	std::vector<Badge> m_achievement_badges;
+	std::vector<UiImageRange> m_achievement_images;
+	int m_achievement_row = 0;
+	void PollGameAchievements();
+	void ClearAchievementBadges();
+	void LoadGameAchievements();
+	void BuildGameAchievements(std::vector<UiVertex>& ui, float x, float y, float width, float height, float k, uint32_t accent);
 };
 } // namespace fe

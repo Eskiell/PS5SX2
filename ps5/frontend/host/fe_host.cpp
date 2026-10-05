@@ -2,7 +2,7 @@
 // on the machine's Vulkan (SwiftShader from Chromium does), drives them with a script of controller presses and
 // writes the frames it is told to as PNG files. Nothing of this goes into the eboot.
 //
-//   build-host.sh && ./fe_host --data <folder> --out <folder> [--size 1920x1080] [--lang <ps5 language id>]
+//   build-host.sh && ./fe_host --data <folder> --out <folder> [--size 1920x1080] [--lang <ps5 language id>] [--ime]
 //                               [--script <file>] [step ...]
 //
 // <folder> for --data is a stand-in for /data/PCSX2: settings/, gs.ini, patches/, memcards/ (made when missing).
@@ -12,7 +12,7 @@
 //   hold <button> <s>      the button stays down for <s> seconds
 //   shot <name>            <out>/<name>.png of the current frame
 //   game <n>               (before any other step) the shelf starts on game n
-// Buttons: left right up down cross circle square triangle options l1 r1 l2 r2.
+// Buttons: left right up down cross circle square triangle options l1 r1 l2 r2; "a+b" presses them together.
 //
 // Copyright (C) 2026 Spyros
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -23,7 +23,11 @@
 
 #include <dlfcn.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <zlib.h>
+
+#include <chrono>
+#include <thread>
 
 #include <cstdio>
 #include <cstdlib>
@@ -198,6 +202,9 @@ struct Step
 
 bool SetButton(Input& in, const std::string& b, bool down)
 {
+	// "l1+square": a chord, every button down (and up) in the same frame (2026-10-05, the account panel's chord).
+	if (const size_t plus = b.find('+'); plus != std::string::npos)
+		return SetButton(in, b.substr(0, plus), down) && SetButton(in, b.substr(plus + 1), down);
 	bool* p = b == "left" ? &in.left : b == "right" ? &in.right : b == "up" ? &in.up : b == "down" ? &in.down :
 	          b == "cross" ? &in.cross : b == "circle" ? &in.circle : b == "square" ? &in.square :
 	          b == "triangle" ? &in.triangle : b == "options" ? &in.options : b == "l1" ? &in.l1 : b == "r1" ? &in.r1 :
@@ -224,6 +231,12 @@ bool ParseStep(const std::string& line, std::vector<Step>& out)
 	}
 	else if (st.op == "hold")
 		s >> st.arg >> st.seconds;
+	else if (st.op == "down" || st.op == "up") // pr9n: a button stays down until its "up" (chords pressed one after the other)
+		s >> st.arg;
+	else if (st.op == "expect") // pr9n: "expect selected=4", "account=1", "sheet=0", "tab=2"; a mismatch fails the run
+		s >> st.arg;
+	else if (st.op == "sleep") // 2026-10-05: real seconds, for the texture pack worker
+		s >> st.seconds;
 	else if (st.op == "shot" || st.op == "game")
 		s >> st.arg;
 	else
@@ -302,7 +315,12 @@ int main(int argc, char** argv)
 	std::string data = "fe_host_data", out = "fe_host_shots", script, root;
 	uint32_t w = 1920, h = 1080;
 	int lang = 1; // English
+	bool achievements_preview = false;
+	bool ime = false;
 	std::vector<Step> steps;
+	std::string texpacks;      // 2026-10-05: a folder with metadata.json (archive.org's list) and pack files
+	double texpacks_rate = 0;  // KB a second for the fake downloads (0: as fast as the disk)
+	bool texpacks_fake = false; // fake downloads send zeros instead of reading the files (for the progress previews)
 	{
 		const std::string self = argv[0];
 		const size_t slash = self.find_last_of('/');
@@ -325,6 +343,16 @@ int main(int argc, char** argv)
 			web = next();
 		else if (a == "--lang")
 			lang = std::atoi(next().c_str());
+		else if (a == "--achievements-preview")
+			achievements_preview = true;
+		else if (a == "--ime") // 2026-10-05: a stand-in for the PS5's keyboard
+			ime = true;
+		else if (a == "--texpacks") // 2026-10-05: texture packs from a folder standing in for archive.org
+			texpacks = next();
+		else if (a == "--texpacks-rate")
+			texpacks_rate = std::atof(next().c_str());
+		else if (a == "--texpacks-fake")
+			texpacks_fake = true;
 		else if (a == "--size")
 		{
 			const std::string s = next();
@@ -398,6 +426,110 @@ int main(int argc, char** argv)
 
 	App app;
 	AppConfig acfg;
+	AchievementAccountState preview_account;
+	GameAchievementsState preview_game;
+	preview_account.available = true;
+	// 2026-10-05: --ime stands in for the PS5's keyboard: it opens, and the next poll returns a made-up name or password.
+	std::string ime_pending;
+	if (ime)
+	{
+		acfg.text_entry.open = [&](const std::string& title, const std::string&, bool password, unsigned) {
+			ime_pending = password ? "hunter2-preview" : "PreviewPlayer";
+			std::printf("[host] the PS5's keyboard (stand-in) for %s\n", title.c_str());
+			return true;
+		};
+		acfg.text_entry.poll = [&](std::string& text) {
+			text = ime_pending;
+			return 1;
+		};
+	}
+	if (achievements_preview)
+	{
+		// A local UI fixture. It never authenticates or stores the typed credentials.
+		acfg.achievements = {[&] { return preview_account; },
+			[&](const std::string& username, const std::string&) {
+				preview_account.username = username;
+				preview_account.saved = preview_account.authenticated = true;
+				return true;
+			},
+			[&] { preview_account = {}; }};
+		acfg.game_achievements = {[&] { return preview_game; }, [&](const std::string& path) {
+            preview_game.path = path;
+            preview_game.title = "Achievement browser preview";
+            ++preview_game.revision;
+            preview_game.entries.clear();
+            auto image = std::make_shared<std::vector<uint8_t>>();
+            std::ifstream badge(data + "/badge.png", std::ios::binary);
+            image->assign(std::istreambuf_iterator<char>(badge), std::istreambuf_iterator<char>());
+            for (int i = 0; i < 24; ++i) {
+                GameAchievement entry; entry.id = i+1; entry.points = 5 + i*5;
+                entry.unlocked = i < 7;
+                entry.title = "Achievement " + std::to_string(i+1);
+                entry.description = "Explore the game and complete this objective to earn the achievement.";
+                entry.image = image;
+                preview_game.entries.push_back(std::move(entry));
+            }
+            return true; }, [] {}};
+	}
+	// 2026-10-05: the texture packs, with a folder standing in for archive.org (its list and the pack files).
+	TexturePackManager* packs = nullptr;
+	if (!texpacks.empty())
+	{
+		TexturePackPlatform tp;
+		tp.get_text = [texpacks](const std::string& url, std::string& body) {
+			if (url != TexturePackMetadataUrl())
+				return 404;
+			std::ifstream f(texpacks + "/metadata.json", std::ios::binary);
+			std::stringstream ss;
+			ss << f.rdbuf();
+			body = ss.str();
+			return body.empty() ? -1 : 200;
+		};
+		tp.get_range = [texpacks, texpacks_rate, texpacks_fake](const std::string& url, uint64_t offset, uint64_t length,
+						   const std::function<bool(const void*, size_t)>& sink) {
+			const std::string prefix = std::string("https://archive.org/download/") + kTexturePackItem + "/";
+			const std::string path = texpacks + "/" + PercentDecode(url.substr(prefix.size()));
+			FILE* f = texpacks_fake ? nullptr : std::fopen(path.c_str(), "rb");
+			if (!texpacks_fake && !f)
+				return 404;
+			if (f)
+				std::fseek(f, static_cast<long>(offset), SEEK_SET);
+			std::vector<char> buf(64 * 1024, 0);
+			for (uint64_t left = length; left > 0;)
+			{
+				const size_t want = static_cast<size_t>(std::min<uint64_t>(left, buf.size()));
+				const size_t n = f ? std::fread(buf.data(), 1, want, f) : want;
+				if (n == 0)
+					break;
+				if (texpacks_rate > 0)
+					std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long long>(n / (texpacks_rate * 1024.0) * 1e6)));
+				if (!sink(buf.data(), n))
+				{
+					if (f)
+						std::fclose(f);
+					return -2;
+				}
+				left -= n;
+			}
+			if (f)
+				std::fclose(f);
+			return 206;
+		};
+		tp.free_bytes = [texpacks_fake](const std::string& dir) {
+			if (texpacks_fake)
+				return UINT64_MAX; // the previews' fake downloads stop long before the disk would matter
+			struct statvfs v;
+			return statvfs(dir.c_str(), &v) == 0 ? static_cast<uint64_t>(v.f_bavail) * v.f_frsize : UINT64_MAX;
+		};
+		tp.log = [](const std::string& line) { std::printf("%s\n", line.c_str()); };
+		tp.notify = [](const std::string& game, bool ok, const std::string& detail) {
+			std::printf("[host] popup: HD textures %s: %s (%s)\n", ok ? "ready" : "failed", game.c_str(), detail.c_str());
+		};
+		MakeDir(data + "/textures");
+		packs = new TexturePackManager(tp, data + "/textures", data + "/textures/.ps5sx2-downloads", data + "/cache/texture-packs.json");
+		packs->Start();
+		acfg.texture_packs = packs->Service();
+	}
 	acfg.build_tag = "vk-285-114 (host)";
 	acfg.options = op;
 	acfg.refresh_game = [op](GameInfo& g) {
@@ -448,6 +580,44 @@ int main(int argc, char** argv)
 				SetButton(in, s.arg, false);
 				run(dt * 2);
 			}
+		else if (s.op == "sleep")
+		{
+			const double until = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + s.seconds;
+			while (std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() < until)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				run(dt);
+			}
+		}
+		else if (s.op == "expect")
+		{
+			const size_t eq = s.arg.find('=');
+			const std::string key = s.arg.substr(0, eq);
+			const int want = eq == std::string::npos ? -1 : std::atoi(s.arg.c_str() + eq + 1);
+			const int got = key == "selected" ? app.Chosen() : key == "account" ? app.AccountOpen() : key == "sheet" ? app.SheetOpen() :
+			                key == "tab"      ? app.SheetTab() : -99;
+			if (got == -99 || eq == std::string::npos)
+			{
+				std::fprintf(stderr, "[host] unknown expect: %s\n", s.arg.c_str());
+				return 2;
+			}
+			if (got != want)
+			{
+				std::printf("[host] expect FAILED: %s is %d, wanted %d\n", key.c_str(), got, want);
+				failures++;
+			}
+			else
+				std::printf("[host] expect ok: %s=%d\n", key.c_str(), got);
+		}
+		else if (s.op == "down" || s.op == "up")
+		{
+			if (!SetButton(in, s.arg, s.op == "down"))
+			{
+				std::fprintf(stderr, "[host] unknown button %s\n", s.arg.c_str());
+				return 2;
+			}
+			run(dt);
+		}
 		else if (s.op == "hold")
 		{
 			SetButton(in, s.arg, true);
@@ -478,6 +648,8 @@ int main(int argc, char** argv)
 		}
 	}
 	covers->Stop();
+	if (packs && packs->Stop(3000))
+		delete packs;
 	app.Shutdown();
 	renderer.Shutdown();
 	return failures ? 1 : 0;

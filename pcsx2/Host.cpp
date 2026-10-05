@@ -155,9 +155,22 @@ void Host::ReportFormattedErrorAsync(const std::string_view title, const char* f
 	ReportErrorAsync(title, message);
 }
 
+#ifdef PS5SX2_ACHIEVEMENTS
+#include "rc_client.h"
+// pr9n (AI-assisted), PR #9 review item 10: "PS5SX2/<build tag> (PS5 <firmware>)" from main-boot.cpp, which knows both;
+// RetroAchievements can then tell builds apart (its rules ask for a unique, stable identity of that shape).
+std::string OrbisUserAgentProduct();
+#endif
+
 std::string Host::GetHTTPUserAgent()
 {
+#ifdef PS5SX2_ACHIEVEMENTS
+	char clause[64] = {};
+	rc_client_get_user_agent_clause(nullptr, clause, sizeof(clause)); // "rcheevos/12.4.0"
+	return OrbisUserAgentProduct() + " " + clause;
+#else
 	return fmt::format("PCSX2 {} ({})", BuildVersion::GitRev, GetOSVersionString());
+#endif
 }
 
 std::unique_lock<std::mutex> Host::GetSettingsLock()

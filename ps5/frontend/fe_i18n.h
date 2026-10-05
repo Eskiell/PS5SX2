@@ -53,6 +53,72 @@ enum class Str : int
 	SheetControls,      // "Controls"
 	// vk-285-118: Triangle on the shelf shows the QR code large.
 	HintQrCode,         // "QR code"
+	// Shared RetroAchievements browser text (AI-assisted).
+	Achievements,
+	AchievementAll,
+	AchievementUnlocked,
+	AchievementLocked,
+	AchievementPoints,
+	AchievementRefresh,
+	AchievementPrevious,
+	AchievementNext,
+	AchievementLoading,
+	AchievementImages,
+	AchievementEmptyFilter,
+	AchievementEmpty,
+	AchievementSelectRunning,
+	AchievementShowRunning,
+	AchievementStartGame,
+	AchievementUnavailable,
+	AchievementSignIn,
+	AchievementConnecting,
+	AchievementNoData,
+	AchievementRefreshFailed,
+	AchievementSelectGame,
+	AchievementPending,
+	AchievementTriangleRefresh,
+	AchievementShelfSignIn,
+	AchievementBootFailed,
+	AchievementSecureFailed,
+	AchievementCreateFailed,
+	AchievementConnectFailed,
+	AchievementSetFailed,
+	AchievementListFailed,
+	AchievementAccountMissing,
+	AchievementUnlockFailed,
+	AchievementMainFailed,
+	AchievementCancelled,
+	AchievementStartFailed,
+	AchievementStatusUnlocked,
+	AchievementStatusLocked,
+	// 2026-10-05: the RetroAchievements account panel (L1 + Square), redesigned (AI-assisted).
+	AccountIntro,       // "Sign in with your RetroAchievements account to earn achievements as you play."
+	AccountUsername,    // "Username"
+	AccountPassword,    // "Password"
+	AccountUsernameHint, // "Your RetroAchievements username"
+	AccountPasswordHint, // "Your password"
+	AccountSignIn,      // "Sign in"
+	AccountSigningIn,   // "Signing in..."
+	AccountSignOut,     // "Sign out"
+	AccountSignOutAgain, // "Press again to sign out"
+	AccountSignedIn,    // "Signed in as %s"
+	AccountSignedInNote, // "Achievements unlock as you play. Your password isn't kept on the console."
+	HintSelect,         // "Select"
+	HintEdit,           // "Edit"
+	HintShowPassword,   // "Show password"
+	HintHidePassword,   // "Hide password"
+	HintDelete,         // "Delete"
+	HintDone,           // "Done"
+	KeySpace,           // "Space"
+	HdTextures,         // "HD textures" (2026-10-05: the shelf's line while a texture pack downloads)
+	HdTexturesReady,    // "HD textures ready" (the popup)
+	HdTexturesFailed,   // "HD textures failed"
+	HintDownload,       // "Download" (the sheet's HD texture pack row)
+	HintCancel,         // "Cancel"
+	// pr9n (AI-assisted): RetroAchievements' messages after the PR #9 review (Achievements.cpp, PS5 toasts).
+	RaServerError,      // "RetroAchievements: server error" (the toast's title; the server's own message under it)
+	RaUnreachable,      // "Couldn't reach RetroAchievements. You're still signed in: ..." (the token sign-in at a game's start)
+	RaUnsent,           // "An unlock couldn't be sent to RetroAchievements before closing ..." (back to the shelf, offline)
 	Count
 };
 

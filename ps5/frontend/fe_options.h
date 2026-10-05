@@ -37,7 +37,7 @@ struct OptionDef
 
 // vk-285-116: the sheet's tabs (L2 and R2), as the page's: the settings (with the memory cards and the patches) and the
 // controls (the controller's buttons, sticks, rumble, save state buttons, the keyboard and mouse).
-constexpr int kTabSettings = 0, kTabControls = 1, kTabCount = 2;
+constexpr int kTabSettings = 0, kTabControls = 1, kTabAchievements = 2, kTabCount = 3;
 
 struct OptionGroup
 {
@@ -71,6 +71,7 @@ public:
 		Patch,       // one of the game's patch groups
 		Recommended, // PS5SX2's recommended settings
 		ResetAll,    // every option of the sheet back to what it follows
+		TexturePack, // 2026-10-05: the game's HD texture pack from archive.org (the app draws and runs it: fe_texpacks.h)
 	};
 
 	enum class From
@@ -94,6 +95,8 @@ public:
 	void Reload();
 	// vk-285-116: the rows of one tab (kTabSettings or kTabControls).
 	void SetTab(int tab);
+	// 2026-10-05: a game's sheet gets the HD texture pack row (after Graphics) when the app has texture packs.
+	void SetTexturePackRow(bool on) { m_texture_pack_row = on; }
 	int tab() const { return m_tab; }
 
 	bool is_global() const { return m_global; }
@@ -145,6 +148,7 @@ private:
 	std::vector<Row> m_rows;
 	int m_new_card_mb = 8;
 	int m_tab = kTabSettings;
+	bool m_texture_pack_row = false;
 	int m_armed_row = -1;
 	double m_armed_until = 0;
 	std::string m_status;

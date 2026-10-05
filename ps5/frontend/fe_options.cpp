@@ -295,6 +295,12 @@ const std::vector<OptionGroup>& OptionGroups()
 					"The language the PS2 tells games. PAL games with several languages start in it; most US games are English only. Auto "
 					"follows the PS5's language.",
 					true),
+				// 2026-10-05 (AI-assisted): the PS2's network adapter, on for every game by default (main-boot.cpp).
+				Toggle("DEV9/Eth/EthEnable", "Network adapter", "true", "Network %",
+					"The PS2's network adapter, on the PS5's own connection, for online and LAN play (on revival servers such as PS "
+					"Rewired; their DNS goes in the game's network settings). It costs nothing until a game uses it. Turn it off for a "
+					"game that misbehaves with it. Takes effect when the game starts.",
+					true),
 			}},
 		{"On screen",
 			{
@@ -420,6 +426,8 @@ void OptionsSheet::BuildRows()
 		m_rows.push_back(r);
 		return m_rows.back();
 	};
+	if (m_tab == kTabAchievements)
+		return; // Read-only browser is rendered by App (AI-assisted).
 	const bool settings = m_tab == kTabSettings;
 	if (settings && (m_has_preset || !m_global))
 		add(Kind::Recommended, m_global ? "Recommended for all games" : "Recommended settings");
@@ -430,6 +438,9 @@ void OptionsSheet::BuildRows()
 		add(Kind::Header, g.title);
 		for (const OptionDef& d : g.items)
 			add(Kind::Option, d.label).def = &d;
+		// 2026-10-05 (AI-assisted): the game's HD texture pack, under Texture replacements.
+		if (g.title == "Graphics" && m_texture_pack_row && !m_global && !m_serial.empty())
+			add(Kind::TexturePack, "HD texture pack");
 	}
 	if (settings && !m_paths.memcards_dir.empty())
 	{
@@ -516,6 +527,7 @@ std::string OptionsSheet::Value(const Row& r) const
 			return SameState(m_own, rec) ? "In use" : "Use";
 		}
 		case Kind::ResetAll:
+		case Kind::TexturePack: // the app's (fe_app.cpp, from fe_texpacks.h)
 			return {};
 	}
 	return {};

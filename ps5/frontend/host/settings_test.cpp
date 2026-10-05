@@ -250,8 +250,13 @@ int RunSheet(const std::string& data, const std::string& presets)
 	const bool bad = EditSettingsFile(god, hg, {{Change::Set, "bad key", "1"}}, what, error);
 	std::printf("sheet: %s; the bad key %s (%s)\n", ok ? "all changes saved" : ("FAILED: " + error).c_str(), bad ? "WAS SAVED" : "was refused",
 		error.c_str());
+	// pr9n (PR #9 review item 4): the RetroAchievements account's keys, in any case, never from a settings file edit.
+	bool account_key = false;
+	for (const char* k : {"Achievements/Host", "Achievements/Token", "achievements/username", "ACHIEVEMENTS/Enabled", "Achievements"})
+		account_key |= SafeKey(k) || EditSettingsFile(god, hg, {{Change::Set, k, "https://elsewhere.example"}}, what, error);
+	std::printf("sheet: the RetroAchievements keys %s\n", account_key ? "WERE ACCEPTED" : "were refused");
 	std::printf("%s", Dump(data, true).c_str());
-	return ok && !bad ? 0 : 1;
+	return ok && !bad && !account_key ? 0 : 1;
 }
 
 // vk-285-121: a console without settings/ (two testers' 1.7 logs: every save failed with errno 2). The sheet's save

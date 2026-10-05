@@ -145,6 +145,14 @@ bool SafeKey(const std::string& key)
 	for (char c : key)
 		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '/'))
 			return false;
+	// pr9n (AI-assisted), PR #9 review item 4: nothing in [Achievements] from the page or the sheet. The page answers anyone
+	// on the LAN, and Achievements/Host pointed at another https server would have had the next sign-in send the user's
+	// token there (Token and Username would replace the account). The account comes from the sign-in only.
+	std::string first = key.substr(0, key.find('/'));
+	for (char& c : first)
+		c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+	if (first == "achievements")
+		return false;
 	return true;
 }
 

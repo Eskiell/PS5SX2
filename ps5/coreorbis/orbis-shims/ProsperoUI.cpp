@@ -9,6 +9,9 @@
 #include "common/SmallString.h"
 #include "Host.h"
 #include "imgui_freetype.h"
+#ifdef PS5SX2_ACHIEVEMENTS
+#include "ProsperoNotify.h"
+#endif
 
 namespace InputRecordingUI
 {
@@ -20,21 +23,33 @@ namespace Host
 {
 void AddOSDMessage(std::string message, float duration)
 {
-  (void)message;
-  (void)duration;
+#ifdef PS5SX2_ACHIEVEMENTS
+	if (message.starts_with("Achievements"))
+		OrbisNotifyPlain(message.c_str());
+#endif
+	(void)message;
+	(void)duration;
 }
 void AddKeyedOSDMessage(std::string key, std::string message, float duration)
 {
-  (void)key;
-  (void)message;
-  (void)duration;
+#ifdef PS5SX2_ACHIEVEMENTS
+	if (key.starts_with("retroachievements") || message.starts_with("Achievements"))
+		OrbisNotifyPlain(message.c_str());
+#endif
+	(void)key;
+	(void)message;
+	(void)duration;
 }
 void AddIconOSDMessage(std::string key, const char* icon, const std::string_view message, float duration)
 {
-  (void)key;
-  (void)icon;
-  (void)message;
-  (void)duration;
+#ifdef PS5SX2_ACHIEVEMENTS
+	if (key.starts_with("retroachievements") || message.starts_with("Achievements"))
+		OrbisNotifyPlain(std::string(message).c_str());
+#endif
+	(void)key;
+	(void)icon;
+	(void)message;
+	(void)duration;
 }
 void RemoveKeyedOSDMessage(std::string key)
 {
@@ -247,13 +262,20 @@ void CloseProgressDialog(const char* str_id)
 {
   (void)str_id;
 }
-void AddNotification(std::string title, float duration, std::string message, std::string key, std::string text)
+void AddNotification(std::string key, float duration, std::string title, std::string description, std::string badge_path)
 {
-  (void)title;
-  (void)duration;
-  (void)message;
-  (void)key;
-  (void)text;
+#ifdef PS5SX2_ACHIEVEMENTS
+	// The PS5's toast reads the image itself (a /data path showed on a PS5 Pro, 2026-10-05), so a cached badge or
+	// game icon goes along. Unlocks, masteries, the game summary and the login don't come here: Achievements.cpp
+	// sends those itself (PS5Toast), with a web fallback for images not cached yet and the trophy sounds.
+	// (AI-assisted)
+	OrbisNotifyRich(title.c_str(), description.c_str(), OrbisToastIcon(badge_path).c_str());
+#endif
+	(void)title;
+	(void)duration;
+	(void)description;
+	(void)key;
+	(void)badge_path;
 }
 bool InvalidateCachedTexture(const std::string& name)
 {

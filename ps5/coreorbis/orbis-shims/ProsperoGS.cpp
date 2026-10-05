@@ -164,10 +164,30 @@ void GSDumpBase::Transfer(int index, const u8* mem, size_t size)
 #include "common/StringUtil.h"
 #include <climits>
 
+// pr9l (2026-10-05, AI-assisted): a replacement inside the game's one-file pack, <texture folder>/replacements.pak, is named
+// "ps5pak:..." (GSTextureReplacements.cpp, pcsx2/OrbisTexturePak.h) and read from there; any other name is a file. Both
+// loaders below decode from memory. Needs proper testing.
+bool OrbisPakName(const std::string& filename);
+bool OrbisPakRead(const std::string& filename, std::vector<u8>& out);
+static std::optional<std::vector<u8>> OrbisReadReplacement(const std::string& filename)
+{
+  if (!OrbisPakName(filename))
+    return FileSystem::ReadBinaryFile(filename.c_str());
+  std::vector<u8> data;
+  if (!OrbisPakRead(filename, data))
+  {
+    static std::atomic<unsigned> s_reported{0};
+    if (s_reported.fetch_add(1) < 5)
+      OrbisDeferredPrintf("[texrep] couldn't read %s from the pack\n", filename.c_str());
+    return std::nullopt;
+  }
+  return data;
+}
+
 static bool OrbisPNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
 {
   (void)only_base_image; // a PNG holds one level; the mip levels are files of their own
-  std::optional<std::vector<u8>> file = FileSystem::ReadBinaryFile(filename.c_str());
+  std::optional<std::vector<u8>> file = OrbisReadReplacement(filename);
   if (!file || file->empty() || file->size() > static_cast<size_t>(INT_MAX))
     return false;
   int w = 0, h = 0, comp = 0;
@@ -197,7 +217,7 @@ static bool OrbisPNGLoader(const std::string& filename, GSTextureReplacements::R
 // vk-285-113: a DDS file (BC1/2/3/7 or uncompressed) as an RGBA8 replacement with its mip levels.
 static bool OrbisDDSLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
 {
-  std::optional<std::vector<u8>> file = FileSystem::ReadBinaryFile(filename.c_str());
+  std::optional<std::vector<u8>> file = OrbisReadReplacement(filename);
   if (!file || file->empty())
     return false;
   std::vector<OrbisDDS::Image> levels;

@@ -145,7 +145,7 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .recbtn:disabled { background: none; color: #5cf2a0; box-shadow: none; cursor: default; padding: 9px 4px 9px 8px; }
 .file { text-align: center; color: var(--faint); font-size: 12px; margin-top: 12px; }
 /* vk-285-116: the Settings and Controls tabs, a group's line under its title, a list row (the remapping). */
-.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; max-width: 340px; margin: 14px auto 0; padding: 4px;
+.tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; max-width: 480px; margin: 14px auto 0; padding: 4px;
         border-radius: 99px; background: rgba(255,255,255,0.06); border: 1px solid var(--card-line); }
 .tabs button { border: 0; border-radius: 99px; padding: 8px 10px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
                background: none; color: var(--dim); transition: background 0.15s, color 0.15s, box-shadow 0.15s; }
@@ -202,6 +202,19 @@ footer a { color: var(--dim); }
   .wordmark { font-size: 36px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+/* Runtime achievement cards (AI-assisted). */
+.achievement-summary { padding: 18px; color: #5cf2a0; }
+.achievement-row { display: flex; gap: 16px; padding: 16px; margin-top: 10px; }
+.achievement-icon { width: 72px; height: 72px; flex: 0 0 72px; position: relative; background: rgba(255,255,255,0.08); border-radius: 10px; overflow: hidden; }
+.achievement-icon span { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); }
+.achievement-icon img { position: absolute; width: 100%; height: 100%; object-fit: contain; opacity: 0; }
+.achievement-icon img.ready { opacity: 1; }
+.achievement-copy { min-width: 0; }
+.achievement-name { font-weight: 700; overflow-wrap: anywhere; }
+.achievement-status { color: var(--dim); font-size: 13px; margin-top: 8px; }
+.achievement-status.earned { color: #5cf2a0; }
+.btn.active-filter { color: #5cf2a0; border-color: #5cf2a0; }
+@media (max-width: 400px) { .tabs button { font-size: 12px; padding: 8px 4px; } }
 </style>
 </head>
 <body>
@@ -233,7 +246,7 @@ footer a { color: var(--dim); }
     <div class="gametitle" id="gtitle"></div>
     <div class="gameinfo" id="ginfo"></div>
     <button class="all" id="allgames">Settings for all games</button>
-    <div class="tabs" id="tabs"><button data-tab="settings">Settings</button><button data-tab="controls">Controls</button></div>
+    <div class="tabs" id="tabs"><button data-tab="settings">Settings</button><button data-tab="controls">Controls</button><button data-tab="achievements">Achievements</button></div>
 
     <div id="settings"></div>
     <div class="file" id="file"></div>
@@ -348,6 +361,10 @@ const GROUPS = [
       options: [["-1","Auto (PS5)"],["0","Japanese"],["1","English"],["2","French"],["3","Spanish"],["4","German"],["5","Italian"],
                 ["6","Dutch"],["7","Portuguese"]],
       hint: "The language the PS2 tells games. PAL games with several languages start in it; most US games are English only. Auto follows the PS5's language." },
+    // 2026-10-05: the PS2's network adapter (DEV9), on for every game by default (main-boot.cpp).
+    { key: "DEV9/Eth/EthEnable", label: "Network adapter", type: "toggle", def: "true", restart: true, later: "the network adapter",
+      short: "Network %",
+      hint: "The PS2's network adapter, on the PS5's own connection, for online and LAN play (on revival servers such as PS Rewired; their DNS goes in the game's network settings). It costs nothing until a game uses it. Turn it off for a game that misbehaves with it. Takes effect when the game starts." },
   ]},
   // vk-285-113: the box in the top right corner and its frame-rate graph (main-boot.cpp orbis_ps5opts_from, GSRenderer.cpp).
   { title: "On screen", items: [
@@ -447,7 +464,9 @@ let saveTimer = 0;
 let recArmed = 0;        // the Recommended button's wait for its second tap
 let ctlArmed = 0;        // vk-285-116: the controls' reset button's
 let tab = "settings";    // vk-285-116: the tab shown, "settings" or "controls" (kept in this browser)
-try { if (localStorage.getItem("ps5sx2.tab") === "controls") tab = "controls"; } catch (e) {}
+try { const saved = localStorage.getItem("ps5sx2.tab"); if (["controls", "achievements"].includes(saved)) tab = saved; } catch (e) {}
+let achievementData = null, achievementLoading = false, achievementPage = 0, achievementFilter = "all";
+let achievementImageGeneration = 0;
 
 // vk-285-118: no key any more: the console's address is enough (fe_web.cpp refuses other sites' requests instead). An old
 // bookmark's ?t= is dropped from the address bar.
@@ -588,7 +607,128 @@ function recSummary() {
   return bits.length ? bits.join(" · ") : "Follows the settings for all games.";
 }
 
+// Use the console language and catalog overrides, with English fallback (AI-assisted).
+const ACHIEVEMENT_ENGLISH = {
+  "achievements.status_unlocked": "Unlocked",
+  "achievements.status_locked": "Locked",
+  "achievements.title": "Achievements",
+  "achievements.all": "All",
+  "achievements.unlocked": "Unlocked",
+  "achievements.locked": "Locked",
+  "achievements.points": "points",
+  "achievements.refresh": "Refresh",
+  "achievements.previous": "Previous",
+  "achievements.next": "Next",
+  "achievements.loading": "Loading achievements...",
+  "achievements.images": "Loading badge images...",
+  "achievements.empty_filter": "No achievements in this filter.",
+  "achievements.empty": "This game has no published achievements.",
+  "achievements.select_running": "Select the running game to view its achievements.",
+  "achievements.show_running": "Show running game",
+  "achievements.start_game": "Start a game to view its live achievements. Before playing, use the Achievements tab on the game shelf.",
+  "achievements.unavailable": "Achievement browser is unavailable.",
+  "achievements.sign_in": "Sign in to RetroAchievements and start a game.",
+  "achievements.connecting": "Connecting to RetroAchievements...",
+  "achievements.no_data": "No achievement data available for this game.",
+  "achievements.refresh_failed": "Couldn't refresh achievements: ",
+  "achievements.select_game": "Select This game to view its achievements.",
+  "achievements.pending": "Finishing the previous request. Press Triangle to load this game.",
+  "achievements.triangle_refresh": "Triangle: refresh"
+};
+function achievementText(key) {
+  key = "achievements." + key;
+  return state.strings?.[key] || ACHIEVEMENT_ENGLISH[key] || key;
+}
+function applyAchievementLanguage() {
+  document.documentElement.lang = state.language || "en";
+  const button = document.querySelector('[data-tab="achievements"]');
+  if (button) button.textContent = achievementText("title");
+}
+// Live runtime achievements, separate from editable settings (AI-assisted).
+async function refreshAchievements(force = false) {
+  if (tab !== "achievements" || achievementLoading) return;
+  achievementLoading = true;
+  try {
+    const snapshot = await api("/api/achievements");
+    const changed = JSON.stringify(snapshot) !== JSON.stringify(achievementData);
+    achievementData = snapshot;
+    if (tab === "achievements" && data && (changed || force)) renderAchievements();
+  } catch (e) {
+    if (tab === "achievements" && e.message !== "unauthorized") toast(achievementText("refresh_failed") + e.message);
+  } finally { achievementLoading = false; }
+}
+function renderAchievements() {
+  ++achievementImageGeneration;
+  $("file").textContent = "";
+  if (!state.playing || data.id !== state.playing.id) {
+    $("settings").innerHTML = '<div class="sec"><h2>' + esc(achievementText("title")) + '</h2><div class="card empty">' +
+      (state.playing ? esc(achievementText('select_running')) + '<div class="btnrow"><button class="btn" id="achievement-playing">' + esc(achievementText('show_running')) + '</button></div>' :
+        esc(achievementText('start_game'))) + '</div></div>';
+    const button = $("achievement-playing");
+    if (button) button.onclick = () => select(state.playing.id);
+    return;
+  }
+  if (!achievementData || achievementData.playing !== state.playing.id) {
+    $("settings").innerHTML = '<div class="sec"><h2>' + esc(achievementText("title")) + '</h2><div class="card empty">' + esc(achievementText('loading')) + '</div></div>';
+    refreshAchievements(); return;
+  }
+  const all = achievementData.entries;
+  const unlocked = all.filter((entry) => entry.unlocked);
+  const points = all.reduce((sum,entry) => sum + entry.points,0);
+  const earned = unlocked.reduce((sum,entry) => sum + entry.points,0);
+  const entries = all.filter((entry) => achievementFilter === "all" || (achievementFilter === "unlocked") === entry.unlocked);
+  const pages = Math.max(1,Math.ceil(entries.length/12));
+  achievementPage = Math.max(0,Math.min(achievementPage,pages-1));
+  let html = '<div class="sec"><h2>' + esc(achievementData.title || achievementText("title")) + '</h2><div class="card achievement-summary"><div>' +
+    unlocked.length + ' / ' + all.length + ' ' + esc(achievementText('unlocked')) + ' &nbsp; · &nbsp; ' + earned + ' / ' + points + ' ' + esc(achievementText('points')) + '</div>' +
+    '<div class="btnrow"><button class="btn ghost" id="achievement-refresh">' + esc(achievementText('refresh')) + '</button>' +
+    ['all','unlocked','locked'].map((filter) => '<button class="btn ghost' + (filter === achievementFilter ? ' active-filter' : '') +
+      '" data-achievement-filter="' + filter + '">' + esc(achievementText(filter)) + '</button>').join('') + '</div></div>';
+  if (achievementData.message) html += '<div class="empty">' + esc(achievementData.message) + '</div>';
+  if (!entries.length && all.length) html += '<div class="empty">' + esc(achievementText("empty_filter")) + '</div>';
+  for (const entry of entries.slice(achievementPage*12,achievementPage*12+12)) {
+    html += '<div class="card achievement-row"><div class="achievement-icon"><span>RA</span><img alt="" data-achievement-id="' + entry.id +
+      '" data-achievement-unlocked="' + (entry.unlocked ? '1' : '0') + '"></div><div class="achievement-copy"><div class="achievement-name">' + esc(entry.title) +
+      '</div><div class="hint">' + esc(entry.description) + '</div><div class="achievement-status' + (entry.unlocked ? ' earned' : '') + '">' +
+      esc(achievementText(entry.unlocked ? 'status_unlocked' : 'status_locked')) + ' · ' + entry.points + ' ' + esc(achievementText('points')) + '</div></div></div>';
+  }
+  html += '<div class="btnrow center"><button class="btn ghost" id="achievement-prev"' + (achievementPage === 0 ? ' disabled' : '') +
+    '>' + esc(achievementText('previous')) + '</button><span>' + (achievementPage+1) + ' / ' + pages + '</span><button class="btn ghost" id="achievement-next"' +
+    (achievementPage+1 === pages ? ' disabled' : '') + '>' + esc(achievementText('next')) + '</button></div></div>';
+  $("settings").innerHTML = html;
+  $("achievement-refresh").onclick = () => refreshAchievements(true);
+  $("achievement-prev").onclick = () => { --achievementPage; renderAchievements(); };
+  $("achievement-next").onclick = () => { ++achievementPage; renderAchievements(); };
+  document.querySelectorAll('[data-achievement-filter]').forEach((button) => button.onclick = () => {
+    achievementFilter = button.dataset.achievementFilter; achievementPage = 0; renderAchievements();
+  });
+  // Load only the visible page, two images at a time; failed images retain the RA placeholder.
+  const generation = achievementImageGeneration;
+  const images = Array.from(document.querySelectorAll('[data-achievement-id]'));
+  async function nextImage() {
+    const image = images.shift();
+    if (!image || generation !== achievementImageGeneration) return;
+    let advanced = false, attempts = 0;
+    const advance = () => { if (!advanced) { advanced = true; nextImage(); } };
+    image.onload = () => { image.classList.add('ready'); advance(); };
+    image.onerror = () => {
+      if (generation !== achievementImageGeneration) return;
+      image.classList.remove('ready'); advance();
+      setTimeout(() => {
+        if (generation === achievementImageGeneration && image.isConnected) image.src = badgeUrl(image) + '&retry=' + Date.now();
+      },Math.min(5000,1000 * ++attempts));
+    };
+    image.src = badgeUrl(image);
+  }
+  function badgeUrl(image) {
+    return '/api/achievement-badge?id=' + image.dataset.achievementId + '&unlocked=' + image.dataset.achievementUnlocked;
+  }
+  nextImage(); nextImage();
+}
+
 function render() {
+  if (tab === "achievements") { renderAchievements(); return; }
+  ++achievementImageGeneration;
   const isGlobal = data.id === "@global";
   const playingHere = state.playing && state.playing.id === data.id;
   let html = "";
@@ -858,6 +998,7 @@ async function refreshState() {
     const s = await api("/api/state");
     const changed = JSON.stringify(s.playing) !== JSON.stringify(state.playing);
     state = s;
+    applyAchievementLanguage();
     $("build").textContent = s.build;
     if (s.playing) { $("now").classList.add("show"); $("nowtitle").textContent = s.playing.title; $("nowcover").src = cover(s.playing.id); }
     else $("now").classList.remove("show");
@@ -881,6 +1022,7 @@ document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("cli
   clearTimeout(ctlArmed); ctlArmed = 0;
   showTab();
   if (data) render();
+  if (tab === "achievements") refreshAchievements(true);
 }));
 showTab();
 
@@ -927,6 +1069,7 @@ $("discord").addEventListener("click", async () => {
   try {
     const s = await api("/api/state");
     state = s;
+    applyAchievementLanguage();
     $("build").textContent = s.build;
     showTesting(s);
     games = await api("/api/games");
@@ -938,6 +1081,7 @@ $("discord").addEventListener("click", async () => {
   if (i < 0) i = 0;
   requestAnimationFrame(() => { scrollToGame(i, false); if (games[i]) select(games[i].id); else select("@global"); });
   setInterval(refreshState, 5000);
+  setInterval(() => refreshAchievements(), 5000);
 })();
 </script>
 </body>

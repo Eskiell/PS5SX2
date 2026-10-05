@@ -119,6 +119,10 @@ void App::SetWebUrl(const std::string& url, const std::string& shown)
 
 void App::Shutdown()
 {
+	if (m_cfg.game_achievements.cancel)
+		m_cfg.game_achievements.cancel();
+	ClearAchievementBadges();
+	m_account.Close();
 	for (Slot& s : m_slots)
 	{
 		m_renderer->FreeTextureSet(s.set);
@@ -198,7 +202,16 @@ void App::PollCovers()
 void App::Update(double dt, const Input& in)
 {
 	m_time += dt;
+	m_account.Poll(m_cfg.achievements);
+	PollGameAchievements();
 	const float fdt = static_cast<float>(std::min(dt, 0.1));
+
+	// 2026-10-05: the account panel fades in and out, and its keyboard slides up under it (AI-assisted).
+	{
+		const float fade = fdt / 0.16f;
+		m_account_anim = m_account.open ? std::min(1.0f, m_account_anim + fade) : std::max(0.0f, m_account_anim - fade);
+		m_account_kb_anim += ((m_account.open && m_account.editing ? 1.0f : 0.0f) - m_account_kb_anim) * (1.0f - std::exp(-fdt * 16.0f));
+	}
 
 	// vk-285-114: the options sheet slides in and out; while it is open it has the buttons.
 	{
@@ -211,12 +224,43 @@ void App::Update(double dt, const Input& in)
 
 	if (m_launching)
 	{
-		if (m_time - m_launch_time > 0.6)
+		if (m_game_achievements.busy)
+			m_launch_time = m_time;
+		if (m_time - m_launch_time > 0.6 && !m_game_achievements.busy)
 			m_done = true;
+	}
+	else if (m_account.open)
+	{
+		UpdateAccount(in);
+		m_prev = in;
+	}
+	else if (m_sheet_open && m_cfg.achievements.state && in.square && in.l1 && !m_prev.l1 && m_prev.square &&
+	         m_time - m_chord_square_time < kChordWindow)
+	{
+		// pr9n: Square, then L1 while Square is still held: the account chord, not the sheet's This game / All games.
+		CloseSheet();
+		m_sheet_anim = 0;
+		m_account.Open();
+		m_ime_field = -1;
+		m_held = 0;
+		m_prev = in;
 	}
 	else if (m_sheet_open)
 	{
 		UpdateSheet(dt, in);
+		m_prev = in;
+	}
+	else if (m_released && !m_qr_big && m_sheet_anim < 0.05f && m_cfg.achievements.state &&
+	         in.l1 && in.square && !(m_prev.l1 && m_prev.square))
+	{
+		// Handle the account chord before shelf navigation or settings (AI-assisted).
+		// pr9n: L1 pressed first already jumped 5 games: put the selection back.
+		if (m_prev.l1 && !m_prev.square && m_chord_from >= 0 && m_time - m_chord_l1_time < kChordWindow)
+			Step(std::min(m_chord_from, static_cast<int>(m_games.size()) - 1) - m_selected);
+		m_chord_from = -1;
+		m_account.Open();
+		m_ime_field = -1;
+		m_held = 0;
 		m_prev = in;
 	}
 	else
@@ -253,22 +297,28 @@ void App::Update(double dt, const Input& in)
 			else
 				m_held = 0;
 			if (in.l1 && !m_prev.l1)
+			{
+				m_chord_from = m_selected; // pr9n: undone if Square follows (the account chord)
+				m_chord_l1_time = m_time;
 				Sound(Step(-5) ? Sfx::JumpLeft : Sfx::Edge, -0.25f);
+			}
 			if (in.r1 && !m_prev.r1)
 				Sound(Step(5) ? Sfx::JumpRight : Sfx::Edge, 0.25f);
 			if (((in.cross && !m_prev.cross) || (in.options && !m_prev.options)) && !m_games.empty() && !m_qr_big)
 			{
+				if (m_cfg.game_achievements.cancel)
+					m_cfg.game_achievements.cancel();
 				m_launching = true;
 				m_launch_time = m_time;
 				Sound(Sfx::Launch, 0.0f);
 			}
-			// vk-285-118: Triangle shows the QR code large (and Triangle or Circle puts it back).
+			// Triangle keeps the upstream QR view; Circle opens the RA account (AI-assisted).
 			else if (m_qr_big && ((in.triangle && !m_prev.triangle) || (in.circle && !m_prev.circle)))
 			{
 				m_qr_big = false;
 				Sound(Sfx::Move, -0.3f);
 			}
-			else if (!m_qr_big && in.triangle && !m_prev.triangle && m_qr_size > 0 && m_sheet_anim < 0.05f)
+			else if (!m_qr_big && (in.triangle && !m_prev.triangle) && m_qr_size > 0 && m_sheet_anim < 0.05f)
 			{
 				m_qr_big = true;
 				Sound(Sfx::Move, 0.3f);
@@ -277,6 +327,7 @@ void App::Update(double dt, const Input& in)
 			else if (!m_qr_big && in.square && !m_prev.square && m_sheet_anim < 0.05f)
 			{
 				OpenSheet(m_games.empty());
+				m_chord_square_time = m_time; // pr9n: L1 right after makes it the account chord
 				Sound(Sfx::Move, 0.3f);
 			}
 		}
@@ -340,6 +391,8 @@ void App::Pose(float d, float t, Mat4& model, float& brightness) const
 
 void App::Build(FrameDesc& f, const std::string& clock)
 {
+	m_achievement_images.clear();
+	f.ui_images.clear();
 	const float W = static_cast<float>(m_renderer->width()), H = static_cast<float>(m_renderer->height());
 	const float k = H / 2160.0f;
 	const float t = static_cast<float>(m_time);
@@ -347,7 +400,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	// vk-285-114: with the options sheet open on the right, the shelf slides left (the camera moves right), so the
 	// picked case stays in view beside its settings.
 	const float slide = Smoothstep(0.0f, 1.0f, m_sheet_anim);
-	const Vec3 shift(1.45f * slide, 0.0f, 0.0f);
+	const Vec3 shift(1.62f * slide, 0.0f, 0.0f); // 2026-10-05: 1.45 before the sheet widened
 	const Mat4 view = Mat4::LookAt(kEye + shift, kTarget + shift, Vec3(0, 1, 0));
 	f.view_proj = proj * view;
 	f.cam_pos = kEye + shift;
@@ -466,6 +519,13 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	}
 	if (!clock.empty())
 		m_fonts->AddText(ui, clock.c_str(), W - margin, 150.0f * k, 58.0f * k, white, 0.2f, Fonts::Right);
+	if (m_cfg.achievements.state)
+	{
+		std::string label = "RetroAchievements - ";
+		label += m_account.account.saved ? m_account.account.username : Tr(Str::AccountSignIn);
+		m_fonts->AddText(ui, label.c_str(), margin, 290.0f * k, 34.0f * k, dim);
+	}
+	BuildTexturePackActivity(ui, margin, (m_cfg.achievements.state ? 350.0f : 290.0f) * k, k, accent); // 2026-10-05
 
 	// The settings page's QR tile, bottom right (vk-285-50). The code is dark on a light tile, as
 	// cameras expect; neighbouring dark modules are merged into runs and grown by a pixel so the
@@ -556,7 +616,14 @@ void App::Build(FrameDesc& f, const std::string& clock)
 	{
 		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.42f * sheet_e));
 		BuildSheet(ui, W, H, k, accent);
+		f.ui_images = m_achievement_images;
 	}
+
+	// 2026-10-05: the account panel's dim goes here, under the button hints (they are the panel's while it is open); the
+	// panel itself is drawn last (BuildAccount).
+	const float account_e = Smoothstep(0.0f, 1.0f, m_account_anim);
+	if (m_account_anim > 0.001f)
+		Fonts::AddRoundedRect(ui, 0, 0, W, H, 0.0f, Rgba(0.01f, 0.01f, 0.03f, 0.86f * account_e));
 
 	// Button hints.
 	const float hy = H - 88.0f * k, ipx = 64.0f * k, tpx = 40.0f * k;
@@ -584,19 +651,69 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		hx += m_fonts->AddText(ui, label, hx, hy, tpx, dim, 0.1f);
 		hx += 56.0f * k;
 	};
-	if (m_sheet_open || m_sheet_anim > 0.5f)
+	if (m_account.open)
+	{
+		// 2026-10-05: the account panel's buttons (none while the PS5's keyboard is up: it shows its own).
+		const bool on_password = m_account.row == AchievementAccountPanel::RowPassword && !m_account.SignedIn();
+		const char* const show = Tr(m_account.show_password ? Str::HintHidePassword : Str::HintShowPassword);
+		if (m_ime_field >= 0 || m_account.account.busy)
+		{
+			// nothing to press
+		}
+		else if (m_account.editing)
+		{
+			hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
+			hint(icon::Cross, nullptr, Tr(Str::HintSelect));
+			hint(icon::Triangle, nullptr, Tr(Str::HintDelete));
+			if (on_password)
+				hint(icon::Square, nullptr, show);
+			hint(icon::Circle, nullptr, Tr(Str::HintDone));
+		}
+		else
+		{
+			if (m_account.RowCount() > 1)
+				hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
+			const bool field = !m_account.SignedIn() && m_account.row != AchievementAccountPanel::RowSignIn;
+			hint(icon::Cross, nullptr, Tr(field ? Str::HintEdit : Str::HintSelect));
+			if (on_password && !m_account.password.empty())
+				hint(icon::Square, nullptr, show);
+			hint(icon::Circle, nullptr, Tr(Str::HintBack));
+		}
+	}
+	else if ((m_sheet_open || m_sheet_anim > 0.5f) && m_sheet.tab() != kTabAchievements && m_cfg.texture_packs && !m_games.empty() &&
+			 m_sheet_row >= 0 && m_sheet_row < static_cast<int>(m_sheet.rows().size()) &&
+			 m_sheet.rows()[static_cast<size_t>(m_sheet_row)].kind == OptionsSheet::Kind::TexturePack)
+	{
+		// 2026-10-05: the HD texture pack row's buttons, for what it is doing now.
+		using TS = TexturePackStatus::State;
+		const TexturePackStatus st = m_cfg.texture_packs.status(m_games[static_cast<size_t>(m_selected)].serial);
+		const bool busy = st.state == TS::Queued || st.state == TS::Checking || st.state == TS::Downloading || st.state == TS::Verifying ||
+		                  st.state == TS::Unpacking;
+		const bool startable = !st.packs.empty() && (st.state == TS::Available || st.state == TS::Failed || st.state == TS::NeedSpace);
+		hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
+		if (startable && st.packs.size() > 1)
+			hint(icon::DpadLeftRight, nullptr, Tr(Str::HintChange));
+		if (startable || st.state == TS::Unavailable)
+			hint(icon::Cross, nullptr, Tr(Str::HintDownload));
+		if (busy || st.state == TS::Failed || st.state == TS::NeedSpace)
+			hint(icon::Triangle, nullptr, Tr(Str::HintCancel));
+		else if (st.state == TS::Installed && st.ours)
+			hint(icon::Triangle, nullptr, Tr(Str::HintDelete));
+		hint(icon::Circle, nullptr, Tr(Str::HintBack));
+	}
+	else if (m_sheet_open || m_sheet_anim > 0.5f)
 	{
 		// vk-285-114: the options sheet's buttons.
 		hint(icon::DpadUpDown, nullptr, Tr(Str::HintMove));
 		hint(icon::DpadLeftRight, nullptr, Tr(Str::HintChange));
-		hint(icon::Triangle, nullptr, Tr(Str::HintReset));
+		hint(icon::Triangle, nullptr, m_sheet.tab() == kTabAchievements ? Tr(Str::AchievementRefresh) : Tr(Str::HintReset));
 		hint(icon::Circle, nullptr, Tr(Str::HintBack));
 		if (n > 0)
 		{
 			const std::string scope = std::string(Tr(Str::SheetThisGame)) + " / " + Tr(Str::SheetAllGames);
 			hint("#L1", "#R1", scope.c_str());
 		}
-		const std::string tabs = std::string(Tr(Str::HintSettings)) + " / " + Tr(Str::SheetControls); // vk-285-116
+		const std::string tabs = std::string(Tr(Str::HintSettings)) + " / " + Tr(Str::SheetControls) + " / " + Tr(Str::Achievements); // vk-285-116
 		hint("#L2", "#R2", tabs.c_str());
 	}
 	else
@@ -610,8 +727,10 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			hint("#L1", "#R1", Tr(Str::HintJump));
 		}
 		hint(icon::Square, nullptr, Tr(Str::HintSettings)); // vk-285-114
+		if (m_cfg.achievements.state && !m_qr_big)
+			hint("#L1", icon::Square, "RetroAchievements");
 		if (m_qr_size > 0)
-			hint(icon::Triangle, nullptr, Tr(m_qr_big ? Str::HintBack : Str::HintQrCode)); // vk-285-118
+			hint(icon::Triangle, nullptr, Tr(m_qr_big ? Str::HintBack : Str::HintQrCode));
 	}
 
 	std::string status = m_covers ? m_covers->Status() : std::string();
@@ -623,7 +742,7 @@ void App::Build(FrameDesc& f, const std::string& clock)
 		if (!m_cfg.build_tag.empty())
 			status = m_cfg.build_tag + "   \xC2\xB7   " + status;
 	}
-	if (sheet_e < 0.5f)
+	if (sheet_e < 0.5f && account_e < 0.5f)
 		m_fonts->AddText(ui, status.c_str(), W - margin, hy, 36.0f * k, faint, 0.1f, Fonts::Right);
 
 	// Test build 1 (vk-285-55): testing builds say so across the middle of the shelf, over the
@@ -681,6 +800,8 @@ void App::Build(FrameDesc& f, const std::string& clock)
 			}
 		FadeRange(ui, begin, ui.size(), e);
 	}
+	if (m_account_anim > 0.001f)
+		BuildAccount(ui, W, H, k, accent);
 }
 
 // ---- vk-285-114: the options sheet ---------------------------------------------------------------------------------
@@ -690,96 +811,99 @@ void App::Build(FrameDesc& f, const std::string& clock)
 
 namespace
 {
-// `text` in lines of at most `width` pixels at `px`, at most `max_lines` (the last one ends in an ellipsis when cut).
-std::vector<std::string> Wrap(const Fonts& fonts, const std::string& text, float px, float width, int max_lines)
-{
-	std::vector<std::string> lines;
-	std::string line, word;
-	auto flush_word = [&]() {
-		if (word.empty())
-			return;
-		const std::string tryline = line.empty() ? word : line + " " + word;
-		if (!line.empty() && fonts.Measure(tryline.c_str(), px) > width)
-		{
-			lines.push_back(line);
-			line = word;
-		}
-		else
-			line = tryline;
-		word.clear();
-	};
-	for (char c : text)
+	// `text` in lines of at most `width` pixels at `px`, at most `max_lines` (the last one ends in an ellipsis when cut).
+	std::vector<std::string> Wrap(const Fonts& fonts, const std::string& text, float px, float width, int max_lines)
 	{
-		if (c == ' ' || c == '\n')
-		{
-			flush_word();
-			if (c == '\n' && !line.empty())
+		std::vector<std::string> lines;
+		std::string line, word;
+		auto flush_word = [&]() {
+			if (word.empty())
+				return;
+			const std::string tryline = line.empty() ? word : line + " " + word;
+			if (!line.empty() && fonts.Measure(tryline.c_str(), px) > width)
 			{
 				lines.push_back(line);
-				line.clear();
+				line = word;
 			}
-		}
-		else
-			word += c;
-	}
-	flush_word();
-	if (!line.empty())
-		lines.push_back(line);
-	if (static_cast<int>(lines.size()) > max_lines)
-	{
-		lines.resize(static_cast<size_t>(max_lines));
-		std::string& last = lines.back();
-		while (!last.empty() && fonts.Measure((last + "\xE2\x80\xA6").c_str(), px) > width)
+			else
+				line = tryline;
+			word.clear();
+		};
+		for (char c : text)
 		{
-			// Whole UTF-8 characters only (the summaries have middle dots).
-			while (last.size() > 1 && (static_cast<unsigned char>(last.back()) & 0xC0) == 0x80)
-				last.pop_back();
-			last.pop_back();
+			if (c == ' ' || c == '\n')
+			{
+				flush_word();
+				if (c == '\n' && !line.empty())
+				{
+					lines.push_back(line);
+					line.clear();
+				}
+			}
+			else
+				word += c;
 		}
-		last += "\xE2\x80\xA6";
+		flush_word();
+		if (!line.empty())
+			lines.push_back(line);
+		if (static_cast<int>(lines.size()) > max_lines)
+		{
+			lines.resize(static_cast<size_t>(max_lines));
+			std::string& last = lines.back();
+			while (!last.empty() && fonts.Measure((last + "\xE2\x80\xA6").c_str(), px) > width)
+			{
+				// Whole UTF-8 characters only (the summaries have middle dots).
+				while (last.size() > 1 && (static_cast<unsigned char>(last.back()) & 0xC0) == 0x80)
+					last.pop_back();
+				last.pop_back();
+			}
+			last += "\xE2\x80\xA6";
+		}
+		return lines;
 	}
-	return lines;
-}
 
-// The shortest string with `text`'s start that fits `width` (an ellipsis marks the cut).
-std::string Fit(const Fonts& fonts, std::string text, float px, float width)
-{
-	if (fonts.Measure(text.c_str(), px) <= width)
-		return text;
-	while (!text.empty() && fonts.Measure((text + "\xE2\x80\xA6").c_str(), px) > width)
+	// The shortest string with `text`'s start that fits `width` (an ellipsis marks the cut).
+	std::string Fit(const Fonts& fonts, std::string text, float px, float width)
 	{
-		text.pop_back();
-		while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80) // a whole UTF-8 character
+		if (fonts.Measure(text.c_str(), px) <= width)
+			return text;
+		while (!text.empty() && fonts.Measure((text + "\xE2\x80\xA6").c_str(), px) > width)
+		{
 			text.pop_back();
-		if (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0xC0)
-			text.pop_back();
+			while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80) // a whole UTF-8 character
+				text.pop_back();
+			if (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0xC0)
+				text.pop_back();
+		}
+		return text + "\xE2\x80\xA6";
 	}
-	return text + "\xE2\x80\xA6";
-}
 
-// vk-285-116: "<symbol>  Cross" (fe_options.cpp Sym: a PromptFont glyph, two spaces, the name) into its two parts.
-bool SplitSymbol(const std::string& s, std::string& glyph, std::string& name)
-{
-	if (s.size() < 6 || static_cast<unsigned char>(s[0]) != 0xE2 || s.compare(3, 2, "  ") != 0)
-		return false;
-	glyph = s.substr(0, 3);
-	name = s.substr(5);
-	return true;
-}
-// The symbol's size against the text's, and how far its baseline drops (of the text's size) to sit centred on the text.
-constexpr float kSymbolScale = 1.35f, kSymbolDrop = 0.12f;
+	// vk-285-116: "<symbol>  Cross" (fe_options.cpp Sym: a PromptFont glyph, two spaces, the name) into its two parts.
+	bool SplitSymbol(const std::string& s, std::string& glyph, std::string& name)
+	{
+		if (s.size() < 6 || static_cast<unsigned char>(s[0]) != 0xE2 || s.compare(3, 2, "  ") != 0)
+			return false;
+		glyph = s.substr(0, 3);
+		name = s.substr(5);
+		return true;
+	}
+	// The symbol's size against the text's, and how far its baseline drops (of the text's size) to sit centred on the text.
+	constexpr float kSymbolScale = 1.35f, kSymbolDrop = 0.12f;
 
-// The sheet's measures, in 2160-line pixels (scaled by k when drawn).
-constexpr float kSheetW = 1260.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f;
-constexpr float kSheetListTop = 308.0f;  // from the sheet's top (vk-285-117: the top is one line shorter)
-constexpr float kSheetHelpH = 352.0f;    // the help box at the bottom
-constexpr float kRowH = 94.0f, kHeaderH = 76.0f;
+	// The sheet's measures, in 2160-line pixels (scaled by k when drawn).
+	constexpr float kSheetW = 1520.0f, kSheetTop = 206.0f, kSheetBottomGap = 222.0f; // 2026-10-05: 1260 before
+	constexpr float kSheetListTop = 308.0f; // from the sheet's top (vk-285-117: the top is one line shorter)
+	constexpr float kSheetHelpH = 352.0f; // the help box at the bottom
+	constexpr float kRowH = 100.0f, kHeaderH = 84.0f; // 2026-10-05: 94 and 76 before
 } // namespace
 
 void App::OpenSheet(bool global)
 {
 	const GameInfo* g = (!global && !m_games.empty()) ? &m_games[static_cast<size_t>(m_selected)] : nullptr;
 	m_sheet_global = g == nullptr;
+	if (m_sheet_global && m_cfg.game_achievements.cancel)
+		m_cfg.game_achievements.cancel();
+	m_sheet.SetTexturePackRow(static_cast<bool>(m_cfg.texture_packs)); // 2026-10-05
 	m_sheet.Open(m_cfg.options, g);
 	m_sheet_saved_at_open = 0;
 	if (!m_sheet_open)
@@ -795,6 +919,8 @@ void App::OpenSheet(bool global)
 	m_sheet_scroll_target = 0;
 	m_sheet_status.clear();
 	m_sheet_held_v = m_sheet_held_h = 0;
+	if (m_sheet.tab() == kTabAchievements)
+		LoadGameAchievements();
 	std::printf("[options] sheet for %s (%s)\n", m_sheet.title().c_str(), m_sheet.file_label().c_str());
 	std::fflush(stdout);
 }
@@ -803,13 +929,18 @@ void App::OpenSheet(bool global)
 void App::SheetTab(int tab)
 {
 	m_sheet.SetTab(tab);
+	if (tab != kTabAchievements && m_cfg.game_achievements.cancel)
+		m_cfg.game_achievements.cancel();
+	if (tab == kTabAchievements)
+		LoadGameAchievements();
 	m_sheet_row = 0;
 	const auto& rows = m_sheet.rows();
 	while (m_sheet_row < static_cast<int>(rows.size()) && !m_sheet.Selectable(rows[static_cast<size_t>(m_sheet_row)]))
 		m_sheet_row++;
 	m_sheet_scroll = m_sheet_scroll_target = 0;
 	m_sheet_held_v = m_sheet_held_h = 0;
-	std::printf("[options] %s tab\n", tab == kTabControls ? "controls" : "settings");
+	std::printf("[options] %s tab\n", tab == kTabAchievements ? "achievements" : tab == kTabControls ? "controls" :
+																									   "settings");
 	std::fflush(stdout);
 }
 
@@ -829,6 +960,8 @@ void App::CloseSheet()
 	if (!m_sheet_open)
 		return;
 	m_sheet_open = false;
+	if (m_cfg.game_achievements.cancel)
+		m_cfg.game_achievements.cancel();
 	if (m_sheet.saved() > 0)
 		RefreshBadges();
 	std::printf("[options] sheet closed (%d change(s) saved)\n", m_sheet.saved());
@@ -856,12 +989,26 @@ void App::UpdateSheet(double dt, const Input& in)
 	auto pressed = [&](bool now, bool before) { return now && !before; };
 	const double now = m_time;
 	const auto& rows = m_sheet.rows();
-	if (rows.empty())
+	if (rows.empty() && m_sheet.tab() != kTabAchievements)
 	{
 		CloseSheet();
 		return;
 	}
 	m_sheet_row = std::max(0, std::min(m_sheet_row, static_cast<int>(rows.size()) - 1));
+
+	// 2026-10-05: a texture pack that came in while the sheet is open: the game's file has Texture replacements on now.
+	if (m_cfg.texture_packs && !m_sheet_global && !m_games.empty())
+	{
+		const std::string& serial = m_games[static_cast<size_t>(m_selected)].serial;
+		const TexturePackStatus::State st = m_cfg.texture_packs.status(serial).state;
+		if (serial == m_texpack_seen_serial && st != m_texpack_seen && st == TexturePackStatus::State::Installed)
+		{
+			m_sheet.Reload();
+			RefreshBadges();
+		}
+		m_texpack_seen_serial = serial;
+		m_texpack_seen = st;
+	}
 
 	if (pressed(in.circle, m_prev.circle) || pressed(in.square, m_prev.square) || pressed(in.options, m_prev.options))
 	{
@@ -885,16 +1032,35 @@ void App::UpdateSheet(double dt, const Input& in)
 		return;
 	}
 	// vk-285-116: L2 the settings, R2 the controls.
+	// pr9n (AI-assisted), PR #9 review item 11: no wrapping. From Settings, L2 went round to Achievements, which starts
+	// network traffic; the tabs stop at either end now.
 	if (pressed(in.l2, m_prev.l2) || pressed(in.r2, m_prev.r2))
 	{
-		const int tab = pressed(in.r2, m_prev.r2) ? kTabControls : kTabSettings;
+		const int direction = pressed(in.r2, m_prev.r2) ? 1 : -1;
+		const int tab = std::max(0, std::min(kTabCount - 1, m_sheet.tab() + direction));
 		if (tab != m_sheet.tab())
 		{
 			SheetTab(tab);
-			Sound(tab == kTabControls ? Sfx::JumpRight : Sfx::JumpLeft, tab == kTabControls ? 0.3f : -0.1f);
+			Sound(direction > 0 ? Sfx::JumpRight : Sfx::JumpLeft, direction > 0 ? 0.3f : -0.1f);
 		}
 		else
 			Sound(Sfx::Edge, 0.3f);
+		return;
+	}
+
+	if (m_sheet.tab() == kTabAchievements)
+	{
+		const int direction = in.up ? -1 : in.down ? 1 :
+			                                         0;
+		const bool fresh = (in.up && !m_prev.up) || (in.down && !m_prev.down);
+		if (direction && (fresh || m_time >= m_sheet_next_repeat))
+		{
+			m_achievement_row = std::clamp(m_achievement_row + direction, 0,
+				std::max(0, static_cast<int>(m_game_achievements.entries.size()) - 1));
+			m_sheet_next_repeat = m_time + (fresh ? 0.32 : 0.10);
+		}
+		if (pressed(in.triangle, m_prev.triangle) && !m_game_achievements.busy)
+			LoadGameAchievements();
 		return;
 	}
 
@@ -934,6 +1100,14 @@ void App::UpdateSheet(double dt, const Input& in)
 		Sound(changed ? Sfx::Move : Sfx::Edge, 0.3f);
 	};
 
+	// 2026-10-05: the HD texture pack row runs on its own (left and right pick a pack, Cross fetches it, Triangle twice
+	// cancels or deletes).
+	if (row.kind == OptionsSheet::Kind::TexturePack)
+	{
+		UpdateTexturePackRow(in, now);
+		return;
+	}
+
 	// Left and right change the value (not on the action rows, which Cross runs).
 	const bool action = row.kind == OptionsSheet::Kind::Recommended || row.kind == OptionsSheet::Kind::ResetAll;
 	const int h = in.left ? -1 : in.right ? 1 : 0;
@@ -961,6 +1135,352 @@ void App::UpdateSheet(double dt, const Input& in)
 	}
 }
 
+// ---- 2026-10-05: the sheet's HD texture pack row (AI-assisted; see fe_texpacks.h) -----------------------------------
+// The sheet's other rows are in English; so is this one. The shelf's line and the popup are in the PS5's language.
+
+void App::UpdateTexturePackRow(const Input& in, double now)
+{
+	using State = TexturePackStatus::State;
+	auto pressed = [&](bool down, bool before) { return down && !before; };
+	if (m_games.empty())
+		return;
+	const GameInfo& g = m_games[static_cast<size_t>(m_selected)];
+	const TexturePackStatus s = m_cfg.texture_packs.status(g.serial);
+	const int n = static_cast<int>(s.packs.size());
+	// The pack shown first: the one a download was for, else the first.
+	auto found = m_texpack_pick.find(g.serial);
+	if (found == m_texpack_pick.end())
+		found = m_texpack_pick.emplace(g.serial, s.job_pack >= 0 ? s.job_pack : 0).first;
+	int& pick = found->second;
+	pick = n > 0 ? std::clamp(pick, 0, n - 1) : 0;
+	const bool can_start = n > 0 && (s.state == State::Available || s.state == State::Failed || s.state == State::NeedSpace);
+	auto status = [&](const std::string& text) {
+		m_sheet_status = text;
+		m_sheet_status_time = now;
+	};
+
+	const int h = in.left ? -1 : in.right ? 1 : 0;
+	if (h != 0 && ((in.left && !m_prev.left) || (in.right && !m_prev.right)))
+	{
+		if (can_start && n > 1)
+		{
+			pick = (pick + h + n) % n;
+			Sound(Sfx::Move, 0.3f);
+		}
+		else
+			Sound(Sfx::Edge, 0.3f);
+		return;
+	}
+	if (pressed(in.cross, m_prev.cross))
+	{
+		bool ok = false;
+		if (s.state == State::Unavailable && m_cfg.texture_packs.retry)
+		{
+			m_cfg.texture_packs.retry();
+			status("Looking on archive.org again");
+			ok = true;
+		}
+		else if (can_start)
+		{
+			const std::string path = m_cfg.options.settings_dir + "/" + g.stem + ".ini";
+			const std::string header = "# " + g.title + (g.serial.empty() ? std::string() : " (" + g.serial + ")");
+			ok = m_cfg.texture_packs.begin(g.serial, pick, path, header, g.title);
+			const TexturePack& p = s.packs[static_cast<size_t>(pick)];
+			status(ok ? "Asked for " + p.label + " (" + FormatBytes(p.bytes) + ")" : "Couldn't start the download");
+		}
+		Sound(ok ? Sfx::Move : Sfx::Edge, 0.3f);
+		return;
+	}
+	if (pressed(in.triangle, m_prev.triangle))
+	{
+		const bool busy = s.state == State::Queued || s.state == State::Checking || s.state == State::Downloading ||
+		                  s.state == State::Verifying || s.state == State::Unpacking;
+		const bool cancel = busy || s.state == State::Failed || s.state == State::NeedSpace;
+		const bool remove = s.state == State::Installed && s.ours;
+		if (!cancel && !remove)
+		{
+			Sound(Sfx::Edge, 0.3f);
+			return;
+		}
+		if (m_texpack_armed != g.serial || now > m_texpack_armed_until)
+		{
+			m_texpack_armed = g.serial;
+			m_texpack_armed_until = now + 4.0;
+			status(remove ? "Press Triangle again to delete this pack" : "Press Triangle again to cancel the download");
+			Sound(Sfx::Move, 0.3f);
+			return;
+		}
+		m_texpack_armed.clear();
+		const bool ok = remove ? m_cfg.texture_packs.remove(g.serial) : m_cfg.texture_packs.cancel(g.serial);
+		status(!ok ? std::string("Couldn't do that now") : remove ? "Deleting the pack" : "Download cancelled");
+		Sound(ok ? Sfx::Move : Sfx::Edge, 0.3f);
+	}
+}
+
+std::string App::TexturePackValue(const TexturePackStatus& s, int pick) const
+{
+	using State = TexturePackStatus::State;
+	const int n = static_cast<int>(s.packs.size());
+	auto percent = [&] {
+		const int pc = s.total > 0 ? static_cast<int>(100.0 * static_cast<double>(s.done) / static_cast<double>(s.total)) : 0;
+		return std::to_string(std::clamp(pc, 0, 100)) + "%";
+	};
+	switch (s.state)
+	{
+		case State::Loading: return "Looking on archive.org";
+		case State::Unavailable: return "Can't reach archive.org";
+		case State::None: return "None on archive.org";
+		case State::Available:
+		{
+			const TexturePack& p = s.packs[static_cast<size_t>(std::clamp(pick, 0, n - 1))];
+			return (n > 1 ? p.label : std::string("Download")) + "  \xC2\xB7  " + FormatBytes(p.bytes);
+		}
+		case State::Queued: return "Waiting";
+		case State::Checking: return "Checking " + percent();
+		case State::Downloading:
+		{
+			std::string v = percent() + "  \xC2\xB7  " + FormatBytes(s.done) + " of " + FormatBytes(s.total);
+			if (s.rate > 1000)
+				v += "  \xC2\xB7  " + FormatBytes(static_cast<uint64_t>(s.rate)) + "/s";
+			return v;
+		}
+		case State::Verifying: return "Verifying";
+		case State::Unpacking: return "Unpacking " + percent();
+		case State::Installing: return "Installing";
+		case State::Installed:
+			if (s.ours)
+				return "Installed";
+			return s.where.compare(0, 8, "/mnt/usb") == 0 ? "On a USB drive" : "Your own pack";
+		case State::Removing: return "Deleting";
+		case State::Failed: return "Failed";
+		case State::NeedSpace: return "Needs more space";
+	}
+	return {};
+}
+
+std::string App::TexturePackHelp(const TexturePackStatus& s, int pick, const std::string& serial) const
+{
+	using State = TexturePackStatus::State;
+	const int n = static_cast<int>(s.packs.size());
+	const std::string folder = "textures/" + serial;
+	const std::string carry_on = " It downloads while the shelf is open: a game pauses it, and it carries on when you're back here.";
+	switch (s.state)
+	{
+		case State::Loading: return "Looking up this game in archive.org's PCSX2 HD Texture Packs.";
+		case State::Unavailable: return s.message + ". Cross looks again.";
+		case State::None:
+			return "archive.org's PCSX2 HD Texture Packs has none for " + serial + ". A pack you put in " + folder +
+			       "/replacements still works (turn Texture replacements on).";
+		case State::Available:
+		{
+			const TexturePack& p = s.packs[static_cast<size_t>(std::clamp(pick, 0, n - 1))];
+			std::string h = "Cross downloads " + p.label + " (" + FormatBytes(p.bytes) +
+			                (p.files > 0 ? ", " + std::to_string(p.files) + " files" : std::string()) +
+			                ") from archive.org's PCSX2 HD Texture Packs, puts it in " + folder +
+			                " and turns Texture replacements on for this game." + carry_on;
+			if (n > 1)
+				h += " Left and right pick another version.";
+			return h;
+		}
+		case State::Queued: return "Waiting for the pack before it." + carry_on + " Triangle twice cancels it.";
+		case State::Checking: return "Checking what was downloaded before." + carry_on + " Triangle twice cancels it.";
+		case State::Downloading: return "Downloading from archive.org." + carry_on + " Triangle twice cancels it.";
+		case State::Verifying: return "Checking the download against archive.org's checksum.";
+		case State::Unpacking: return "Unpacking into " + folder + ". Triangle twice cancels it.";
+		case State::Installing: return "Moving the pack into " + folder + ".";
+		case State::Installed:
+			if (s.ours)
+			{
+				std::string name = s.installed.empty() ? std::string("The pack") : s.installed;
+				if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".rar") == 0 || name.compare(name.size() - 4, 4, ".zip") == 0))
+					name.resize(name.size() - 4);
+				return name + " is in " + folder + ". It shows in the game while Texture replacements is on (installing turned it on). "
+				                                   "Triangle twice deletes it.";
+			}
+			return "There is a texture pack for this game in " + s.where + " already, so archive.org's isn't offered.";
+		case State::Removing: return "Deleting the pack's files.";
+		case State::Failed: return s.message + ". Cross tries again; Triangle twice forgets it.";
+		case State::NeedSpace: return s.message + ". Cross tries again once there's room; Triangle twice forgets it.";
+	}
+	return {};
+}
+
+// The shelf's line while a pack is on its way: "HD textures: God of War · 37%", and a thin bar under it.
+void App::BuildTexturePackActivity(std::vector<UiVertex>& ui, float x, float y, float k, uint32_t accent)
+{
+	using State = TexturePackStatus::State;
+	if (!m_cfg.texture_packs || !m_cfg.texture_packs.activity)
+		return;
+	const TexturePackActivity a = m_cfg.texture_packs.activity();
+	if (!a.active)
+		return;
+	const bool measured = a.state == State::Checking || a.state == State::Downloading || a.state == State::Unpacking;
+	std::string line = std::string(Tr(Str::HdTextures)) + ": " + a.title;
+	if (measured)
+		line += "  \xC2\xB7  " + std::to_string(static_cast<int>(a.fraction * 100.0)) + "%";
+	if (a.waiting > 0)
+		line += "  (+" + std::to_string(a.waiting) + ")";
+	const float px = 30.0f * k, w = 460.0f * k;
+	m_fonts->AddText(ui, Fit(*m_fonts, line, px, 900.0f * k).c_str(), x, y, px, Rgba(0.72f, 0.69f, 0.82f), 0.1f);
+	Fonts::AddRoundedRect(ui, x, y + 16.0f * k, w, 6.0f * k, 3.0f * k, Rgba(1, 1, 1, 0.10f));
+	if (measured && a.fraction > 0)
+		Fonts::AddRoundedRect(ui, x, y + 16.0f * k, std::max(6.0f * k, w * static_cast<float>(a.fraction)), 6.0f * k, 3.0f * k, accent);
+}
+
+// Achievement data and textures are owned by the shelf, never by the VM. (AI-assisted)
+void App::ClearAchievementBadges()
+{
+	for (auto& badge : m_achievement_badges)
+	{
+		m_renderer->FreeTextureSet(badge.set);
+		m_renderer->DestroyTexture(badge.texture);
+	}
+	m_achievement_badges.clear();
+}
+void App::LoadGameAchievements()
+{
+	if (m_sheet_global || m_games.empty())
+		return;
+	if (m_cfg.game_achievements.load)
+		m_cfg.game_achievements.load(m_games[static_cast<size_t>(m_selected)].path);
+	m_achievement_row = 0;
+}
+void App::PollGameAchievements()
+{
+	if (!m_cfg.game_achievements.state)
+		return;
+	auto state = m_cfg.game_achievements.state();
+	if (state.revision != m_game_achievements.revision)
+	{
+		bool changed = state.path != m_game_achievements.path || state.entries.size() != m_game_achievements.entries.size();
+		if (!changed)
+			for (size_t i = 0; i < state.entries.size(); ++i)
+				if (state.entries[i].id != m_game_achievements.entries[i].id ||
+					state.entries[i].unlocked != m_game_achievements.entries[i].unlocked)
+				{
+					changed = true;
+					break;
+				}
+		if (changed)
+		{
+			ClearAchievementBadges();
+			m_achievement_row = 0;
+		}
+		m_game_achievements = std::move(state);
+	}
+	m_achievement_badges.resize(m_game_achievements.entries.size());
+	// At most one decode/upload per frame, keeping the controller responsive.
+	for (size_t i = 0; i < m_achievement_badges.size(); ++i)
+	{
+		auto& badge = m_achievement_badges[i];
+		const auto& entry = m_game_achievements.entries[i];
+		if (std::abs(static_cast<int>(i) - m_achievement_row) > 20)
+		{
+			if (badge.texture)
+			{
+				m_renderer->FreeTextureSet(badge.set);
+				m_renderer->DestroyTexture(badge.texture);
+				badge = {};
+			}
+			continue;
+		}
+		if (!entry.image || badge.attempted)
+			continue;
+		badge.attempted = true;
+		CoverImage decoded;
+		if (CoverService::Decode(*entry.image, 64, decoded, 512))
+		{
+			badge.texture = m_renderer->CreateTexture(decoded.width, decoded.height, VK_FORMAT_R8G8B8A8_UNORM, decoded.rgba.data());
+			if (badge.texture)
+				badge.set = m_renderer->AllocTextureSet(badge.texture, badge.texture, badge.texture);
+		}
+		break;
+	}
+}
+// 2026-10-05 (AI-assisted; with the wider sheet): the list a size up, as the other tabs' rows (bigger badges, titles and
+// descriptions, seven rows in place of eight), the focused row lit with the cover's colour at its edge as theirs.
+void App::BuildGameAchievements(std::vector<UiVertex>& ui, float x, float y, float width, float height, float k, uint32_t accent)
+{
+	const uint32_t white = Rgba(1, 1, 1), muted = Rgba(0.7f, 0.7f, 0.8f), green = Rgba(0.45f, 1, 0.65f);
+	std::string message;
+	if (m_sheet_global || m_games.empty())
+		message = Tr(Str::AchievementSelectGame);
+	else if (!m_cfg.game_achievements.state)
+		message = Tr(Str::AchievementUnavailable);
+	else if (m_game_achievements.path != m_games[static_cast<size_t>(m_selected)].path)
+		message = Tr(Str::AchievementPending);
+	else if (m_game_achievements.entries.empty())
+		message = m_game_achievements.message;
+	if (!message.empty())
+	{
+		float baseline = y + 80 * k;
+		for (const auto& line : Wrap(*m_fonts, message, 36 * k, width, 4))
+		{
+			m_fonts->AddText(ui, line.c_str(), x, baseline, 36 * k, muted);
+			baseline += 48 * k;
+		}
+		return;
+	}
+	unsigned unlocked = 0, points = 0, earned = 0;
+	for (const auto& entry : m_game_achievements.entries)
+	{
+		points += entry.points;
+		if (entry.unlocked)
+		{
+			++unlocked;
+			earned += entry.points;
+		}
+	}
+	const std::string summary = std::to_string(unlocked) + " / " + std::to_string(m_game_achievements.entries.size()) +
+		                        std::string(" ") + Tr(Str::AchievementUnlocked) + "   |   " + std::to_string(earned) + " / " + std::to_string(points) + " " + Tr(Str::AchievementPoints);
+	m_fonts->AddText(ui, Fit(*m_fonts, m_game_achievements.title, 38 * k, width).c_str(), x, y + 44 * k, 38 * k, white);
+	m_fonts->AddText(ui, summary.c_str(), x, y + 96 * k, 30 * k, green);
+	constexpr float list_top = 132, row_height = 160, box_height = 148; // 115, 142 and 130 before
+	const int visible = std::max(1, static_cast<int>((height / k - list_top - 60) / row_height));
+	const int count = static_cast<int>(m_game_achievements.entries.size());
+	const int first = std::clamp(m_achievement_row - visible / 2, 0, std::max(0, count - visible));
+	for (int i = first; i < std::min(count, first + visible); ++i)
+	{
+		const auto& entry = m_game_achievements.entries[static_cast<size_t>(i)];
+		const float top = y + (list_top + (i - first) * row_height) * k;
+		const bool focused = i == m_achievement_row;
+		Fonts::AddRoundedRect(ui, x - 12 * k, top, width + 24 * k, box_height * k, 24 * k,
+			focused ? Rgba(1, 1, 1, 0.11f) : Rgba(1, 1, 1, 0.035f));
+		if (focused)
+			Fonts::AddRoundedRect(ui, x + 2 * k, top + 26 * k, 6 * k, (box_height - 52) * k, 3 * k, accent);
+		const auto& badge = m_achievement_badges[static_cast<size_t>(i)];
+		const float bx = x + 24 * k, by = top + 18 * k, size = 112 * k;
+		if (badge.set)
+		{
+			const uint32_t first_vertex = static_cast<uint32_t>(ui.size());
+			const UiVertex a{bx, by, 0, 0, white, 0, 0, 0, 2}, b{bx + size, by, 1, 0, white, 0, 0, 0, 2};
+			const UiVertex c{bx + size, by + size, 1, 1, white, 0, 0, 0, 2}, d{bx, by + size, 0, 1, white, 0, 0, 0, 2};
+			ui.insert(ui.end(), {a, b, c, a, c, d});
+			m_achievement_images.push_back({first_vertex, 6, badge.set});
+		}
+		else
+		{
+			Fonts::AddRoundedRect(ui, bx, by, size, size, 14 * k, Rgba(1, 1, 1, 0.1f));
+			m_fonts->AddText(ui, "RA", bx + size * 0.5f, by + size * 0.5f + 11 * k, 30 * k, muted, 0.2f, Fonts::Center);
+		}
+		const float tx = bx + size + 32 * k, room = x + width - tx - 8 * k;
+		const std::string status = (entry.unlocked ? Tr(Str::AchievementStatusUnlocked) : Tr(Str::AchievementStatusLocked)) + std::string("  |  ") +
+			                       std::to_string(entry.points) + " " + Tr(Str::AchievementPoints);
+		const float status_width = m_fonts->Measure(status.c_str(), 27 * k);
+		m_fonts->AddText(ui, Fit(*m_fonts, entry.title, 35 * k, room - status_width - 32 * k).c_str(), tx, top + 52 * k, 35 * k, white);
+		m_fonts->AddText(ui, status.c_str(), x + width - 8 * k, top + 52 * k, 27 * k, entry.unlocked ? green : muted, 0.2f, Fonts::Right);
+		float baseline = top + 96 * k;
+		for (const auto& line : Wrap(*m_fonts, entry.description, 29 * k, room, 2))
+		{
+			m_fonts->AddText(ui, line.c_str(), tx, baseline, 29 * k, muted);
+			baseline += 36 * k;
+		}
+	}
+	const std::string footer = std::to_string(count ? m_achievement_row + 1 : 0) + " / " + std::to_string(count) +
+		                       "   |   " + (m_game_achievements.busy ? Tr(Str::AchievementImages) : Tr(Str::AchievementTriangleRefresh));
+	m_fonts->AddText(ui, footer.c_str(), x, y + height - 10 * k, 28 * k, muted);
+}
+
 void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
 {
 	const float e = Smoothstep(0.0f, 1.0f, m_sheet_anim);
@@ -979,75 +1499,75 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 	Fonts::AddRoundedRect(ui, x, y, sw, sh, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f)); // the shelf's text must not show through
 
 	const float cx = x + 64 * k, inner = sw - 128 * k;
-	// vk-285-117 (AI-assisted): a calmer top (Spyros: the title touched what was above and below it): the title alone on the
-	// first line with room around it; under it this game / all games (L1 / R1) on the left and the Settings / Controls tabs
-	// (L2 / R2) on the right, the shown tab white and underlined in the cover's colour. The file's name is gone (the
-	// settings page shows it). A long translation shrinks the line (to three quarters) rather than overlapping.
+	// 2026-10-05 (AI-assisted; Spyros: "the square ui in general is a little cramped"): a wider sheet, and its top in two
+	// lines that each have room: the title with this game / all games (L1 / R1) on the right, then the tabs (L2 / R2) as one
+	// strip across the sheet, the shown tab a white pill as the shown scope. vk-285-117's title kept its line to itself;
+	// the strip below now holds the three tabs that used to share a line with the scope.
+	const char* const this_label = Tr(Str::SheetThisGame);
+	const char* const all_label = Tr(Str::SheetAllGames);
+	const float ph = 60 * k, ppx = 30 * k, pad = 50 * k, pgap = 14 * k;
+	const float this_w = m_fonts->Measure(this_label, ppx) + pad, all_w = m_fonts->Measure(all_label, ppx) + pad;
+	const float pills_w = this_w + pgap + all_w;
 	{
+		const float room = inner - pills_w - 48 * k;
 		float px = 52 * k;
 		const std::string& t = m_sheet.title();
-		while (px > 40 * k && m_fonts->Measure(t.c_str(), px) > inner)
+		while (px > 40 * k && m_fonts->Measure(t.c_str(), px) > room)
 			px -= 2 * k;
-		m_fonts->AddText(ui, Fit(*m_fonts, t, px, inner).c_str(), cx, y + 112 * k, px, hi, 0.55f);
+		m_fonts->AddText(ui, Fit(*m_fonts, t, px, room).c_str(), cx, y + 112 * k, px, hi, 0.55f);
 	}
 	{
-		const float py = y + 184 * k, ph = 60 * k; // 56 px between the title's descenders and the pills
-		const bool controls = m_sheet.tab() == kTabControls;
-		const char* const this_label = Tr(Str::SheetThisGame);
-		const char* const all_label = Tr(Str::SheetAllGames);
-		const char* const settings_label = Tr(Str::HintSettings);
-		const char* const controls_label = Tr(Str::SheetControls);
-		float f = 1.0f, pills_w = 0, tabs_w = 0;
-		auto widths = [&]() {
-			const float ppx = 30 * k * f, tpx = 34 * k * f, kpx = 24 * k * f;
-			pills_w = m_fonts->Measure(this_label, ppx) + m_fonts->Measure(all_label, ppx) + 2 * 50 * k * f + 14 * k * f;
-			tabs_w = m_fonts->Measure("L2", kpx) + m_fonts->Measure("R2", kpx) + 2 * 20 * k * f + 2 * 22 * k * f + 40 * k * f +
-			         m_fonts->Measure(settings_label, tpx) + m_fonts->Measure(controls_label, tpx);
-		};
-		widths();
-		while (f > 0.76f && pills_w + tabs_w + 40 * k > inner)
-		{
-			f -= 0.05f;
-			widths();
-		}
-		const float ppx = 30 * k * f, pad = 50 * k * f, tpx = 34 * k * f, kpx = 24 * k * f;
-		float px = cx;
-		auto pill = [&](const char* label, bool on, bool enabled) {
-			const float w = m_fonts->Measure(label, ppx) + pad;
+		const float py = y + 66 * k;
+		float px = cx + inner - pills_w;
+		auto pill = [&](const char* label, float w, bool on, bool enabled) {
 			if (on)
 				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, 0.92f));
 			else
 				Fonts::AddRoundedRect(ui, px, py, w, ph, ph * 0.5f, Rgba(1, 1, 1, enabled ? 0.10f : 0.04f));
-			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k * f, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo),
+			m_fonts->AddText(ui, label, px + w * 0.5f, py + ph * 0.5f + 11 * k, ppx, on ? Rgba(0.07f, 0.06f, 0.16f) : (enabled ? mid : lo),
 				0.5f, Fonts::Center);
-			px += w + 14 * k * f;
+			px += w + pgap;
 		};
-		pill(this_label, !m_sheet_global, !m_games.empty());
-		pill(all_label, m_sheet_global, true);
-		const float base = py + ph * 0.5f + 12 * k * f;
-		float tx = x + sw - 64 * k - tabs_w;
-		auto key_pill = [&](const char* name) {
-			const float kw = m_fonts->Measure(name, kpx) + 20 * k * f, kh = 38 * k * f;
-			Fonts::AddRoundedRect(ui, tx, py + (ph - kh) * 0.5f, kw, kh, 10 * k * f, Rgba(1, 1, 1, 0.82f));
-			m_fonts->AddText(ui, name, tx + kw * 0.5f, py + ph * 0.5f + 9 * k * f, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
-			tx += kw;
+		pill(this_label, this_w, !m_sheet_global, !m_games.empty());
+		pill(all_label, all_w, m_sheet_global, true);
+	}
+	{
+		// The tab strip: [L2] Settings | Controls | Achievements [R2], each tab a third of the room between the keys.
+		const float ty = y + 168 * k, th = 74 * k, kpx = 24 * k, tpx = 32 * k;
+		Fonts::AddRoundedRect(ui, cx, ty, inner, th, th * 0.5f, Rgba(1, 1, 1, 0.05f));
+		const float kh = 40 * k;
+		auto key_pill = [&](const char* name, float kx) {
+			const float kw = m_fonts->Measure(name, kpx) + 20 * k;
+			Fonts::AddRoundedRect(ui, kx, ty + (th - kh) * 0.5f, kw, kh, 10 * k, Rgba(1, 1, 1, 0.82f));
+			m_fonts->AddText(ui, name, kx + kw * 0.5f, ty + th * 0.5f + 9 * k, kpx, Rgba(0.08f, 0.08f, 0.14f), 0.6f, Fonts::Center);
+			return kw;
 		};
-		auto tab = [&](const char* label, bool on) {
-			const float w = m_fonts->Measure(label, tpx);
-			m_fonts->AddText(ui, label, tx, base, tpx, on ? hi : lo, on ? 0.5f : 0.3f);
+		const float l2 = key_pill("L2", cx + 16 * k);
+		const float r2w = m_fonts->Measure("R2", kpx) + 20 * k;
+		key_pill("R2", cx + inner - 16 * k - r2w);
+		const float sx0 = cx + 16 * k + l2 + 14 * k, sx1 = cx + inner - 16 * k - r2w - 14 * k;
+		const float seg = (sx1 - sx0) / 3.0f;
+		const int shown = m_sheet.tab() == kTabControls ? 1 : m_sheet.tab() == kTabAchievements ? 2 : 0;
+		const char* const names[3] = {Tr(Str::HintSettings), Tr(Str::SheetControls), Tr(Str::Achievements)};
+		for (int t = 0; t < 3; t++)
+		{
+			const float sx = sx0 + t * seg;
+			const bool on = t == shown;
 			if (on)
-				Fonts::AddRoundedRect(ui, tx, base + 12 * k * f, w, 5 * k * f, 2.5f * k * f, accent);
-			tx += w;
-		};
-		key_pill("L2");
-		tx += 22 * k * f;
-		tab(settings_label, !controls);
-		tx += 40 * k * f;
-		tab(controls_label, controls);
-		tx += 22 * k * f;
-		key_pill("R2");
+				Fonts::AddRoundedRect(ui, sx + 4 * k, ty + 7 * k, seg - 8 * k, th - 14 * k, (th - 14 * k) * 0.5f, Rgba(1, 1, 1, 0.92f));
+			const std::string label = Fit(*m_fonts, names[t], tpx, seg - 36 * k);
+			m_fonts->AddText(ui, label.c_str(), sx + seg * 0.5f, ty + th * 0.5f + 11 * k, tpx, on ? Rgba(0.07f, 0.06f, 0.16f) : mid,
+				on ? 0.5f : 0.3f, Fonts::Center);
+		}
 	}
 	Fonts::AddRoundedRect(ui, cx, y + 280 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
+
+	if (m_sheet.tab() == kTabAchievements)
+	{
+		BuildGameAchievements(ui, cx, y + 310 * k, inner, sh - 370 * k, k, accent);
+		FadeRange(ui, begin, ui.size(), e);
+		return;
+	}
 
 	// The rows: a list that scrolls to keep the focused row in view.
 	const auto& rows = m_sheet.rows();
@@ -1101,7 +1621,7 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 			Fonts::AddRoundedRect(ui, bx + 14 * k, ry + 24 * k, 6 * k, bh - 48 * k, 3 * k, accent);
 		}
 		const float mid_y = ry + bh * 0.5f + 13 * k; // the text's baseline, centred in the row
-		const float lpx = 38 * k, vpx = 36 * k;
+		const float lpx = 40 * k, vpx = 38 * k; // 2026-10-05: 38 and 36 before
 		const bool action = r.kind == OptionsSheet::Kind::Recommended || r.kind == OptionsSheet::Kind::ResetAll;
 
 		std::string value = m_sheet.Value(r);
@@ -1112,8 +1632,25 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 			value.clear();
 		if (r.kind == OptionsSheet::Kind::NewCard && focused)
 			value += "  \xC2\xB7  Create";
+		// 2026-10-05: the HD texture pack row shows the pack, the download's progress or the installed pack.
+		const bool pack_row = r.kind == OptionsSheet::Kind::TexturePack && m_cfg.texture_packs && !m_games.empty();
+		TexturePackStatus pack;
+		bool pick_arrows = true;
+		if (pack_row)
+		{
+			const std::string& serial = m_games[static_cast<size_t>(m_selected)].serial;
+			pack = m_cfg.texture_packs.status(serial);
+			const auto it = m_texpack_pick.find(serial);
+			const int pick = it != m_texpack_pick.end() ? it->second : std::max(0, pack.job_pack);
+			value = TexturePackValue(pack, pick);
+			using TS = TexturePackStatus::State;
+			pick_arrows = pack.packs.size() > 1 && (pack.state == TS::Available || pack.state == TS::Failed || pack.state == TS::NeedSpace);
+			if (m_texpack_armed == serial && m_time <= m_texpack_armed_until)
+				value = "Press again";
+		}
+		const bool arrows = focused && !action && pick_arrows;
 
-		const float value_room = bw * 0.46f;
+		const float value_room = bw * (pack_row ? 0.68f : 0.46f); // 2026-10-05: the pack row's label is short, its value long
 		// vk-285-116: a label or a value that starts with a button's symbol ("<glyph>  Cross", the Controls tab): the symbol
 		// a size up, the label's in a slot of its own so the names line up.
 		std::string lglyph, lname, vglyph, vname;
@@ -1134,12 +1671,17 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 			uint32_t vc = from == OptionsSheet::From::Own ? own : mid;
 			if (armed || (action && focused))
 				vc = own;
-			const float vx = bx + bw - 44 * k - (focused && !action ? 30 * k : 0.0f);
+			if (pack_row)
+			{
+				using TS = TexturePackStatus::State;
+				vc = pack.state == TS::Installed ? own : (pack.state == TS::Failed || pack.state == TS::NeedSpace) ? Rgba(1.0f, 0.62f, 0.60f) : mid;
+			}
+			const float vx = bx + bw - 44 * k - (arrows ? 30 * k : 0.0f);
 			float vw = m_fonts->AddText(ui, shown.c_str(), vx, mid_y, vpx, vc, 0.5f, Fonts::Right);
 			if (vsym && vglyph != icon::Blank)
 				vw += 14 * k + m_fonts->AddText(ui, vglyph.c_str(), vx - vw - 14 * k, mid_y + kSymbolDrop * vpx, vpx * kSymbolScale, vc, 0.5f,
 								   Fonts::Right);
-			if (focused && !action)
+			if (arrows)
 			{
 				// The arrows either side of a value that left and right change.
 				m_fonts->AddText(ui, "\xE2\x80\xB9", vx - vw - 26 * k, mid_y + 1 * k, 44 * k, hi, 0.4f, Fonts::Center);
@@ -1148,6 +1690,19 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 			// A dot beside a value this file sets itself (not what it follows).
 			if (from == OptionsSheet::From::Own && !action && !focused)
 				Fonts::AddRoundedRect(ui, vx - vw - 30 * k, mid_y - 18 * k, 12 * k, 12 * k, 6 * k, own);
+		}
+		// 2026-10-05: a pack on its way: a thin bar along the row's foot.
+		if (pack_row && pack.total > 0)
+		{
+			using TS = TexturePackStatus::State;
+			if (pack.state == TS::Checking || pack.state == TS::Downloading || pack.state == TS::Unpacking)
+			{
+				const float fx = bx + 48 * k, fw = bw - 92 * k, fy = ry + bh - 16 * k;
+				const float f = std::clamp(static_cast<float>(pack.done) / static_cast<float>(pack.total), 0.0f, 1.0f);
+				Fonts::AddRoundedRect(ui, fx, fy, fw, 5 * k, 2.5f * k, Rgba(1, 1, 1, 0.10f));
+				if (f > 0)
+					Fonts::AddRoundedRect(ui, fx, fy, std::max(5 * k, fw * f), 5 * k, 2.5f * k, accent);
+			}
 		}
 	}
 	// A hint that there is more above or below.
@@ -1160,12 +1715,20 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 	Fonts::AddRoundedRect(ui, cx, list_bottom + 44 * k, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
 	if (m_sheet_row >= 0 && m_sheet_row < static_cast<int>(rows.size()))
 	{
-		const std::string help = m_sheet.Help(rows[static_cast<size_t>(m_sheet_row)]);
-		float hy = list_bottom + 110 * k;
-		for (const std::string& line : Wrap(*m_fonts, help, 31 * k, inner, 4))
+		const OptionsSheet::Row& focus_row = rows[static_cast<size_t>(m_sheet_row)];
+		std::string help = m_sheet.Help(focus_row);
+		if (focus_row.kind == OptionsSheet::Kind::TexturePack && m_cfg.texture_packs && !m_games.empty())
 		{
-			m_fonts->AddText(ui, line.c_str(), cx, hy, 31 * k, mid, 0.1f);
-			hy += 44 * k;
+			const std::string& serial = m_games[static_cast<size_t>(m_selected)].serial;
+			const TexturePackStatus pack = m_cfg.texture_packs.status(serial);
+			const auto it = m_texpack_pick.find(serial);
+			help = TexturePackHelp(pack, it != m_texpack_pick.end() ? it->second : std::max(0, pack.job_pack), serial);
+		}
+		float hy = list_bottom + 110 * k;
+		for (const std::string& line : Wrap(*m_fonts, help, 32 * k, inner, 4))
+		{
+			m_fonts->AddText(ui, line.c_str(), cx, hy, 32 * k, mid, 0.1f);
+			hy += 46 * k;
 		}
 	}
 	if (!m_sheet_status.empty() && m_time - m_sheet_status_time < 3.0)
@@ -1176,5 +1739,290 @@ void App::BuildSheet(std::vector<UiVertex>& ui, float W, float H, float k, uint3
 	}
 
 	FadeRange(ui, begin, ui.size(), Clamp(e * 1.4f, 0.0f, 1.0f));
+}
+// ---- 2026-10-05: the RetroAchievements account panel (L1 + Square), redesigned (AI-assisted) -------------------------
+// Spyros: "we gotta redesign the ra login screen, it now looks trash. use the shell keyboard and make the ui for the inputs
+// match our current ui". The panel now has the options sheet's look: a centred panel with its shadow, edge and body over a
+// dimmed shelf, the fields drawn as the sheet's rows (the focused one lit, the cover's colour at its edge), and a white
+// pill for the button in focus. Cross on a field opens the PS5's own keyboard (TextEntryService) or, where the app can't
+// open it, the panel's keyboard, which slides up under the panel. While the PS5's keyboard is up it has the controller.
+
+void App::UpdateAccount(const Input& in)
+{
+	using Panel = AchievementAccountPanel;
+	auto pressed = [](bool now, bool before) { return now && !before; };
+	if (m_ime_field >= 0)
+	{
+		std::string text;
+		const int r = m_cfg.text_entry.poll ? m_cfg.text_entry.poll(text) : -1;
+		if (r != 0)
+		{
+			if (r > 0)
+			{
+				m_account.SetField(m_ime_field, text);
+				// As the panel's Done: on to the next field, then to Sign in.
+				if (m_ime_field < Panel::RowSignIn)
+					m_account.row = m_ime_field + 1;
+			}
+			m_ime_field = -1;
+		}
+		std::fill(text.begin(), text.end(), '\0'); // it may hold the password
+		return;
+	}
+	m_account.Move(pressed(in.right, m_prev.right) - pressed(in.left, m_prev.left),
+		pressed(in.down, m_prev.down) - pressed(in.up, m_prev.up));
+	if (pressed(in.circle, m_prev.circle))
+		m_account.Back();
+	else if (pressed(in.triangle, m_prev.triangle))
+		m_account.Erase();
+	else if (pressed(in.square, m_prev.square))
+	{
+		if (!m_account.SignedIn() && m_account.row == Panel::RowPassword)
+			m_account.TogglePasswordVisibility();
+	}
+	else if (pressed(in.cross, m_prev.cross) && m_account.Accept(m_cfg.achievements, m_time))
+	{
+		// A field: the PS5's keyboard if the app can open it, the panel's otherwise.
+		const int field = m_account.row;
+		const bool password = field == Panel::RowPassword;
+		if (m_cfg.text_entry.open &&
+			m_cfg.text_entry.open(Tr(password ? Str::AccountPassword : Str::AccountUsername), m_account.Field(field), password,
+				password ? Panel::MaxPassword : Panel::MaxUsername))
+			m_ime_field = field;
+		else
+			m_account.StartKeyboard();
+	}
+}
+
+void App::BuildAccount(std::vector<UiVertex>& ui, float W, float H, float k, uint32_t accent)
+{
+	using Panel = AchievementAccountPanel;
+	const float e = Smoothstep(0.0f, 1.0f, m_account_anim);
+	// (The shelf behind is dimmed in Build, under the button hints, so far that its covers and titles don't compete.)
+	const size_t begin = ui.size();
+
+	const uint32_t hi = Rgba(1, 1, 1), mid = Rgba(0.74f, 0.72f, 0.84f), lo = Rgba(0.52f, 0.50f, 0.64f);
+	const uint32_t own = Rgba(Mix(m_glow[0], 1.0f, 0.45f), Mix(m_glow[1], 1.0f, 0.45f), Mix(m_glow[2], 1.0f, 0.45f));
+	const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f); // text on a white pill
+	const AchievementAccountState& acc = m_account.account;
+	const bool signed_in = m_account.SignedIn();
+	const bool busy = acc.busy;
+
+	// The panel's size: the header, then the two fields and Sign in, or the account and Sign out.
+	const float pw = 1760 * k, inner = pw - 2 * 88 * k;
+	const float intro_px = 32 * k, intro_lh = 46 * k, note_px = 32 * k, note_lh = 46 * k;
+	// Signed in, the header says who ("Signed in as <name>", the name in the cover's colour: the format's words either
+	// side of its %s), and the body only what that means and Sign out.
+	const bool show_account = signed_in && !busy;
+	std::vector<std::string> intro_lines, note_lines;
+	std::string signed_in_before, signed_in_after;
+	if (show_account)
+	{
+		const std::string format = Tr(Str::AccountSignedIn);
+		const size_t at = format.find("%s");
+		signed_in_before = format.substr(0, at);
+		signed_in_after = at == std::string::npos ? std::string() : format.substr(at + 2);
+		intro_lines.emplace_back(); // one line, drawn in parts
+		note_lines = Wrap(*m_fonts, Tr(Str::AccountSignedInNote), note_px, inner, 3);
+	}
+	else
+		intro_lines = Wrap(*m_fonts, Tr(busy ? Str::AccountSigningIn : Str::AccountIntro), intro_px, inner, 2);
+	const float header_h = 210 * k + intro_lines.size() * intro_lh; // the separator's place
+	const float field_block = 52 * k + 116 * k + 46 * k;             // a field's label, box and the gap after it
+	const float body_h = signed_in ? 226 * k + note_lines.size() * note_lh : 2 * field_block + 210 * k;
+	const float ph = header_h + 40 * k + body_h;
+	const float kb_h = 5 * 108 * k + 4 * 16 * k + 2 * 48 * k + 64 * k; // the panel's keyboard (BuildAccountKeyboard)
+	const float kbe = Smoothstep(0.0f, 1.0f, m_account_kb_anim);
+	const float centred = (H - ph) * 0.5f - 40 * k;
+	const float raised = std::max(150 * k, H - 200 * k - kb_h - 40 * k - ph); // room for the keyboard under it
+	const float px = (W - pw) * 0.5f, py = centred + (raised - centred) * kbe;
+	const float cx = px + 88 * k;
+
+	Fonts::AddRoundedRect(ui, px - 6 * k, py + 10 * k, pw + 12 * k, ph + 12 * k, 48 * k, Rgba(0, 0, 0, 0.35f));
+	Fonts::AddRoundedRect(ui, px - 2 * k, py - 2 * k, pw + 4 * k, ph + 4 * k, 44 * k, Rgba(1, 1, 1, 0.16f));
+	Fonts::AddRoundedRect(ui, px, py, pw, ph, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f));
+
+	m_fonts->AddText(ui, "RetroAchievements", cx, py + 124 * k, 60 * k, hi, 0.55f);
+	float iy = py + 194 * k;
+	if (show_account)
+	{
+		const float apx = 36 * k;
+		const float name_room = inner - m_fonts->Measure(signed_in_before.c_str(), apx) - m_fonts->Measure(signed_in_after.c_str(), apx);
+		float tx = cx + m_fonts->AddText(ui, signed_in_before.c_str(), cx, iy, apx, hi, 0.15f);
+		tx += m_fonts->AddText(ui, Fit(*m_fonts, acc.username, apx, name_room).c_str(), tx, iy, apx, own, 0.5f);
+		m_fonts->AddText(ui, signed_in_after.c_str(), tx, iy, apx, hi, 0.15f);
+	}
+	else
+		for (const std::string& line : intro_lines)
+		{
+			m_fonts->AddText(ui, line.c_str(), cx, iy, intro_px, mid, 0.15f);
+			iy += intro_lh;
+		}
+	const float sep = py + header_h;
+	Fonts::AddRoundedRect(ui, cx, sep, inner, 2 * k, 0, Rgba(1, 1, 1, 0.12f));
+
+	// A small "<button> label" on the right of a field, in the hint bar's words.
+	auto field_hint = [&](float right, float baseline, const char* glyph, const char* label) {
+		const float tpx = 30 * k;
+		const float w = m_fonts->AddText(ui, label, right, baseline, tpx, mid, 0.1f, Fonts::Right);
+		m_fonts->AddText(ui, glyph, right - w - 12 * k, baseline + 0.12f * tpx, tpx * 1.35f, mid, 0.1f, Fonts::Right);
+		return w + 12 * k + m_fonts->Measure(glyph, tpx * 1.35f);
+	};
+	// A pill button: white with dark text when focused, faint otherwise (the sheet's this game / all games pills).
+	auto button = [&](float x0, float y0, const char* label, bool focused, bool enabled, uint32_t focused_text) {
+		const float bpx = 36 * k, bh = 96 * k;
+		const float bw = std::max(440 * k, m_fonts->Measure(label, bpx) + 140 * k);
+		if (focused && enabled)
+			Fonts::AddRoundedRect(ui, x0, y0, bw, bh, bh * 0.5f, Rgba(1, 1, 1, 0.92f));
+		else
+			Fonts::AddRoundedRect(ui, x0, y0, bw, bh, bh * 0.5f, Rgba(1, 1, 1, enabled ? 0.10f : 0.04f));
+		m_fonts->AddText(ui, label, x0 + bw * 0.5f, y0 + bh * 0.5f + 13 * k, bpx,
+			focused && enabled ? focused_text : (enabled ? mid : lo), 0.5f, Fonts::Center);
+	};
+
+	float y = sep + 40 * k;
+	if (!signed_in)
+	{
+		const char* const labels[2] = {Tr(Str::AccountUsername), Tr(Str::AccountPassword)};
+		const char* const hints[2] = {Tr(Str::AccountUsernameHint), Tr(Str::AccountPasswordHint)};
+		const bool caret_on = std::fmod(m_time, 1.0) < 0.6;
+		for (int f = 0; f < 2; f++)
+		{
+			const bool focused = m_account.row == f && !busy;
+			const bool typing = (m_account.editing && m_account.row == f) || m_ime_field == f;
+			// The label, as the sheet's group headers.
+			std::string upper = labels[f];
+			for (char& c : upper)
+				c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+			m_fonts->AddText(ui, upper.c_str(), cx, y + 36 * k, 26 * k, lo, 0.45f);
+			const float by = y + 52 * k, bh = 116 * k, bx = px + 48 * k, bw = pw - 96 * k;
+			// The box: an edge, the body (lit when focused), the cover's colour at the edge of the focused one.
+			Fonts::AddRoundedRect(ui, bx, by, bw, bh, 28 * k, Rgba(1, 1, 1, focused ? 0.24f : 0.10f));
+			Fonts::AddRoundedRect(ui, bx + 2 * k, by + 2 * k, bw - 4 * k, bh - 4 * k, 26 * k,
+				focused ? Rgba(0.105f, 0.108f, 0.170f) : Rgba(0.062f, 0.066f, 0.125f));
+			if (focused)
+				Fonts::AddRoundedRect(ui, bx + 14 * k, by + 26 * k, 6 * k, bh - 52 * k, 3 * k, accent);
+			const float base = by + bh * 0.5f + 14 * k, vpx = 40 * k;
+			const std::string& value = m_account.Field(f);
+			// What's typed (dots for a hidden password), or the field's hint in the low colour.
+			float hint_w = 0;
+			if (focused && !typing)
+			{
+				const float right = bx + bw - 44 * k;
+				if (f == Panel::RowPassword && !value.empty())
+					hint_w = field_hint(right, base, icon::Square,
+								 Tr(m_account.show_password ? Str::HintHidePassword : Str::HintShowPassword)) + 40 * k;
+				hint_w += field_hint(right - hint_w, base, icon::Cross, Tr(Str::HintEdit)) + 40 * k;
+			}
+			const float room = bw - 96 * k - hint_w;
+			std::string shown;
+			if (f == Panel::RowPassword && !m_account.show_password)
+				for (size_t i = 0; i < value.size() && i < 64; i++)
+					shown += "\xE2\x80\xA2"; // a bullet per character
+			else
+				shown = value;
+			float tx = bx + 48 * k;
+			if (shown.empty() && !typing)
+				m_fonts->AddText(ui, Fit(*m_fonts, hints[f], vpx, room).c_str(), tx, base, vpx, lo, 0.2f);
+			else
+			{
+				// Typing: the text's end stays in view, so a long one shows its last characters.
+				while (!shown.empty() && m_fonts->Measure(shown.c_str(), vpx) > room - 30 * k)
+				{
+					size_t cut = 1;
+					while (cut < shown.size() && (static_cast<unsigned char>(shown[cut]) & 0xC0) == 0x80)
+						cut++;
+					shown.erase(0, cut);
+				}
+				tx += m_fonts->AddText(ui, shown.c_str(), tx, base, vpx, hi, 0.2f);
+				if (typing && caret_on)
+					Fonts::AddRoundedRect(ui, tx + 6 * k, by + 30 * k, 4 * k, bh - 60 * k, 2 * k, accent);
+			}
+			y = by + bh + 46 * k;
+		}
+		// What the last sign-in said (a failure in a warm red), then Sign in.
+		if (!acc.message.empty() && !busy)
+			m_fonts->AddText(ui, Fit(*m_fonts, acc.message, 30 * k, inner).c_str(), cx, y + 6 * k, 30 * k,
+				acc.authenticated ? own : Rgba(1.0f, 0.62f, 0.60f), 0.15f);
+		const char* const sign_in = busy ? Tr(Str::AccountSigningIn) : Tr(Str::AccountSignIn);
+		button(cx, y + 50 * k, sign_in, m_account.row == Panel::RowSignIn || busy, m_account.CanSignIn() || busy, ink);
+	}
+	else
+	{
+		float ny = y + 50 * k;
+		for (const std::string& line : note_lines)
+		{
+			m_fonts->AddText(ui, line.c_str(), cx, ny, note_px, mid, 0.1f);
+			ny += note_lh;
+		}
+		const bool armed = m_account.SignOutArmed(m_time);
+		button(cx, ny + 8 * k, armed ? Tr(Str::AccountSignOutAgain) : Tr(Str::AccountSignOut), !busy, !busy,
+			armed ? Rgba(0.55f, 0.16f, 0.20f) : ink);
+	}
+	FadeRange(ui, begin, ui.size(), e);
+
+	if (m_account_kb_anim > 0.01f)
+	{
+		const size_t kb_begin = ui.size();
+		const float ky = py + ph + 40 * k + (1.0f - kbe) * 120 * k;
+		BuildAccountKeyboard(ui, px, ky, pw, k);
+		FadeRange(ui, kb_begin, ui.size(), e * kbe);
+	}
+}
+
+// The panel's own keyboard (where the app can't open the PS5's): a page of four rows of keys and the function row, in
+// the panel's look; the focused key is a white pill with dark text, as the focused button.
+void App::BuildAccountKeyboard(std::vector<UiVertex>& ui, float x, float y, float w, float k)
+{
+	using Panel = AchievementAccountPanel;
+	const uint32_t hi = Rgba(1, 1, 1), lo = Rgba(0.52f, 0.50f, 0.64f);
+	const uint32_t ink = Rgba(0.07f, 0.06f, 0.16f);
+	const float key_w = 152 * k, key_h = 108 * k, gap = 16 * k, pad = 48 * k;
+	const float grid_w = Panel::Columns * key_w + (Panel::Columns - 1) * gap;
+	const float h = 5 * key_h + 4 * gap + 2 * pad + 64 * k;
+	Fonts::AddRoundedRect(ui, x - 6 * k, y + 10 * k, w + 12 * k, h + 12 * k, 48 * k, Rgba(0, 0, 0, 0.35f));
+	Fonts::AddRoundedRect(ui, x - 2 * k, y - 2 * k, w + 4 * k, h + 4 * k, 44 * k, Rgba(1, 1, 1, 0.16f));
+	Fonts::AddRoundedRect(ui, x, y, w, h, 42 * k, Rgba(0.045f, 0.050f, 0.105f, 0.985f));
+
+	// The field being typed into, and the page.
+	const bool password = m_account.row == Panel::RowPassword;
+	std::string title = Tr(password ? Str::AccountPassword : Str::AccountUsername);
+	for (char& c : title)
+		c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+	const float gx = x + (w - grid_w) * 0.5f;
+	m_fonts->AddText(ui, title.c_str(), gx, y + pad + 26 * k, 26 * k, lo, 0.45f);
+	static const char* const kPageNames[Panel::Pages] = {"abc", "ABC", "#+="};
+	m_fonts->AddText(ui, kPageNames[m_account.page], gx + grid_w, y + pad + 26 * k, 26 * k, lo, 0.45f, Fonts::Right);
+
+	const float top = y + pad + 64 * k;
+	auto key = [&](float kx, float ky, float kw, const char* label, bool focused, bool function) {
+		Fonts::AddRoundedRect(ui, kx, ky, kw, key_h, 22 * k,
+			focused ? Rgba(1, 1, 1, 0.92f) : Rgba(1, 1, 1, function ? 0.12f : 0.07f));
+		const float lpx = function ? 34 * k : 46 * k;
+		m_fonts->AddText(ui, label, kx + kw * 0.5f, ky + key_h * 0.5f + lpx * 0.36f, lpx, focused ? ink : hi, function ? 0.4f : 0.3f,
+			Fonts::Center);
+	};
+	for (int r = 0; r < Panel::CharRows; r++)
+	{
+		const int n = Panel::RowKeys(m_account.page, r);
+		const float row_x = gx + (Panel::Columns - n) * 0.5f * (key_w + gap);
+		for (int c = 0; c < n; c++)
+		{
+			const char text[2] = {Panel::PageRows[m_account.page][r][c], '\0'};
+			key(row_x + c * (key_w + gap), top + r * (key_h + gap), key_w, text, m_account.key_row == r && m_account.key_col == c,
+				false);
+		}
+	}
+	const char* const fn_labels[Panel::FnCount] = {m_account.page == 0 ? "ABC" : "abc", m_account.page == 2 ? "abc" : "#+=",
+		Tr(Str::KeySpace), Tr(Str::HintDelete), Tr(Str::HintDone)};
+	float fx = gx;
+	const float fy = top + Panel::CharRows * (key_h + gap);
+	for (int c = 0; c < Panel::FnCount; c++)
+	{
+		// A function key spans its width in keys, with the gaps between them.
+		const float fw = Panel::FnWidth[c] * (key_w + gap) - gap;
+		key(fx, fy, fw, fn_labels[c], m_account.key_row == Panel::FnRow && m_account.key_col == c, true);
+		fx += fw + gap;
+	}
 }
 } // namespace fe

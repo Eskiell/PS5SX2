@@ -68,7 +68,7 @@ CXXFLAGS := -Wall -g -O3 -DNDEBUG -std=c++20 -march=znver2 -msse4.1 -mavx2 -mno-
   -I$(RYML)/src \
   -I$(RYML)/ext/c4core.src \
   -I$(PCSX2)/3rdparty/vulkan/include -I$(SHADERC_INCLUDE) \
-  -DENABLE_VULKAN=1 -DORBIS_VULKAN=1
+  -DENABLE_VULKAN=1 -DORBIS_VULKAN=1 -DPS5SX2_ACHIEVEMENTS=1
 
 RYML_SRCS := $(RYML)/src/c4/yml/common.cpp \
   $(RYML)/src/c4/yml/emit_buf.cpp \
@@ -297,6 +297,20 @@ LZ4_CSRCS := $(PS5_THIRD)/lz4/lz4.c
 CSO_INCLUDES := -I$(PS5_THIRD)/lz4
 C_SRCS := $(C_SRCS) $(LZ4_CSRCS)
 
+# 2026-10-05 (AI-assisted): libarchive's reading side (RAR 4 and 5, zip), for the HD texture packs (fe_texpacks.cpp):
+# archive.org's packs are RAR 5 files. ps5/third_party/README.md says what is vendored and how config.h was made.
+LIBARCHIVE_CSRCS := $(wildcard $(PS5_THIRD)/libarchive/libarchive/*.c)
+LIBARCHIVE_INCLUDES := -I$(PS5_THIRD)/libarchive/libarchive
+C_SRCS := $(C_SRCS) $(LIBARCHIVE_CSRCS)
+
+# 2026-10-05 (AI-assisted): mbedTLS 3.6.7, a TLS 1.2 client, for the frontend's own HTTPS (fe_https.cpp): the texture
+# packs' downloads, which the console's libSceHttp2 can't make after the jailbreak. ps5/third_party/mbedtls/port has the
+# config and the list of the library's sources it compiles (files.mk).
+include $(PS5_THIRD)/mbedtls/port/files.mk
+MBEDTLS_CSRCS := $(addprefix $(PS5_THIRD)/mbedtls/library/,$(MBEDTLS_FILES)) $(PS5_THIRD)/mbedtls/port/ps5sx2_mbedtls_platform.c
+MBEDTLS_FLAGS := -DMBEDTLS_CONFIG_FILE='"ps5sx2_mbedtls_config.h"' -I$(PS5_THIRD)/mbedtls/port -I$(PS5_THIRD)/mbedtls/include
+C_SRCS := $(C_SRCS) $(MBEDTLS_CSRCS)
+
 # The GL build's shims minus glprobe, GLContextPS5 and gl_loader_table; plus the
 # shaderc shim and the Vulkan build's stand-ins for GL-only hooks.
 SHIM_SRCS := ./orbis-shims/ProsperoInput.cpp ./orbis-shims/ProsperoCDVD.cpp \
@@ -312,6 +326,8 @@ SHIM_SRCS := ./orbis-shims/ProsperoInput.cpp ./orbis-shims/ProsperoCDVD.cpp \
   ./orbis-shims/ps5_shaderc.cpp ./orbis-shims/orbis_vk.cpp ./orbis-shims/orbis_eeprof.cpp \
   ./orbis-shims/game_select.cpp ./orbis-shims/orbis_paths.cpp ./orbis-shims/orbis_memprobe.cpp \
   ./orbis-shims/ProsperoKbdMouse.cpp ./orbis-shims/ProsperoNotify.cpp \
+  ./orbis-shims/ProsperoHTTPDownloader.cpp ./orbis-shims/ProsperoHTTPConsole.cpp ./orbis-shims/ProsperoAchievements.cpp \
+  ./orbis-shims/ProsperoAchievementBrowser.cpp \
   ./orbis-shims/orbis_gs_shaders.cpp
 
 SHIM_ASM := ./orbis-shims/ProsperoTLS.S
@@ -321,7 +337,8 @@ SHIM_ASM := ./orbis-shims/ProsperoTLS.S
 FE_DIR := ../frontend
 FE_SRCS := $(FE_DIR)/fe_app.cpp $(FE_DIR)/fe_covers.cpp $(FE_DIR)/fe_games.cpp \
   $(FE_DIR)/fe_renderer.cpp $(FE_DIR)/fe_sound.cpp $(FE_DIR)/fe_text.cpp $(FE_DIR)/fe_vk.cpp $(FE_DIR)/fe_ps5.cpp \
-  $(FE_DIR)/fe_web.cpp $(FE_DIR)/fe_i18n.cpp $(FE_DIR)/fe_settings.cpp $(FE_DIR)/fe_options.cpp
+  $(FE_DIR)/fe_web.cpp $(FE_DIR)/fe_i18n.cpp $(FE_DIR)/fe_settings.cpp $(FE_DIR)/fe_options.cpp \
+  $(FE_DIR)/fe_texpacks.cpp $(FE_DIR)/fe_https.cpp $(FE_DIR)/fe_https_ps5.cpp
 # vk-285-50: Project Nayuki's QR Code generator (MIT, C) for the shelf's QR tile, and the files
 # fe_ps5.cpp embeds from frontend/assets (the settings page, its icons, Font Awesome's brands font).
 FE_CSRCS := $(FE_DIR)/third_party/qrcodegen/qrcodegen.c
@@ -418,6 +435,22 @@ $(OBJDIR)/pcsx2/CDVD/CsoFileReader.o $(OBJDIR)/frontend/fe_games.o: CXXFLAGS += 
 # one of them ended the app the first time the page opened. Warn about any frame over 12 KB in them (vk-285-114: and in
 # fe_settings.cpp, the page's file code the options sheet shares).
 $(OBJDIR)/frontend/fe_web.o $(OBJDIR)/frontend/fe_games.o $(OBJDIR)/frontend/fe_settings.o: CXXFLAGS += -Wframe-larger-than=12288
+# 2026-10-05: libarchive, built with its own config (and zlib's headers) and quietly: it isn't our code to change.
+$(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(LIBARCHIVE_CSRCS)): CFLAGS += -DHAVE_CONFIG_H -I$(PS5_THIRD)/libarchive \
+  $(LIBARCHIVE_INCLUDES) -I$(PS5_THIRD)/zlib -w
+$(OBJDIR)/frontend/fe_texpacks.o: CXXFLAGS += $(LIBARCHIVE_INCLUDES) -Wframe-larger-than=12288
+# 2026-10-05: mbedTLS with its config (warnings on: it builds clean), and the client that uses it.
+$(patsubst $(PCSX2)/%.c,$(OBJDIR)/%.o,$(MBEDTLS_CSRCS)): CFLAGS += $(MBEDTLS_FLAGS) -I$(PS5_THIRD)/mbedtls/library
+$(OBJDIR)/frontend/fe_https.o: CXXFLAGS += $(MBEDTLS_FLAGS) -Wframe-larger-than=12288
+$(OBJDIR)/frontend/fe_https.o: $(FE_DIR)/fe_https_roots.inc
+# 2026-10-05 (AI-assisted), an experiment: ORBIS_IME_IMPORT=1 imports libSceImeDialog (the PS5's keyboard for the
+# RetroAchievements panel) at the app's start instead of loading it when first needed (fe_ps5.cpp). An app whose import
+# the system refuses doesn't start, so it is off by default. The flag isn't a dependency of the object: rebuild it with
+# `make -f Makefile.vk -B obj-vk/frontend/fe_ps5.o ORBIS_IME_IMPORT=1` (and again without, to go back). Needs testing.
+ORBIS_IME_IMPORT ?= 0
+ifeq ($(ORBIS_IME_IMPORT),1)
+$(OBJDIR)/frontend/fe_ps5.o: CXXFLAGS += -DPS5SX2_IME_IMPORT=1
+endif
 
 all: $(OBJS)
 	@echo "VK COMPILE OK: $(words $(OBJS)) objects"
@@ -458,6 +491,18 @@ ORBIS_GS_SHADERS := $(wildcard $(PCSX2)/bin/resources/shaders/vulkan/*.glsl) $(w
 $(OBJDIR)/shim/orbis-shims/orbis_gs_shaders.o: ./orbis-shims/orbis_gs_shaders.cpp ./include-orbis/OrbisGSShaders.h $(ORBIS_GS_SHADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -DORBIS_GS_SHADER_DIR=\"$(abspath $(PCSX2)/bin/resources/shaders)\" -c $< -o $@
+
+# 2026-10-05 (AI-assisted): the notification relay payload (notify-relay/notify_relay.c), built with the payload SDK's
+# own link (it imports libSceNotification) and embedded in ProsperoNotify.o (.incbin): PS5SX2's process can't load
+# libSceNotification on 11.40/12.00, so rich toasts go through the console's ELF loader (see ProsperoNotify.cpp).
+NOTIFY_RELAY_ELF := $(OBJDIR)/notify-relay/notify_relay.elf
+$(NOTIFY_RELAY_ELF): ./notify-relay/notify_relay.c
+	@mkdir -p $(dir $@)
+	$(CC) -Wall -Werror -O2 -o $@ $< -lSceNotification
+	$(PS5_PAYLOAD_SDK)/bin/prospero-strip $@
+$(OBJDIR)/shim/orbis-shims/ProsperoNotify.o: ./orbis-shims/ProsperoNotify.cpp $(NOTIFY_RELAY_ELF)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DORBIS_NOTIFY_RELAY_ELF=\"$(abspath $(NOTIFY_RELAY_ELF))\" -c $< -o $@
 
 # The shaderc shim includes glslang's C interface.
 $(OBJDIR)/shim/orbis-shims/ps5_shaderc.o: ./orbis-shims/ps5_shaderc.cpp

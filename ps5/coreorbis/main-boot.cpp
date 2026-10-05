@@ -34,6 +34,11 @@
 extern volatile unsigned long long g_orbis_map_addr;
 #include "vtlb.h"
 #include "Host.h"
+#ifdef PS5SX2_ACHIEVEMENTS
+#include "Achievements.h" // pr9n: OrbisFlushBeforeExit
+#include "orbis-shims/ProsperoAchievements.h"
+#include "orbis-shims/ProsperoNotify.h" // 2026-10-05: OrbisNotifyHold
+#endif
 #include "common/Error.h"
 #include "common/HostSys.h"
 #include "common/CrashHandler.h"
@@ -298,6 +303,15 @@ static void orbis_install_signal_handlers()
   fatal.sa_sigaction = &CrashHandler::CrashSignalHandler;
   for (const int sig : {SIGABRT, SIGILL, SIGFPE, SIGBUS, SIGTRAP, SIGSYS, SIGXCPU, SIGXFSZ})
     sigaction(sig, &fatal, nullptr);
+  // 2026-10-05 (AI-assisted): SIGSEGV too, for the shelf: the page-fault handler (which hands what it can't map to the
+  // printer) is installed only after the shelf, so a crash there left nothing but the kernel's report in klog (pr9f).
+  // Only while nothing else has SIGSEGV: this function runs again after PageFaultHandler::Install (just before the
+  // game), and pr9h set the printer there over the page-fault handler, so a game's first fastmem fault (its first
+  // write to a GS register, a second in) went to the printer and ended every game.
+  struct sigaction current;
+  memset(&current, 0, sizeof(current));
+  if (sigaction(SIGSEGV, nullptr, &current) == 0 && !(current.sa_flags & SA_SIGINFO) && current.sa_handler == SIG_DFL)
+    sigaction(SIGSEGV, &fatal, nullptr);
   struct sigaction quit;
   memset(&quit, 0, sizeof(quit));
   quit.sa_flags = SA_RESETHAND;
@@ -1019,6 +1033,19 @@ static void orbis_apply_ini_file(MemorySettingsInterface& si, const char* path, 
     trim(val);
     const size_t sl = key.rfind('/');
     if (sl != std::string::npos) { sec = key.substr(0, sl); key = key.substr(sl + 1); }
+    // pr9n (AI-assisted), PR #9 review item 4: nothing in [Achievements] from gs.ini or a game's file (the settings page
+    // writes these files for anyone on the LAN): Achievements/Host would have had the next sign-in send the token to
+    // another server. The account comes from the sign-in and achievements-secrets.ini only.
+    {
+      std::string first = sec.substr(0, sec.find('/'));
+      for (char& c : first)
+        c = static_cast<char>(tolower((unsigned char)c));
+      if (first == "achievements")
+      {
+        printf("[boot] %s %s/%s ignored: RetroAchievements settings come from the sign-in only\n", tag, sec.c_str(), key.c_str());
+        continue;
+      }
+    }
     // vk-285-34: PCSX2's patch and cheat lists ("Patches/Enable=60 FPS" turns on a pnach's [60 FPS]
     // group): each line adds one name, so a game can list several.
     if ((sec == "Patches" || sec == "Cheats") && (key == "Enable" || key == "Disable"))
@@ -1049,6 +1076,9 @@ static void orbis_apply_gs_ini(MemorySettingsInterface& si, bool quiet = false)
   orbis_apply_ini_file(si, "/data/PCSX2/gs.ini", "gs.ini", quiet);
   if (!s_game_ini_path.empty()) // vk-285-32: then the game's own
     orbis_apply_ini_file(si, s_game_ini_path.c_str(), "game ini", quiet);
+#ifdef PS5SX2_ACHIEVEMENTS
+  OrbisAchievementsRestoreAccount(si); // pr9n: the account's keys as the secrets file has them, whatever a merge did
+#endif
 }
 
 // vk-285-64: pcsx2/Memory.cpp's choice of memory for the recompilers' code (the flag file jitdirect).
@@ -1571,6 +1601,20 @@ static void orbis_clock_survey()
 }
 static std::string s_console_info; // "firmware 11.40 · SoC ... · CPU ..." (one line)
 
+// pr9n (AI-assisted): the product part of RetroAchievements' User-Agent (pcsx2/Host.cpp, PR #9 review item 10):
+// "PS5SX2/vk-285-128-pr9n (PS5 11.40)". The firmware is the survey's (orbis_console_survey runs before any RA call).
+std::string OrbisUserAgentProduct()
+{
+  std::string fw = "?";
+  const size_t at = s_console_info.find("firmware ");
+  if (at != std::string::npos)
+  {
+    fw = s_console_info.substr(at + 9);
+    fw = fw.substr(0, fw.find(' '));
+  }
+  return std::string("PS5SX2/") + ORBIS_BUILD_TAG + " (PS5 " + fw + ")";
+}
+
 static std::string orbis_console_survey()
 {
   std::string info;
@@ -1723,6 +1767,12 @@ static void orbis_back_to_menu()
   SPU2::SetOutputPaused(true);
   FileMcd_EmuClose();
   cdvdSaveNVRAM();
+#ifdef PS5SX2_ACHIEVEMENTS
+  // pr9n (AI-assisted), PR #9 review item 9: unlocks and leaderboard entries still being sent went with the process.
+  // Up to 5 s for them (a retry of one that failed included), on this thread, the one that polled them in the game;
+  // a notification says so when they don't make it. Returns at once when nothing is waiting.
+  Achievements::OrbisFlushBeforeExit(5000);
+#endif
   const char* path = "/data/homebrew/PPSA99203/eboot.bin";
   struct stat st{};
   if (stat(path, &st) != 0)
@@ -1789,6 +1839,13 @@ static OrbisFrontendPaths orbis_frontend_paths(bool allow_download)
   fe.allow_download = allow_download;
   fe.sound = !orbis_flag("nomenusound"); // vk-285-47
   fe.settings_log = OrbisLogPath("settings.log"); // vk-285-51
+  // 2026-10-05: HD texture packs from archive.org, in the folder PCSX2 reads them from (EmuFolders::Textures, set below
+  // to /data/PCSX2/textures). Not OrbisDir("textures"): that answers /data/PCSX2 itself when the folder isn't there yet
+  // (Spyros's PS5 had none), and pr9h installed a pack as /data/PCSX2/<serial> where no game looks. The manager makes
+  // the folder when it first needs it.
+  fe.textures_dir = "/data/PCSX2/textures";
+  fe.texture_pack_list = OrbisDir("cache") + "/texture-packs.json";
+  fe.texture_packs = !orbis_flag("notexpacks");
   return fe;
 }
 
@@ -2306,6 +2363,9 @@ int main()
   // screen of their own, before PCSX2 opens the display. Ratchet & Clank when there are none.
   // vk-285-40: after the driver's environment above, because the frontend runs on the same driver.
   extern std::string orbis_select_game(const char* games_dir, const char* top_dir, const char* build_tag);
+#ifdef PS5SX2_ACHIEVEMENTS
+  OrbisAchievementsInit(s_base_si, "/data/PCSX2");
+#endif
   ps5::debug::set_line(2, "game selector...");
 #ifdef ORBIS_VULKAN
   // vk-285-40: the frontend (../frontend/fe_ps5.cpp): the disc images as PS2 cases on a cover-flow
@@ -2333,6 +2393,10 @@ int main()
   orbis_hide_splash();
 #endif
   orbis_boot_log_release("after the shelf"); // vk-285-113
+#ifdef PS5SX2_ACHIEVEMENTS
+  OrbisAchievementsWaitForLogin();
+  OrbisAchievementsStopBrowser(); // pr9n: the shelf's achievement list isn't needed now (was: wait out its requests)
+#endif
   if (!frontend_ran)
     s_game_path = orbis_select_game(OrbisDir("games").c_str(), "/data/PCSX2", ORBIS_BUILD_TAG); // vk-285-33: games/ too
   if (s_game_path.empty())
@@ -2368,6 +2432,9 @@ int main()
       s_game_path.substr(s_game_path.rfind('/') + 1).c_str(), from.c_str(), orbis_ini_summary(s_game_ini_path).c_str(),
       orbis_ini_summary("/data/PCSX2/gs.ini").c_str());
   }
+  // 2026-10-05 (AI-assisted): rich toasts (RetroAchievements' login and game summary) wait for the game's first 12 s:
+  // sent in its first seconds, they showed without their pictures (orbis-shims/ProsperoNotify.cpp, the pacing).
+  OrbisNotifyHold(12);
 #ifdef ORBIS_VULKAN
   if (g_orbis_test_build > 0)
   {
@@ -2422,7 +2489,9 @@ int main()
 
   {
     std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
+#ifndef PS5SX2_ACHIEVEMENTS
     Host::Internal::SetBaseSettingsLayer(&s_base_si);
+#endif
     Host::Internal::SetGameSettingsLayer(&s_game_si, lock);
     Host::Internal::SetInputSettingsLayer(&s_input_si, lock);
   }
@@ -2467,6 +2536,20 @@ int main()
     s_base_si.SetStringValue("USB2", "Type", "hidmouse");
   }
   printf("[boot] USB keyboard and mouse %s\n", orbis_flag("nousbkbm") ? "off (flag nousbkbm)" : "on ports 1 and 2");
+  // 2026-10-05 (AI-assisted; Spyros: the network adapter on for every game, after a tester went online in Resident Evil
+  // Outbreak with SOCOM II's lines): the PS2's network adapter as SOCOM II's file sets it (claude/socom2-online.md):
+  // PCSX2's sockets backend on the console's own connection, its DHCP server giving the game an address, and the DNS the
+  // PS5 uses (pcsx2/DEV9/AdapterUtils.cpp GetDNS). DEV9's receive thread starts only once a game sends (net.cpp), so games
+  // that never use the network don't pay for it. gs.ini, a game's file or the sheet's Network adapter row
+  // (DEV9/Eth/EthEnable=false) turn it off; so does the flag file nonetwork, for every game.
+  if (!orbis_flag("nonetwork"))
+  {
+    s_base_si.SetBoolValue("DEV9/Eth", "EthEnable", true);
+    s_base_si.SetStringValue("DEV9/Eth", "EthApi", "Sockets");
+    s_base_si.SetStringValue("DEV9/Eth", "EthDevice", "Auto");
+    s_base_si.SetBoolValue("DEV9/Eth", "InterceptDHCP", true);
+  }
+  printf("[boot] PS2 network adapter %s\n", orbis_flag("nonetwork") ? "off (flag nonetwork)" : "on by default (sockets, DHCP)");
   {
     // vk-285-109: player 2 (see g_orbis_second_user).
     int32_t first = -1;
@@ -2516,6 +2599,9 @@ int main()
   }
   s_base_pre_gsini = s_base_si; // eerec-285
   orbis_apply_gs_ini(s_base_si);
+#ifdef PS5SX2_ACHIEVEMENTS
+  OrbisAchievementsConfigure(s_base_si);
+#endif
   orbis_usb_kbm_for_mode(s_base_si); // vk-285-113
   orbis_vu1_speed_from(s_base_si); // vk-285-75
   orbis_ps5opts_from(s_base_si); // vk-285-113
@@ -2542,9 +2628,10 @@ int main()
   VMBootParameters params;
   params.filename = s_game_path; // vk-285-30
 
-  // Orbis: no ImGui backend on the PS5 - disable the Achievements host
-  // (its ImGui usage faults without a context).
+  // The PS5 account service uses native notifications instead of ImGui overlays.
+#ifndef PS5SX2_ACHIEVEMENTS
   EmuConfig.Achievements.Enabled = false;
+#endif
   GSConfig.Renderer = (g_use_gl_renderer && !g_sw_renderer) ? ORBIS_GPU_RENDERER : GSRendererType::SW;
   GSConfig.SWExtraThreads = g_sw_renderer ? 4 : 2;
   // EE+IOP+VU recompilers (JIT memory + emitter >4GB fixes in).
@@ -2557,7 +2644,11 @@ int main()
   EmuConfig.Speedhacks.vu1Instant = !g_no_speedhacks;
   EmuConfig.Speedhacks.vuFlagHack = !g_no_speedhacks;
   EmuConfig.Speedhacks.vuThread = false;
+#ifdef PS5SX2_ACHIEVEMENTS
+  printf("[boot] achievements available (softcore, native notifications)\n");
+#else
   printf("[boot] achievements disabled (no ImGui backend)\n");
+#endif
   fflush(stdout);
   printf("[boot] initializing...\n");
   fflush(stdout);

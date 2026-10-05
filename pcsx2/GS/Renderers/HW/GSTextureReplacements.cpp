@@ -158,9 +158,15 @@ namespace GSTextureReplacements
 // match them (and, for a miss whose texture hash is in the pack, which part of the name differs), and
 // whether the files load and reach the GPU. Diagnostics only; needs proper testing.
 #include "OrbisDeferredLog.h"
+#include "OrbisTexturePak.h"
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <fcntl.h>
+#include <memory>
+#include <mutex>
 #include <pthread.h>
+#include <unistd.h>
 // vk-285-112 (GSRenderer.cpp): the loader thread runs on the pin layout's helper CPUs. It starts with its
 // creator's CPUs, the GS thread's, and a 16 MB PNG takes a while to decode.
 void OrbisHelperThreadAdd(pthread_t thread);
@@ -205,6 +211,74 @@ namespace
 		return n;
 	}
 
+	// pr9l (2026-10-05, AI-assisted): the game's one-file pack, <game's texture folder>/replacements.pak (OrbisTexturePak.h,
+	// written by the texture pack manager: a new file costs the PS5 app 10 ms to a second, so a pack of 15,000 files took
+	// most of an hour to unpack as files). Open while its replacements are in use; a replacement in it is named
+	// "ps5pak:<generation>:<offset>:<size>/<its path in the pack>" in s_replacement_texture_filenames, and the PS5's loaders
+	// (ps5/coreorbis/orbis-shims/ProsperoGS.cpp; GSTextureReplacementLoaders.cpp isn't built) read such a name's bytes with
+	// OrbisPakRead. Needs proper testing.
+	struct OrbisPak
+	{
+		int fd = -1;
+		u32 generation = 0;
+		~OrbisPak()
+		{
+			if (fd >= 0)
+				close(fd);
+		}
+	};
+	std::mutex s_orbis_pak_mutex;
+	std::shared_ptr<OrbisPak> s_orbis_pak; // under s_orbis_pak_mutex: the loader thread reads through a copy
+	u32 s_orbis_pak_generation = 0; // the GS thread only
+	constexpr char ORBIS_PAK_PREFIX[] = "ps5pak:";
+	constexpr size_t ORBIS_PAK_PREFIX_LEN = sizeof(ORBIS_PAK_PREFIX) - 1;
+
+	void OrbisPakClose()
+	{
+		std::lock_guard<std::mutex> lock(s_orbis_pak_mutex);
+		s_orbis_pak.reset();
+	}
+
+	bool OrbisPakNumber(const char*& p, char end, unsigned long long& out)
+	{
+		char* stop = nullptr;
+		if (*p < '0' || *p > '9')
+			return false;
+		out = std::strtoull(p, &stop, 10);
+		if (!stop || *stop != end)
+			return false;
+		p = stop + 1;
+		return true;
+	}
+} // namespace
+
+bool OrbisPakName(const std::string& filename)
+{
+	return filename.compare(0, ORBIS_PAK_PREFIX_LEN, ORBIS_PAK_PREFIX) == 0;
+}
+
+// The bytes of a "ps5pak:..." replacement, from the pack open now (false when the game's pack changed since it was named).
+bool OrbisPakRead(const std::string& filename, std::vector<u8>& out)
+{
+	if (!OrbisPakName(filename))
+		return false;
+	const char* p = filename.c_str() + ORBIS_PAK_PREFIX_LEN;
+	unsigned long long generation = 0, offset = 0, size = 0;
+	if (!OrbisPakNumber(p, ':', generation) || !OrbisPakNumber(p, ':', offset) || !OrbisPakNumber(p, '/', size) || size > (1ull << 30))
+		return false;
+	std::shared_ptr<OrbisPak> pak;
+	{
+		std::lock_guard<std::mutex> lock(s_orbis_pak_mutex);
+		pak = s_orbis_pak;
+	}
+	if (!pak || pak->generation != generation)
+		return false;
+	out.resize(static_cast<size_t>(size));
+	return size == 0 || OrbisTexturePak::PreadAll(pak->fd, out.data(), out.size(), offset);
+}
+
+namespace
+{
 	// Once in 5 s at most, when something changed: the counters.
 	void OrbisTexRepReport(bool force)
 	{
@@ -464,6 +538,7 @@ void GSTextureReplacements::ReloadReplacementMap()
 	SyncWorkerThread();
 #ifdef ORBIS_VULKAN
 	s_orbis_game_dir.clear();
+	OrbisPakClose();
 #endif
 
 	// clear out the caches
@@ -529,13 +604,40 @@ void GSTextureReplacements::ReloadReplacementMap()
 	u32 orbis_no_loader = 0, orbis_bad_name = 0;
 	std::string orbis_example_skipped;
 	const auto orbis_t0 = std::chrono::steady_clock::now();
+	// pr9l: the one-file pack beside replacements/ (see OrbisPak above).
+	std::vector<OrbisTexturePak::Entry> orbis_pak_entries;
+	u32 orbis_pak_generation = 0;
+	const std::string orbis_pak_path(Path::Combine(texture_dir, OrbisTexturePak::kFileName));
+	if (const int fd = open(orbis_pak_path.c_str(), O_RDONLY); fd >= 0)
+	{
+		auto pak = std::make_shared<OrbisPak>();
+		pak->fd = fd;
+		std::string error;
+		if (OrbisTexturePak::ReadIndex(fd, orbis_pak_entries, error))
+		{
+			pak->generation = orbis_pak_generation = ++s_orbis_pak_generation;
+			std::lock_guard<std::mutex> lock(s_orbis_pak_mutex);
+			s_orbis_pak = std::move(pak);
+		}
+		else
+		{
+			orbis_pak_entries.clear();
+			OrbisDeferredPrintf("[texrep] %s: %s isn't used: %s\n", s_current_serial.c_str(), orbis_pak_path.c_str(), error.c_str());
+		}
+	}
 #endif
 	if (!FileSystem::FindFiles(replacement_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
 	{
 #ifdef ORBIS_VULKAN
-		OrbisDeferredPrintf("[texrep] %s: no files found in %s\n", s_current_serial.c_str(), replacement_dir.c_str());
-#endif
+		files.clear();
+		if (orbis_pak_entries.empty())
+		{
+			OrbisDeferredPrintf("[texrep] %s: no files found in %s\n", s_current_serial.c_str(), replacement_dir.c_str());
+			return;
+		}
+#else
 		return;
+#endif
 	}
 
 	std::string filename;
@@ -576,6 +678,45 @@ void GSTextureReplacements::ReloadReplacementMap()
 		s_replacement_textures_without_clut_hash.insert(name.value());
 	}
 #ifdef ORBIS_VULKAN
+	// pr9l: the pack's replacements, after the loose files (a loose file of the same name wins). From the last entry back, so
+	// of two entries with one name the later is used, as when the pack was unpacked into files.
+	if (!orbis_pak_entries.empty())
+	{
+		const size_t before = s_replacement_texture_filenames.size();
+		u32 pak_no_loader = 0, pak_bad_name = 0;
+		for (auto it = orbis_pak_entries.rbegin(); it != orbis_pak_entries.rend(); ++it)
+		{
+			const size_t slash = it->name.rfind('/');
+			filename = slash == std::string::npos ? it->name : it->name.substr(slash + 1);
+			if (!GetLoader(filename))
+			{
+				pak_no_loader++;
+				if (orbis_example_skipped.empty())
+					orbis_example_skipped = filename;
+				continue;
+			}
+			std::optional<TextureName> name = ParseReplacementName(filename);
+			if (!name.has_value())
+			{
+				pak_bad_name++;
+				if (orbis_example_skipped.empty())
+					orbis_example_skipped = filename;
+				continue;
+			}
+			s_orbis_texrep.by_tex0.emplace(name->TEX0Hash, name.value());
+			s_replacement_texture_filenames.emplace(name.value(),
+				StringUtil::StdStringFromFormat("%s%u:%llu:%llu/%s", ORBIS_PAK_PREFIX, orbis_pak_generation,
+					static_cast<unsigned long long>(it->offset), static_cast<unsigned long long>(it->size), it->name.c_str()));
+			name->CLUTHash = 0;
+			s_replacement_textures_without_clut_hash.insert(name.value());
+		}
+		orbis_no_loader += pak_no_loader;
+		orbis_bad_name += pak_bad_name;
+		OrbisDeferredPrintf("[texrep] %s: %s: %zu files, %zu replacement textures from it (%u not PNG or DDS, %u not named like a "
+							"replacement)\n",
+			s_current_serial.c_str(), orbis_pak_path.c_str(), orbis_pak_entries.size(), s_replacement_texture_filenames.size() - before,
+			pak_no_loader, pak_bad_name);
+	}
 	OrbisDeferredPrintf("[texrep] %s: %zu replacement textures in %s (%zu files: %u not PNG or DDS, %u not named like a "
 						"replacement%s%s%s); scan %.0f ms; async %d, precache %d, GPU palettes %d, preloading %d\n",
 		s_current_serial.c_str(), s_replacement_texture_filenames.size(), replacement_dir.c_str(), files.size(),
@@ -939,6 +1080,9 @@ void GSTextureReplacements::ClearReplacementTextures()
 {
 	s_replacement_texture_filenames.clear();
 	s_replacement_textures_without_clut_hash.clear();
+#ifdef ORBIS_VULKAN
+	OrbisPakClose(); // a load still running keeps its own reference
+#endif
 
 	std::unique_lock<std::mutex> lock(s_replacement_texture_cache_mutex);
 	s_replacement_texture_cache.clear();

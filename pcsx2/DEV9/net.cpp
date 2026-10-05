@@ -47,8 +47,21 @@ void NetRxThread()
 	}
 }
 
+#ifdef __PROSPERO__
+// PS5 port (2026-10-05, AI-assisted): the network adapter is on for every game (main-boot.cpp), so the receive thread,
+// which wakes every millisecond at the highest priority, starts only when the game first sends a packet. Until then there
+// is nothing to receive: the sockets adapter only answers what the PS2 sent (its DHCP and DNS servers too). Games that
+// never use the network don't run it at all. Starting and stopping happen on the emulation thread (tx_put, TermNet).
+static bool rx_started = false;
+static void StartNetRxThread();
+#endif
+
 void tx_put(NetPacket* pkt)
 {
+#ifdef __PROSPERO__
+	if (!rx_started && RxRunning && nif != nullptr)
+		StartNetRxThread();
+#endif
 	if (nif != nullptr)
 		nif->send(pkt);
 	//pkt must be copied if its not processed by here, since it can be allocated on the callers stack
@@ -104,6 +117,15 @@ void InitNet()
 	nif = na;
 	RxRunning = true;
 
+#ifdef __PROSPERO__
+	rx_started = false; // tx_put starts the thread with the game's first packet
+}
+
+static void StartNetRxThread()
+{
+	rx_started = true;
+	Console.WriteLn("DEV9: the game sent its first packet: starting the receive thread");
+#endif
 	rx_thread = std::thread(NetRxThread);
 
 #ifdef _WIN32
@@ -150,9 +172,20 @@ void TermNet()
 	{
 		RxRunning = false;
 		nif->close();
+#ifdef __PROSPERO__
+		// The game may never have sent anything: then there is no thread to wait for.
+		if (rx_thread.joinable())
+		{
+			Console.WriteLn("DEV9: Waiting for RX-net thread to terminate..");
+			rx_thread.join();
+			Console.WriteLn("DEV9: Done");
+		}
+		rx_started = false;
+#else
 		Console.WriteLn("DEV9: Waiting for RX-net thread to terminate..");
 		rx_thread.join();
 		Console.WriteLn("DEV9: Done");
+#endif
 
 		delete nif;
 		nif = nullptr;

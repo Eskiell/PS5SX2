@@ -3,6 +3,7 @@
 
 #include "AdapterUtils.h"
 
+#include <algorithm>
 #include <bit>
 
 #include "common/Assertions.h"
@@ -608,6 +609,51 @@ std::vector<IP_Address> AdapterUtils::GetDNS(const Adapter* adapter)
 		address = address->Next;
 	}
 
+	return collection;
+}
+#elif defined(__PROSPERO__)
+// PS5 port (2026-10-05, AI-assisted): the console has no /etc/resolv.conf, so the POSIX version below found no DNS server
+// ("Failed to open /etc/resolv.conf") and PCSX2's DHCP gave the PS2 none: a game left on automatic DNS couldn't look up
+// a name. Ask the PS5 for the DNS servers it uses itself (libSceNetCtl). The info codes are the PS4 SDK's (the console's
+// own address 14, primary DNS 17, secondary 18); in case they are numbered from 1 higher, as on the Vita, the code that
+// answers with this adapter's address picks the numbering. Needs proper testing on Wi-Fi and with a manual DNS.
+extern "C" int sceNetCtlInit(void);
+extern "C" int sceNetCtlGetInfo(int code, void* info);
+std::vector<IP_Address> AdapterUtils::GetDNS(const Adapter* adapter)
+{
+	if (adapter == nullptr)
+		return {};
+	(void)sceNetCtlInit(); // already initialised by the frontend: then it says so, which is fine
+	auto ask = [](int code, IP_Address* out) {
+		alignas(8) char info[512] = {}; // SceNetCtlInfo: a union of at most 256 bytes
+		if (sceNetCtlGetInfo(code, info) != 0)
+			return false;
+		info[sizeof(info) - 1] = '\0';
+		return inet_pton(AF_INET, info, out) == 1 && out->integer != 0;
+	};
+	int shift = 0;
+	const std::optional<IP_Address> own = GetAdapterIP(adapter);
+	for (int s = 0; s <= 1 && own.has_value(); s++)
+	{
+		IP_Address ip;
+		if (ask(14 + s, &ip) && ip == own.value())
+		{
+			shift = s;
+			break;
+		}
+	}
+	std::vector<IP_Address> collection;
+	for (int code = 17 + shift; code <= 18 + shift; code++)
+	{
+		IP_Address dns;
+		if (ask(code, &dns) && std::find(collection.begin(), collection.end(), dns) == collection.end())
+			collection.push_back(dns);
+	}
+	if (collection.empty())
+		Console.Error("DEV9: the PS5 named no DNS server (set one in the game, or DEV9/Eth/ModeDNS1=Manual and DNS1)");
+	else
+		Console.WriteLn("DEV9: DNS from the PS5: %u.%u.%u.%u%s", collection[0].bytes[0], collection[0].bytes[1],
+			collection[0].bytes[2], collection[0].bytes[3], collection.size() > 1 ? " and a second one" : "");
 	return collection;
 }
 #elif defined(__POSIX__)

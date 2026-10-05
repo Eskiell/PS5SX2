@@ -20,10 +20,10 @@ CXX=${CXX:-clang++-18}
 CC=${CC:-clang-18}
 mkdir -p "$obj"
 
-flags=(-O1 -g -Wall -Wno-unused-function -I"$fe" -I"$pcsx2/3rdparty/vulkan/include" -I"$pcsx2/3rdparty/libchdr/include"
-  -I"$pcsx2/ps5/third_party/lz4")
+flags=(-O1 -g -Wall -Wno-unused-function -I"$fe" -I"$pcsx2/pcsx2" -I"$pcsx2/3rdparty/vulkan/include" -I"$pcsx2/3rdparty/libchdr/include"
+  -I"$pcsx2/ps5/third_party/lz4" -I"$pcsx2/3rdparty/rapidjson/include" -I"$pcsx2/ps5/third_party/libarchive/libarchive")
 objs=()
-for src in fe_app fe_covers fe_games fe_renderer fe_text fe_vk fe_i18n fe_settings fe_options fe_sound; do
+for src in fe_app fe_covers fe_games fe_renderer fe_text fe_vk fe_i18n fe_settings fe_options fe_sound fe_texpacks; do
   o="$obj/$src.o"
   if [[ ! -f $o || $fe/$src.cpp -nt $o || -n $(find "$fe" -maxdepth 1 -name '*.h' -newer "$o" -print -quit) ]]; then
     "$CXX" -std=c++20 "${flags[@]}" -c "$fe/$src.cpp" -o "$o"
@@ -33,6 +33,14 @@ done
 "$CC" -O1 -I"$fe/third_party/qrcodegen" -c "$fe/third_party/qrcodegen/qrcodegen.c" -o "$obj/qrcodegen.o"
 "$CC" -O1 -c "$pcsx2/ps5/third_party/lz4/lz4.c" -o "$obj/lz4.o"
 "$CC" -O1 -I"$pcsx2/3rdparty/libchdr/include" -c "$here/chd_stub.c" -o "$obj/chd_stub.o"
+# 2026-10-05: the vendored libarchive (its Linux config), for the texture packs (fe_texpacks.cpp).
+la="$pcsx2/ps5/third_party/libarchive"
+la_objs=()
+for c in "$la"/libarchive/*.c; do
+  o="$obj/la_$(basename "$c" .c).o"
+  [[ -f $o && ! $c -nt $o ]] || "$CC" -O1 -w -DHAVE_CONFIG_H -I"$la" -I"$la/libarchive" -c "$c" -o "$o"
+  la_objs+=("$o")
+done
 "$CXX" -std=c++20 "${flags[@]}" -c "$here/fe_host.cpp" -o "$obj/fe_host.o"
-"$CXX" -o "$here/fe_host" "$obj/fe_host.o" "${objs[@]}" "$obj/qrcodegen.o" "$obj/lz4.o" "$obj/chd_stub.o" -lz -ldl -lpthread
+"$CXX" -o "$here/fe_host" "$obj/fe_host.o" "${objs[@]}" "$obj/qrcodegen.o" "$obj/lz4.o" "$obj/chd_stub.o" "${la_objs[@]}" -lz -ldl -lpthread
 echo "built $here/fe_host"
