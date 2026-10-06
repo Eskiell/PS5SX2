@@ -203,6 +203,10 @@ Earn [RetroAchievements](https://retroachievements.org) as you play. It's softco
 - **A dropped connection:** unlocks are retried. Going back to the shelf waits up to 5 seconds for any still being sent, and a notification says if one couldn't be.
 - **Your disc has to be a version RetroAchievements knows.** One it doesn't recognise gets no achievements.
 
+## Slow games
+
+If a game runs slower than it should, [PERFORMANCE.md](PERFORMANCE.md) shows how to read the info box to find what's holding it back, which settings to change for it, and how to report it if that doesn't help.
+
 ## Tested consoles
 
 PS5SX2 is developed on a PS5 Pro. Testers ran the first test builds on other consoles too:
@@ -339,7 +343,7 @@ How to read the table:
 
 ## Known limitations
 
-- **Some games are too heavy for 6x on a regular PS5.** [Tested games](#tested-games) shows what ran at full speed where.
+- **Some games are too heavy for 6x on a regular PS5.** [Tested games](#tested-games) shows what ran at full speed where, and [PERFORMANCE.md](PERFORMANCE.md) what to change for a slow game.
 - **RetroAchievements is softcore only:** hardcore mode isn't available.
 - **USB keyboard and mouse don't work on firmware 11.x and 12.00** yet. [The keyboard and mouse section](#usb-keyboard-and-mouse) has the details.
 - **Restart needed for a few settings:** the renderer and MTVU only change when the game restarts.
